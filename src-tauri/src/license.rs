@@ -179,6 +179,14 @@ pub struct LicenseStatus {
     #[serde(default)]
     pub blocked_by: String,
 
+    /// Server-issued key (HORMA-…). Used as Bearer token for the hosted proxy.
+    #[serde(default)]
+    pub license_key: String,
+
+    /// True when entitlement was verified against the hosted API.
+    #[serde(default)]
+    pub hosted: bool,
+
     /// True when usage limits are bypassed (dev / env flag). Not persisted.
     #[serde(default, skip_serializing_if = "is_false")]
     pub limits_disabled: bool,
@@ -198,9 +206,9 @@ impl Default for LicenseStatus {
             email: String::new(),
             token_budget: 5_500_000,
             tokens_used: 0,
-            top_up_url: "https://hormachuelos.com/#/pricing".into(),
+            top_up_url: "https://hormachuelos.vercel.app/#/pricing".into(),
             message:
-                "Free / BYOK mode. Subscribe with GCash when ready — live billing coming soon."
+                "Free / BYOK mode. Buy a plan at hormachuelos.vercel.app for hosted models, or paste your own provider key."
                     .into(),
             window_4h_used: 0,
             window_4h_started_at: String::new(),
@@ -211,11 +219,46 @@ impl Default for LicenseStatus {
             window_week_budget: 0,
             window_week_resets_at: String::new(),
             blocked_by: String::new(),
+            license_key: String::new(),
+            hosted: false,
             limits_disabled: false,
         };
         s.refresh_rate_windows();
         s
     }
+}
+
+/// Public hosted API origin (Vercel). Override with `AI_FORGE_HOSTED_API`.
+pub fn hosted_api_base() -> String {
+    std::env::var("AI_FORGE_HOSTED_API")
+        .ok()
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "https://hormachuelos.vercel.app".into())
+}
+
+pub fn hosted_chat_base_url() -> String {
+    format!("{}/api/v1", hosted_api_base())
+}
+
+/// When true, agent runs should call the Hormachuelos proxy with the license key.
+pub fn should_use_hosted(status: &LicenseStatus) -> bool {
+    if !status.hosted || status.license_key.trim().is_empty() {
+        return false;
+    }
+    if !status.active || status.plan.eq_ignore_ascii_case("free") {
+        return false;
+    }
+    if usage_limits_disabled() {
+        return true;
+    }
+    if status.token_budget > 0 && status.tokens_used >= status.token_budget {
+        return false;
+    }
+    if status.is_rate_blocked() {
+        return false;
+    }
+    true
 }
 
 impl LicenseStatus {
@@ -423,28 +466,137 @@ impl LicenseStatus {
     }
 }
 
-/// Activate / update from a license key string (placeholder until server exists).
-pub fn apply_license_key(key: &str) -> Result<LicenseStatus> {
-    with_license_lock(|| {
-        let key = key.trim();
-        let mut status = LicenseStatus::load_unlocked().unwrap_or_default();
-        if key.is_empty() {
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HostedActivateResponse {
+    #[allow(dead_code)]
+    ok: Option<bool>,
+    plan: Option<String>,
+    active: Option<bool>,
+    expires_at: Option<String>,
+    email: Option<String>,
+    token_budget: Option<u64>,
+    tokens_used: Option<u64>,
+    license_key: Option<String>,
+    top_up_url: Option<String>,
+    message: Option<String>,
+    #[allow(dead_code)]
+    hosted: Option<bool>,
+    error: Option<String>,
+}
+
+/// Activate / refresh a license against the hosted Hormachuelos API.
+pub async fn apply_license_key(key: &str) -> Result<LicenseStatus> {
+    let key = key.trim().to_string();
+    if key.is_empty() {
+        return with_license_lock(|| {
+            let mut status = LicenseStatus::load_unlocked().unwrap_or_default();
             status.message = "Paste a license key from your GCash checkout receipt.".into();
             status.save_unlocked()?;
-            return Ok(status);
+            Ok(status.for_api())
+        });
+    }
+
+    let url = format!("{}/api/license/activate", hosted_api_base());
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()?;
+    let response = client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({ "key": key }))
+        .send()
+        .await;
+
+    match response {
+        Ok(res) => {
+            let status_code = res.status();
+            let body = match res.json::<HostedActivateResponse>().await {
+                Ok(b) => b,
+                Err(_) => HostedActivateResponse {
+                    ok: None,
+                    plan: None,
+                    active: None,
+                    expires_at: None,
+                    email: None,
+                    token_budget: None,
+                    tokens_used: None,
+                    license_key: None,
+                    top_up_url: None,
+                    message: None,
+                    hosted: None,
+                    error: Some(format!("License server returned {status_code}")),
+                },
+            };
+            if status_code.is_success() && body.active.unwrap_or(false) {
+                return with_license_lock(|| {
+                    let mut status = LicenseStatus::load_unlocked().unwrap_or_default();
+                    status.license_key = body.license_key.unwrap_or(key.clone());
+                    status.plan = body.plan.unwrap_or_else(|| "pro".into());
+                    status.active = true;
+                    status.hosted = true;
+                    status.email = body.email.unwrap_or_default();
+                    status.token_budget = body
+                        .token_budget
+                        .unwrap_or_else(|| plan_budget(&status.plan));
+                    status.tokens_used = body.tokens_used.unwrap_or(0);
+                    status.expires_at = body.expires_at.unwrap_or_else(|| expires_in_days(30));
+                    status.top_up_url = body
+                        .top_up_url
+                        .unwrap_or_else(|| format!("{}/#/pricing", hosted_api_base()));
+                    status.message = body.message.unwrap_or_else(|| {
+                        "Hosted plan activated. Models run through Hormachuelos server.".into()
+                    });
+                    status.reset_windows_fresh();
+                    status.save_unlocked()?;
+                    Ok(status.for_api())
+                });
+            }
+            let err = body
+                .error
+                .or(body.message)
+                .unwrap_or_else(|| "License activation failed.".into());
+            // Fall through to local test keys only when explicitly enabled.
+            if !local_test_licenses_enabled() {
+                return with_license_lock(|| {
+                    let mut status = LicenseStatus::load_unlocked().unwrap_or_default();
+                    status.license_key = key;
+                    status.hosted = false;
+                    status.active = status.plan.eq_ignore_ascii_case("free");
+                    status.message = err;
+                    status.save_unlocked()?;
+                    Ok(status.for_api())
+                });
+            }
         }
-        // Prefix-only keys are intentionally restricted to explicit local
-        // testing. Production builds must use a server-verified or signed
-        // entitlement rather than trusting a user-editable desktop file.
-        let local_test_keys_enabled = cfg!(debug_assertions)
-            && std::env::var("AI_FORGE_ENABLE_TEST_LICENSES").as_deref() == Ok("1");
-        if !local_test_keys_enabled {
-            status.message = "Online license verification is not configured yet. Continuing in Free / BYOK mode; no paid entitlement was granted.".into();
-            status.save_unlocked()?;
-            return Ok(status);
+        Err(e) => {
+            if !local_test_licenses_enabled() {
+                return with_license_lock(|| {
+                    let mut status = LicenseStatus::load_unlocked().unwrap_or_default();
+                    status.message = format!(
+                        "Could not reach license server ({e}). Check your network, or use BYOK in Settings."
+                    );
+                    status.save_unlocked()?;
+                    Ok(status.for_api())
+                });
+            }
         }
+    }
+
+    apply_license_key_local(&key)
+}
+
+fn local_test_licenses_enabled() -> bool {
+    cfg!(debug_assertions) && std::env::var("AI_FORGE_ENABLE_TEST_LICENSES").as_deref() == Ok("1")
+}
+
+/// Dev-only prefix activation (requires AI_FORGE_ENABLE_TEST_LICENSES=1).
+fn apply_license_key_local(key: &str) -> Result<LicenseStatus> {
+    with_license_lock(|| {
+        let mut status = LicenseStatus::load_unlocked().unwrap_or_default();
         let upper = key.to_ascii_uppercase();
-        // Check Pro+ before Pro (prefix overlap)
+        status.license_key = key.to_string();
+        status.hosted = false;
         if upper.starts_with("HORMA-MAX20") {
             status.plan = "max20".into();
             status.active = true;
@@ -452,7 +604,7 @@ pub fn apply_license_key(key: &str) -> Result<LicenseStatus> {
             status.tokens_used = 0;
             status.expires_at = expires_in_days(30);
             status.message =
-                "Max 20× plan activated (local). 20× usage vs Pro · lean 80/20 · 30 days · 4h + weekly limits.".into();
+                "Max 20× plan activated (local test). 20× usage vs Pro · 30 days.".into();
             status.reset_windows_fresh();
         } else if upper.starts_with("HORMA-MAX10") {
             status.plan = "max10".into();
@@ -461,7 +613,7 @@ pub fn apply_license_key(key: &str) -> Result<LicenseStatus> {
             status.tokens_used = 0;
             status.expires_at = expires_in_days(30);
             status.message =
-                "Max 10× plan activated (local). 10× usage vs Pro · lean 80/20 · 30 days · 4h + weekly limits.".into();
+                "Max 10× plan activated (local test). 10× usage vs Pro · 30 days.".into();
             status.reset_windows_fresh();
         } else if upper.starts_with("HORMA-MAX")
             || upper.starts_with("HORMA-ULTRA")
@@ -473,7 +625,7 @@ pub fn apply_license_key(key: &str) -> Result<LicenseStatus> {
             status.tokens_used = 0;
             status.expires_at = expires_in_days(30);
             status.message =
-                "Max 5× plan activated (local). 5× usage vs Pro · lean 80/20 · 30 days · 4h + weekly limits.".into();
+                "Max 5× plan activated (local test). 5× usage vs Pro · 30 days.".into();
             status.reset_windows_fresh();
         } else if upper.starts_with("HORMA-PROPLUS")
             || upper.starts_with("HORMA-PRO+")
@@ -486,39 +638,42 @@ pub fn apply_license_key(key: &str) -> Result<LicenseStatus> {
             status.tokens_used = 0;
             status.expires_at = expires_in_days(30);
             status.message =
-                "Pro+ plan activated (local). ~2.5× usage vs Pro · lean 80/20 · 30 days · 4h + weekly limits."
-                    .into();
+                "Pro+ plan activated (local test). ~2.5× usage vs Pro · 30 days.".into();
             status.reset_windows_fresh();
         } else if upper.starts_with("HORMA-PRO")
             || upper.starts_with("HORMA-STARTER")
             || upper.starts_with("HORMA-15")
             || upper.starts_with("HORMA-FIFTEEN")
             || upper.starts_with("HORMA-599")
+            || upper.starts_with("HORMA-")
         {
             status.plan = "pro".into();
             status.active = true;
             status.token_budget = plan_budget("pro");
             status.tokens_used = 0;
             status.expires_at = expires_in_days(30);
-            status.message =
-                "Pro plan activated (local). Generous usage · lean 80/20 · 30 days · 4h + weekly limits.".into();
-            status.reset_windows_fresh();
-        } else if upper.starts_with("HORMA-") {
-            status.plan = "pro".into();
-            status.active = true;
-            status.token_budget = plan_budget("pro");
-            status.tokens_used = 0;
-            status.expires_at = expires_in_days(30);
-            status.message =
-                "Pro plan activated (local). Connect PayMongo to verify online.".into();
+            status.message = "Pro plan activated (local test). Generous usage · 30 days.".into();
             status.reset_windows_fresh();
         } else {
             status.message =
-                "Unrecognized key. Use the key from hormachuelos.com after GCash payment.".into();
+                "Unrecognized key. Buy a plan at hormachuelos.vercel.app then paste the key here."
+                    .into();
         }
         status.save_unlocked()?;
         Ok(status.for_api())
     })
+}
+
+/// Refresh hosted usage counters from the server (best-effort).
+pub async fn refresh_from_server() -> Result<LicenseStatus> {
+    let key = with_license_lock(|| {
+        let s = LicenseStatus::load_unlocked().unwrap_or_default();
+        Ok(s.license_key)
+    })?;
+    if key.trim().is_empty() {
+        return LicenseStatus::load().map(|s| s.for_api());
+    }
+    apply_license_key(&key).await
 }
 
 /// Persist token burn against the active license (account-wide, not per project).

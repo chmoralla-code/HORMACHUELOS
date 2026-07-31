@@ -117,6 +117,10 @@ export const api = {
   setApiKey: (provider: string, key: string): Promise<void> => invoke("set_api_key", { provider, key }),
   hasApiKey: (provider: string): Promise<boolean> => invoke("has_api_key", { provider }),
   clearApiKey: (provider: string): Promise<void> => invoke("clear_api_key", { provider }),
+  setWebsiteSession: (token: string): Promise<void> => invoke("set_website_session", { token }),
+  getWebsiteSession: (): Promise<string | null> => invoke("get_website_session"),
+  clearWebsiteSession: (): Promise<void> => invoke("clear_website_session"),
+  openExternalUrl: (url: string): Promise<void> => invoke("open_external_url", { url }),
   respondToQuestion: (answer: string, sessionId: string): Promise<void> =>
     invoke("respond_to_question", { answer, sessionId }),
   respondToConfirm: (approved: boolean, sessionId: string): Promise<void> =>

@@ -234,9 +234,7 @@ pub async fn list_cursor_models(api_key: &str) -> Result<Vec<String>> {
         .stdin
         .take()
         .ok_or_else(|| anyhow!("Cursor bridge stdin missing"))?;
-    stdin
-        .write_all(format!("{request}\n").as_bytes())
-        .await?;
+    stdin.write_all(format!("{request}\n").as_bytes()).await?;
     stdin.flush().await?;
     drop(stdin);
 

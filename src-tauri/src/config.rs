@@ -299,6 +299,39 @@ pub fn delete_api_key(provider: &str) -> Result<()> {
     Ok(())
 }
 
+fn website_session_entry() -> Result<keyring::Entry> {
+    Ok(keyring::Entry::new("ai-forge", "website_session")?)
+}
+
+pub fn store_website_session(token: &str) -> Result<()> {
+    let token = token.trim();
+    ensure!(
+        (16..=4096).contains(&token.len()),
+        "Session token must be between 16 and 4096 characters."
+    );
+    ensure!(
+        !token.chars().any(char::is_control),
+        "Session token cannot contain control characters."
+    );
+    website_session_entry()?.set_password(token)?;
+    Ok(())
+}
+
+pub fn load_website_session() -> Result<String> {
+    Ok(website_session_entry()?.get_password()?)
+}
+
+pub fn has_website_session() -> bool {
+    load_website_session()
+        .map(|t| !t.trim().is_empty())
+        .unwrap_or(false)
+}
+
+pub fn clear_website_session() -> Result<()> {
+    let _ = website_session_entry()?.delete_credential();
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{validate_provider_id, Settings};

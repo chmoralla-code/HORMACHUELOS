@@ -1,0 +1,12 @@
+downloads/**
+videos/**
+scripts/**
+tests/**
+test-results/**
+playwright.config.js
+README.md
+**/*.mp4
+**/*.msi
+**/*.exe
+**/*.zip
+.tmp/**

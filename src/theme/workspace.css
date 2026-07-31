@@ -773,6 +773,63 @@
 
 .modal { width: min(620px, 92vw); background: var(--panel); border-color: var(--border-strong); border-radius: var(--radius-lg); }
 .modal-overlay { background: rgba(4, 5, 4, 0.76); backdrop-filter: blur(6px); }
+
+.auth-gate-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 5000;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background:
+    radial-gradient(1200px 600px at 20% 0%, rgba(180, 90, 40, 0.18), transparent 55%),
+    rgba(8, 9, 8, 0.92);
+  backdrop-filter: blur(10px);
+}
+.auth-gate-card {
+  width: min(440px, 100%);
+  padding: 28px 26px 24px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.auth-gate-brand {
+  font-size: 0.72rem;
+  letter-spacing: 0.16em;
+  font-weight: 700;
+  color: var(--text-2);
+}
+.auth-gate-title {
+  margin: 0;
+  font-size: 1.45rem;
+  letter-spacing: -0.03em;
+}
+.auth-gate-sub,
+.auth-gate-status,
+.auth-gate-hint {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 0.92rem;
+  line-height: 1.45;
+}
+.auth-gate-code {
+  font-size: 1.35rem;
+  letter-spacing: 0.14em;
+  font-weight: 700;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--elevated);
+  text-align: center;
+}
+.auth-gate-card .btn {
+  margin-top: 4px;
+  width: 100%;
+}
 .provider-card.active { border-color: var(--border-ember); background: var(--ember-soft); }
 
 .toast { position: fixed; right: 18px; bottom: 18px; z-index: 200; max-width: 380px; padding: 11px 14px; background: var(--elevated); border: 1px solid var(--border-ember); border-radius: var(--radius-sm); color: var(--text); box-shadow: 0 16px 42px rgba(0,0,0,0.35); }

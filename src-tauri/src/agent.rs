@@ -347,10 +347,12 @@ pub async fn run_loop(
     }
 
     // Cursor Cloud API has no /chat/completions — use the local Cursor SDK agent.
-    if uses_cursor_sdk(&settings.provider) {
+    // Hosted plans route through the OpenAI-compatible proxy instead (OpenRouter).
+    let license_preview = crate::license::LicenseStatus::load().unwrap_or_default();
+    if uses_cursor_sdk(&settings.provider) && !crate::license::should_use_hosted(&license_preview) {
         let key = crate::config::load_cursor_sdk_api_key(&settings.provider).map_err(|e| {
             anyhow::anyhow!(
-                "No API key for '{}': {}. Save a Cursor API key (crsr_…) in Settings.",
+                "No API key for '{}': {}. Save a Cursor API key (crsr_…) in Settings, or activate a hosted plan.",
                 settings.provider,
                 e
             )
@@ -393,22 +395,30 @@ Current user request:\n{prompt}",
     }
     let mut routed_auth_tool = integration_chat::auth_tool_for_prompt(&prompt);
     let auth_request_routed = routed_auth_tool.is_some();
-    let key = if provider_needs_key(&settings.provider) {
-        crate::config::load_api_key(&settings.provider).map_err(|e| {
+    let license = crate::license::LicenseStatus::load().unwrap_or_default();
+    let use_hosted = crate::license::should_use_hosted(&license);
+    let (key, base_url_override) = if use_hosted {
+        (
+            license.license_key.clone(),
+            Some(crate::license::hosted_chat_base_url()),
+        )
+    } else if provider_needs_key(&settings.provider) {
+        let key = crate::config::load_api_key(&settings.provider).map_err(|e| {
             anyhow::anyhow!(
-                "No API key for '{}': {}. Set it in Settings.",
+                "No API key for '{}': {}. Set it in Settings, or activate a hosted plan from hormachuelos.vercel.app.",
                 settings.provider,
                 e
             )
-        })?
+        })?;
+        (key, settings.base_url.clone())
     } else {
-        String::new()
+        (String::new(), settings.base_url.clone())
     };
 
     let provider = build_provider(
         &settings.provider,
         &key,
-        settings.base_url.as_deref(),
+        base_url_override.as_deref(),
         &settings.model,
     )?;
     let tool_schemas =

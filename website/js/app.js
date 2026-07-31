@@ -1,24 +1,29 @@
 /**
- * Hormachuelos marketing site — client-side SPA (localStorage mock auth + billing).
+ * Hormachuelos marketing site — SPA with server auth (email/password, no email magic links).
  * Temporary PHP prices. GCash-first checkout demo (no real payment gateway yet).
  */
 
 const STORAGE_USER = "horma:user";
-const STORAGE_USERS = "horma:users";
+const STORAGE_TOKEN = "horma:token";
+const STORAGE_ADMIN = "horma:admin";
 const STORAGE_ORDERS = "horma:orders";
 
-/** Desktop installer files served from /website/downloads (copy after `npm run desktop:build`). */
+/** Public assets hosted on Supabase Storage (keeps Vercel deploy under size limits). */
+const ASSET_BASE =
+  "https://mketkzycxmtvgdbwzsvh.supabase.co/storage/v1/object/public/public-assets";
+
+/** Desktop installer files (uploaded to Supabase after `npm run desktop:build`). */
 const DESKTOP_DOWNLOADS = {
   version: "0.1.0",
   windows: {
     msi: {
       label: "Windows installer (MSI)",
-      href: "./downloads/Hormachuelos_0.1.0_x64_en-US.msi",
+      href: `${ASSET_BASE}/downloads/Hormachuelos_0.1.0_x64_en-US.msi`,
       file: "Hormachuelos_0.1.0_x64_en-US.msi",
     },
     setup: {
       label: "Windows setup (EXE)",
-      href: "./downloads/Hormachuelos_0.1.0_x64-setup.exe",
+      href: `${ASSET_BASE}/downloads/Hormachuelos_0.1.0_x64-setup.exe`,
       file: "Hormachuelos_0.1.0_x64-setup.exe",
     },
   },
@@ -190,26 +195,90 @@ function getSessionUser() {
   return loadJSON(STORAGE_USER, null);
 }
 
-function setSessionUser(user) {
+function getSessionToken() {
+  return localStorage.getItem(STORAGE_TOKEN) || "";
+}
+
+function setSessionUser(user, token) {
   if (user) saveJSON(STORAGE_USER, user);
   else localStorage.removeItem(STORAGE_USER);
+  if (token) localStorage.setItem(STORAGE_TOKEN, token);
+  if (!user) localStorage.removeItem(STORAGE_TOKEN);
 }
 
-function getUsers() {
-  return loadJSON(STORAGE_USERS, []);
+function authHeaders(extra = {}) {
+  const token = getSessionToken();
+  const headers = { Accept: "application/json", ...extra };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return headers;
 }
 
-function upsertUser(user) {
-  const users = getUsers();
-  const i = users.findIndex((u) => u.email === user.email);
-  if (i >= 0) users[i] = user;
-  else users.push(user);
-  saveJSON(STORAGE_USERS, users);
-  return user;
+async function apiAuth(path, { method = "GET", body } = {}) {
+  const res = await fetch(path, {
+    method,
+    headers: authHeaders(body ? { "Content-Type": "application/json" } : {}),
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(data.error || `Request failed (${res.status})`);
+    err.code = data.code;
+    err.email = data.email;
+    err.status = res.status;
+    throw err;
+  }
+  return data;
 }
 
-function findUser(email) {
-  return getUsers().find((u) => u.email.toLowerCase() === email.toLowerCase()) || null;
+async function refreshSessionUser() {
+  if (!getSessionToken()) return null;
+  try {
+    const data = await apiAuth("/api/auth/me");
+    setSessionUser(data.user, getSessionToken());
+    if (Array.isArray(data.orders)) saveJSON(STORAGE_ORDERS, data.orders);
+    return data.user;
+  } catch {
+    setSessionUser(null);
+    return null;
+  }
+}
+
+function desktopCodeFromQuery() {
+  const dcode = queryOf().get("dcode") || queryOf().get("desktop_code");
+  if (dcode) return String(dcode).trim().toUpperCase();
+  // Legacy: code=ABCD-EFGH (not a 6-digit email OTP)
+  const code = String(queryOf().get("code") || "").trim().toUpperCase();
+  if (/^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(code)) return code;
+  return "";
+}
+
+function isDesktopLinkFlow() {
+  return queryOf().get("desktop") === "1" || Boolean(desktopCodeFromQuery());
+}
+
+function withDesktopParams(path) {
+  const code = desktopCodeFromQuery();
+  if (!isDesktopLinkFlow()) return path;
+  const base = path.startsWith("/") ? path : `/${path}`;
+  const join = base.includes("?") ? "&" : "?";
+  return `${base}${join}desktop=1${code ? `&dcode=${encodeURIComponent(code)}` : ""}`;
+}
+
+async function finishDesktopLinkIfNeeded() {
+  const code = desktopCodeFromQuery();
+  if (!code || !getSessionToken()) return false;
+  try {
+    const data = await apiAuth("/api/auth/device-complete", {
+      method: "POST",
+      body: { code },
+    });
+    toast(data.message || "Desktop app linked");
+    navigate("/desktop-linked");
+    return true;
+  } catch (ex) {
+    toast(String(ex.message || ex));
+    return false;
+  }
 }
 
 function getOrders() {
@@ -258,9 +327,13 @@ const routes = {
   "/pricing": renderPricing,
   "/login": renderLogin,
   "/signup": renderSignup,
+  "/verify": renderVerify,
+  "/desktop-linked": renderDesktopLinked,
   "/dashboard": renderDashboard,
+  "/admin": renderAdmin,
   "/checkout": renderCheckout,
   "/download": renderDownload,
+  "/update": renderUpdate,
   "/faq": renderFaq,
   "/support": renderSupport,
   "/terms": () => renderLegal("Terms of Service", TERMS),
@@ -337,7 +410,12 @@ function updateHeader() {
     out.type = "button";
     out.className = "btn btn-sm btn-ghost";
     out.textContent = "Log out";
-    out.addEventListener("click", () => {
+    out.addEventListener("click", async () => {
+      try {
+        await apiAuth("/api/auth/logout", { method: "POST" });
+      } catch {
+        /* ignore network errors on logout */
+      }
       setSessionUser(null);
       toast("Logged out");
       navigate("/");
@@ -405,7 +483,7 @@ function renderHome() {
             poster=""
             aria-label="Hormachuelos software demo"
           >
-            <source src="./videos/hormachuelos-demo-ad.mp4" type="video/mp4" />
+            <source src="${ASSET_BASE}/videos/hormachuelos-demo-ad.mp4" type="video/mp4" />
             Your browser does not support video playback.
           </video>
         </figure>
@@ -623,12 +701,17 @@ function renderPricing() {
 }
 
 function renderLogin() {
-  const next = queryOf().get("next") || "/dashboard";
+  const next = queryOf().get("next") || (isDesktopLinkFlow() ? "/desktop-linked" : "/dashboard");
+  const deskCode = desktopCodeFromQuery();
   const wrap = page(`
     <div class="auth-wrap container">
       <div class="auth-card">
         <h1>Log in</h1>
-        <p class="sub">Access your plan, credits, and orders.</p>
+        <p class="sub">${
+          isDesktopLinkFlow()
+            ? `Sign in to unlock the desktop app${deskCode ? ` · code <strong class="mono">${escapeHtml(deskCode)}</strong>` : ""}.`
+            : "Access your plan, credits, and orders."
+        }</p>
         <form id="login-form" novalidate>
           <div class="field">
             <label for="login-email">Email</label>
@@ -642,38 +725,67 @@ function renderLogin() {
           <button class="btn btn-primary btn-block" type="submit">Log in</button>
         </form>
         <div class="divider">or</div>
-        <p class="auth-foot">New here? <a href="#/signup">Create an account</a></p>
+        <p class="auth-foot">New here? <a href="#${withDesktopParams("/signup")}">Create an account</a></p>
       </div>
     </div>
   `);
 
-  wrap.querySelector("#login-form").addEventListener("submit", (e) => {
+  // Already signed in from a previous tab — finish desktop link immediately.
+  if (isDesktopLinkFlow() && getSessionToken()) {
+    queueMicrotask(() => {
+      void finishDesktopLinkIfNeeded();
+    });
+  }
+
+  wrap.querySelector("#login-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const email = wrap.querySelector("#login-email").value.trim();
     const password = wrap.querySelector("#login-password").value;
     const err = wrap.querySelector("#login-error");
-    const user = findUser(email);
-    if (!user || user.password !== password) {
+    const btn = wrap.querySelector('button[type="submit"]');
+    err.hidden = true;
+    btn.disabled = true;
+    btn.textContent = "Signing in…";
+    try {
+      const data = await apiAuth("/api/auth/login", {
+        method: "POST",
+        body: { email, password },
+      });
+      setSessionUser(data.user, data.token);
+      toast(`Welcome back, ${data.user.name || data.user.email}`);
+      if (await finishDesktopLinkIfNeeded()) return;
+      navigate(next.startsWith("/") ? next : `/${next}`);
+    } catch (ex) {
+      if (ex.code === "email_unverified") {
+        toast("Verify your email first");
+        navigate(
+          withDesktopParams(
+            `/verify?email=${encodeURIComponent(ex.email || email)}&next=${encodeURIComponent(next)}`,
+          ),
+        );
+        return;
+      }
       err.hidden = false;
-      err.textContent = "Invalid email or password.";
-      return;
+      err.textContent = String(ex.message || "Invalid email or password.");
+      btn.disabled = false;
+      btn.textContent = "Log in";
     }
-    const { password: _, ...session } = user;
-    setSessionUser(session);
-    toast(`Welcome back, ${session.name || session.email}`);
-    navigate(next.startsWith("/") ? next : `/${next}`);
   });
 
   return wrap;
 }
 
 function renderSignup() {
-  const next = queryOf().get("next") || "/pricing";
+  const next = queryOf().get("next") || (isDesktopLinkFlow() ? "/desktop-linked" : "/pricing");
   const wrap = page(`
     <div class="auth-wrap container">
       <div class="auth-card">
         <h1>Create account</h1>
-        <p class="sub">Free to join. Upgrade anytime with GCash.</p>
+        <p class="sub">${
+          isDesktopLinkFlow()
+            ? "Create an account to unlock the Hormachuelos desktop app."
+            : "Free to join. Upgrade anytime with GCash."
+        }</p>
         <form id="signup-form" novalidate>
           <div class="field">
             <label for="su-name">Name</label>
@@ -686,124 +798,599 @@ function renderSignup() {
           <div class="field">
             <label for="su-password">Password</label>
             <input id="su-password" name="password" type="password" autocomplete="new-password" required minlength="6" placeholder="Min. 6 characters" />
-            <div class="hint">Demo only — stored in this browser (localStorage).</div>
+            <div class="hint">We'll email a code from HORMACHUELOS to confirm you're real (stops spam signups).</div>
           </div>
           <div class="field-error" id="signup-error" hidden></div>
           <button class="btn btn-primary btn-block" type="submit">Sign up</button>
         </form>
-        <p class="auth-foot" style="margin-top:18px">Already have an account? <a href="#/login">Log in</a></p>
+        <p class="auth-foot" style="margin-top:18px">Already have an account? <a href="#${withDesktopParams("/login")}">Log in</a></p>
       </div>
     </div>
   `);
 
-  wrap.querySelector("#signup-form").addEventListener("submit", (e) => {
+  wrap.querySelector("#signup-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const name = wrap.querySelector("#su-name").value.trim();
     const email = wrap.querySelector("#su-email").value.trim();
     const password = wrap.querySelector("#su-password").value;
     const err = wrap.querySelector("#signup-error");
-    if (findUser(email)) {
-      err.hidden = false;
-      err.textContent = "An account with that email already exists.";
-      return;
-    }
+    const btn = wrap.querySelector('button[type="submit"]');
+    err.hidden = true;
     if (password.length < 6) {
       err.hidden = false;
       err.textContent = "Password must be at least 6 characters.";
       return;
     }
-    const user = {
-      id: crypto.randomUUID(),
-      name,
-      email,
-      password,
-      plan: null,
-      period: null,
-      credits: 0,
-      createdAt: Date.now(),
-    };
-    upsertUser(user);
-    const { password: _, ...session } = user;
-    setSessionUser(session);
-    toast("Account created");
-    navigate(next.startsWith("/") ? next : `/${next}`);
+    btn.disabled = true;
+    btn.textContent = "Sending code…";
+    try {
+      const data = await apiAuth("/api/auth/signup", {
+        method: "POST",
+        body: { name, email, password },
+      });
+      toast(data.message || "Check your email for the code");
+      navigate(
+        withDesktopParams(
+          `/verify?email=${encodeURIComponent(data.email || email)}&next=${encodeURIComponent(next)}`,
+        ),
+      );
+    } catch (ex) {
+      if (ex.code === "pending_verification") {
+        toast("Account pending verification — enter the code we emailed");
+        navigate(
+          withDesktopParams(
+            `/verify?email=${encodeURIComponent(ex.email || email)}&next=${encodeURIComponent(next)}`,
+          ),
+        );
+        return;
+      }
+      err.hidden = false;
+      err.textContent = String(ex.message || "Could not create account.");
+      btn.disabled = false;
+      btn.textContent = "Sign up";
+    }
   });
+
+  return wrap;
+}
+
+function renderDesktopLinked() {
+  return page(`
+    <div class="container" style="padding:64px 0;max-width:560px;margin:0 auto;text-align:center">
+      <div class="eyebrow" style="margin-bottom:16px"><span class="dot"></span> Desktop linked</div>
+      <h1 style="margin:0 0 12px;font-size:2rem;letter-spacing:-0.03em">You're signed in</h1>
+      <p class="muted" style="margin:0 0 20px">
+        Return to the Hormachuelos app — it will sign you in automatically.
+        You can close this browser tab.
+      </p>
+      <a class="btn btn-primary" href="#/dashboard">Open web dashboard</a>
+    </div>
+  `);
+}
+
+function renderVerify() {
+  const q = queryOf();
+  const email = q.get("email") || "";
+  // Email OTP uses `code`; desktop pairing also uses `code` (ABCD-EFGH). Prefer OTP when 6 digits.
+  const rawCode = q.get("code") || "";
+  const presetCode = /^\d{6}$/.test(rawCode) ? rawCode : "";
+  const next = q.get("next") || (isDesktopLinkFlow() ? "/desktop-linked" : "/dashboard");
+  const wrap = page(`
+    <div class="auth-wrap container">
+      <div class="auth-card">
+        <h1>Verify email</h1>
+        <p class="sub">Enter the 6-digit code sent by <strong>HORMACHUELOS</strong>${
+          isDesktopLinkFlow() ? " to finish unlocking the desktop app." : "."
+        }</p>
+        <form id="verify-form" novalidate>
+          <div class="field">
+            <label for="vf-email">Email</label>
+            <input id="vf-email" name="email" type="email" required value="${escapeHtml(email)}" placeholder="you@email.com" />
+          </div>
+          <div class="field">
+            <label for="vf-code">Verification code</label>
+            <input id="vf-code" name="code" inputmode="numeric" autocomplete="one-time-code" required maxlength="6" minlength="6" placeholder="123456" value="${escapeHtml(presetCode)}" />
+          </div>
+          <div class="field-error" id="verify-error" hidden></div>
+          <button class="btn btn-primary btn-block" type="submit">Verify &amp; continue</button>
+        </form>
+        <p class="auth-foot" style="margin-top:18px">
+          Didn't get it?
+          <button type="button" class="linkish" id="resend-code" style="background:none;border:0;padding:0;color:inherit;text-decoration:underline;cursor:pointer">Resend code</button>
+        </p>
+      </div>
+    </div>
+  `);
+
+  const err = wrap.querySelector("#verify-error");
+  wrap.querySelector("#verify-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const btn = wrap.querySelector('button[type="submit"]');
+    err.hidden = true;
+    btn.disabled = true;
+    btn.textContent = "Verifying…";
+    try {
+      const data = await apiAuth("/api/auth/verify", {
+        method: "POST",
+        body: {
+          email: wrap.querySelector("#vf-email").value.trim(),
+          code: wrap.querySelector("#vf-code").value.trim(),
+        },
+      });
+      setSessionUser(data.user, data.token);
+      toast(data.message || "Email verified");
+      if (await finishDesktopLinkIfNeeded()) return;
+      navigate(next.startsWith("/") ? next : `/${next}`);
+    } catch (ex) {
+      err.hidden = false;
+      err.textContent = String(ex.message || "Verification failed");
+      btn.disabled = false;
+      btn.textContent = "Verify & continue";
+    }
+  });
+
+  wrap.querySelector("#resend-code").addEventListener("click", async () => {
+    const em = wrap.querySelector("#vf-email").value.trim();
+    if (!em) {
+      err.hidden = false;
+      err.textContent = "Enter your email first.";
+      return;
+    }
+    try {
+      const data = await apiAuth("/api/auth/resend-verification", {
+        method: "POST",
+        body: { email: em },
+      });
+      toast(data.message || "Code resent");
+    } catch (ex) {
+      err.hidden = false;
+      err.textContent = String(ex.message || "Could not resend");
+    }
+  });
+
+  if (email && presetCode) {
+    queueMicrotask(() => wrap.querySelector("#verify-form")?.requestSubmit?.());
+  }
 
   return wrap;
 }
 
 function renderDashboard() {
   const user = getSessionUser();
-  if (!user) {
+  if (!user || !getSessionToken()) {
     navigate("/login?next=/dashboard");
     return page(`<div class="container" style="padding:48px 0"><p class="muted">Redirecting to login…</p></div>`);
   }
-
-  // refresh from store
-  const full = findUser(user.email) || user;
-  const orders = getOrders().filter((o) => o.email === full.email);
-  const planLabel = full.plan ? checkoutPlanLabel(full.plan) : null;
-  const bill = BILLING[full.period] || BILLING.payg;
 
   const wrap = page(`
     <div class="dash container">
       <div class="dash-head">
         <div>
           <h1>Dashboard</h1>
-          <p class="muted small">Signed in as ${escapeHtml(full.email)}</p>
+          <p class="muted small" id="dash-email">Loading account…</p>
         </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
           <a class="btn btn-sm" href="#/pricing">Change plan</a>
           <a class="btn btn-sm btn-primary" href="#/download">Download app</a>
         </div>
       </div>
-
-      <div class="stat-row">
-        <div class="stat">
-          <div class="label">Plan</div>
-          <div class="value">${planLabel ? escapeHtml(planLabel) : "Free"}</div>
-        </div>
-        <div class="stat">
-          <div class="label">Model</div>
-          <div class="value">${bill ? escapeHtml(bill.label) : "—"}</div>
-        </div>
-        <div class="stat">
-          <div class="label">Credits</div>
-          <div class="value">${(full.credits || 0).toLocaleString("en-PH")}</div>
-        </div>
-      </div>
-
-      <div class="dash-grid">
-        <div class="card">
-          <h3>Account</h3>
-          <p style="margin:12px 0" class="muted small">Name</p>
-          <p style="margin:0 0 12px">${escapeHtml(full.name || "—")}</p>
-          <p style="margin:0 0 4px" class="muted small">Member since</p>
-          <p style="margin:0" class="mono small">${full.createdAt ? new Date(full.createdAt).toLocaleDateString() : "—"}</p>
-          ${
-            !full.plan
-              ? `<div class="alert warn" style="margin-top:18px">No active plan yet. Pick a plan and unlock the agent.</div>
-                 <a class="btn btn-primary" href="#/pricing">View pricing</a>`
-              : `<div class="alert ok" style="margin-top:18px">Active · ${escapeHtml(planLabel || "")} (${escapeHtml(bill?.label || "")}). GCash renewals will appear here.</div>`
-          }
-        </div>
-        <div class="card">
-          <h3>Recent orders</h3>
-          ${
-            orders.length === 0
-              ? `<p class="muted small" style="margin-top:12px">No orders yet.</p>`
-              : `<ul class="feature-list" style="margin-top:12px">${orders
-                  .slice(0, 5)
-                  .map(
-                    (o) =>
-                      `<li><span class="mono">${escapeHtml(o.id.slice(0, 8))}</span> · ${escapeHtml(o.planName)} · ${formatPHP(o.amount)} · ${escapeHtml(o.method)}</li>`,
-                  )
-                  .join("")}</ul>`
-          }
-        </div>
-      </div>
+      <div id="dash-body"><p class="muted">Loading…</p></div>
     </div>
   `);
+
+  (async () => {
+    try {
+      const data = await apiAuth("/api/auth/me");
+      const full = data.user;
+      setSessionUser(full, getSessionToken());
+      if (Array.isArray(data.orders)) saveJSON(STORAGE_ORDERS, data.orders);
+      const orders = data.orders || getOrders().filter((o) => o.email === full.email);
+      const planLabel = full.plan ? checkoutPlanLabel(full.plan) : null;
+      const bill = BILLING[full.period] || BILLING.payg;
+      const emailEl = wrap.querySelector("#dash-email");
+      const body = wrap.querySelector("#dash-body");
+      if (emailEl) emailEl.textContent = `Signed in as ${full.email}`;
+      if (body) {
+        body.innerHTML = `
+          <div class="stat-row">
+            <div class="stat">
+              <div class="label">Plan</div>
+              <div class="value">${planLabel ? escapeHtml(planLabel) : "Free"}</div>
+            </div>
+            <div class="stat">
+              <div class="label">Model</div>
+              <div class="value">${bill ? escapeHtml(bill.label) : "—"}</div>
+            </div>
+            <div class="stat">
+              <div class="label">Credits</div>
+              <div class="value">${(full.credits || 0).toLocaleString("en-PH")}</div>
+            </div>
+          </div>
+          <div class="dash-grid">
+            <div class="card">
+              <h3>Account</h3>
+              <p style="margin:12px 0" class="muted small">Name</p>
+              <p style="margin:0 0 12px">${escapeHtml(full.name || "—")}</p>
+              <p style="margin:0 0 4px" class="muted small">Member since</p>
+              <p style="margin:0" class="mono small">${full.createdAt ? new Date(full.createdAt).toLocaleDateString() : "—"}</p>
+              ${
+                full.licenseKey
+                  ? `<p style="margin:16px 0 4px" class="muted small">Desktop license</p>
+                     <code class="mono small" style="display:block;word-break:break-all">${escapeHtml(full.licenseKey)}</code>`
+                  : ""
+              }
+              ${
+                !full.plan
+                  ? `<div class="alert warn" style="margin-top:18px">No active plan yet. Pick a plan and unlock the agent.</div>
+                     <a class="btn btn-primary" href="#/pricing">View pricing</a>`
+                  : `<div class="alert ok" style="margin-top:18px">Active · ${escapeHtml(planLabel || "")} (${escapeHtml(bill?.label || "")}).</div>`
+              }
+            </div>
+            <div class="card">
+              <h3>Recent orders</h3>
+              ${
+                orders.length === 0
+                  ? `<p class="muted small" style="margin-top:12px">No orders yet.</p>`
+                  : `<ul class="feature-list" style="margin-top:12px">${orders
+                      .slice(0, 5)
+                      .map(
+                        (o) =>
+                          `<li><span class="mono">${escapeHtml(String(o.id || "").slice(0, 8))}</span> · ${escapeHtml(o.planName || o.planId || "")} · ${formatPHP(o.amount)} · ${escapeHtml(o.method || "")}</li>`,
+                      )
+                      .join("")}</ul>`
+              }
+            </div>
+          </div>`;
+      }
+    } catch (ex) {
+      setSessionUser(null);
+      toast(String(ex.message || "Session expired"));
+      navigate("/login?next=/dashboard");
+    }
+  })();
+
+  return wrap;
+}
+
+function getAdminToken() {
+  return localStorage.getItem(STORAGE_ADMIN) || "";
+}
+
+function setAdminToken(token) {
+  if (token) localStorage.setItem(STORAGE_ADMIN, token);
+  else localStorage.removeItem(STORAGE_ADMIN);
+}
+
+async function apiAdmin(path, { method = "GET", body } = {}) {
+  const headers = { Accept: "application/json" };
+  const token = getAdminToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  if (body) headers["Content-Type"] = "application/json";
+  const res = await fetch(path, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Admin request failed (${res.status})`);
+  return data;
+}
+
+function renderAdmin() {
+  const wrap = page(`
+    <div class="dash container admin-dash">
+      <div class="dash-head">
+        <div>
+          <h1>Admin</h1>
+          <p class="muted small">Manage registered users, plans, and hosted usage limits.</p>
+        </div>
+        <div id="admin-actions" style="display:flex;gap:8px;flex-wrap:wrap"></div>
+      </div>
+      <div id="admin-root"><p class="muted">Loading…</p></div>
+    </div>
+  `);
+
+  const root = wrap.querySelector("#admin-root");
+  const actions = wrap.querySelector("#admin-actions");
+
+  function paintLogin() {
+    actions.innerHTML = "";
+    root.innerHTML = `
+      <div class="auth-card" style="max-width:420px;margin:0 auto">
+        <h1 style="font-size:1.35rem">Admin login</h1>
+        <p class="sub">Staff only. Not for customer accounts.</p>
+        <form id="admin-login-form" novalidate>
+          <div class="field">
+            <label for="admin-user">Username</label>
+            <input id="admin-user" name="username" autocomplete="username" required placeholder="admin" />
+          </div>
+          <div class="field">
+            <label for="admin-pass">Password</label>
+            <input id="admin-pass" name="password" type="password" autocomplete="current-password" required />
+          </div>
+          <div class="field-error" id="admin-login-error" hidden></div>
+          <button class="btn btn-primary btn-block" type="submit">Enter admin</button>
+        </form>
+      </div>`;
+    root.querySelector("#admin-login-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const err = root.querySelector("#admin-login-error");
+      const btn = root.querySelector('button[type="submit"]');
+      err.hidden = true;
+      btn.disabled = true;
+      btn.textContent = "Checking…";
+      try {
+        const data = await fetch("/api/admin/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Accept: "application/json" },
+          body: JSON.stringify({
+            username: root.querySelector("#admin-user").value.trim(),
+            password: root.querySelector("#admin-pass").value,
+          }),
+        }).then(async (r) => {
+          const j = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(j.error || "Login failed");
+          return j;
+        });
+        setAdminToken(data.token);
+        toast("Admin signed in");
+        await paintAdmin("users");
+      } catch (ex) {
+        err.hidden = false;
+        err.textContent = String(ex.message || ex);
+        btn.disabled = false;
+        btn.textContent = "Enter admin";
+      }
+    });
+  }
+
+  function wireAdminChrome(tab) {
+    actions.innerHTML = `
+      <button type="button" class="btn btn-sm ${tab === "users" ? "btn-primary" : ""}" id="admin-tab-users">Users</button>
+      <button type="button" class="btn btn-sm ${tab === "releases" ? "btn-primary" : ""}" id="admin-tab-releases">Releases</button>
+      <button type="button" class="btn btn-sm" id="admin-refresh">Refresh</button>
+      <button type="button" class="btn btn-sm btn-ghost" id="admin-logout">Log out</button>`;
+    actions.querySelector("#admin-logout").onclick = () => {
+      setAdminToken("");
+      toast("Admin logged out");
+      paintLogin();
+    };
+    actions.querySelector("#admin-refresh").onclick = () => paintAdmin(tab);
+    actions.querySelector("#admin-tab-users").onclick = () => paintAdmin("users");
+    actions.querySelector("#admin-tab-releases").onclick = () => paintAdmin("releases");
+  }
+
+  async function paintAdmin(tab = "users") {
+    if (!getAdminToken()) {
+      paintLogin();
+      return;
+    }
+    wireAdminChrome(tab);
+    if (tab === "releases") {
+      await paintReleases();
+      return;
+    }
+    await paintUsers();
+  }
+
+  async function paintUsers() {
+    root.innerHTML = `<p class="muted">Loading users…</p>`;
+    try {
+      const data = await apiAdmin("/api/admin/users");
+      const users = data.users || [];
+      if (!users.length) {
+        root.innerHTML = `<div class="card"><p class="muted" style="margin:0">No registered users yet.</p></div>`;
+        return;
+      }
+      root.innerHTML = `
+        <div class="admin-table-wrap">
+          <table class="admin-table">
+            <thead>
+              <tr>
+                <th>User</th>
+                <th>Plan</th>
+                <th>Credits</th>
+                <th>Token budget</th>
+                <th>Tokens used</th>
+                <th>Expires</th>
+                <th>License</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              ${users
+                .map((u) => {
+                  const plan = u.plan || "free";
+                  return `<tr data-id="${escapeHtml(u.id)}">
+                    <td>
+                      <div class="admin-user">
+                        <strong>${escapeHtml(u.name || "—")}</strong>
+                        <span class="muted small mono">${escapeHtml(u.email)}</span>
+                        ${u.licenseKey ? `<span class="muted small mono">${escapeHtml(u.licenseKey)}</span>` : `<span class="muted small">No license key</span>`}
+                      </div>
+                    </td>
+                    <td>
+                      <select class="field admin-plan">
+                        ${["free", "starter", "pro", "proplus", "max5", "max10", "max20"]
+                          .map(
+                            (p) =>
+                              `<option value="${p}" ${plan === p ? "selected" : ""}>${p}</option>`,
+                          )
+                          .join("")}
+                      </select>
+                    </td>
+                    <td><input class="field admin-credits" type="number" min="0" step="1000" value="${Number(u.credits) || 0}" /></td>
+                    <td><input class="field admin-budget" type="number" min="0" step="100000" value="${Number(u.tokenBudget) || 0}" /></td>
+                    <td><input class="field admin-used" type="number" min="0" step="1000" value="${Number(u.tokensUsed) || 0}" /></td>
+                    <td><input class="field admin-expires" type="date" value="${escapeHtml(u.expiresAt || "")}" /></td>
+                    <td>
+                      <label class="admin-active">
+                        <input type="checkbox" class="admin-lic-active" ${u.licenseActive ? "checked" : ""} />
+                        Active
+                      </label>
+                    </td>
+                    <td><button type="button" class="btn btn-sm btn-primary admin-save">Save</button></td>
+                  </tr>`;
+                })
+                .join("")}
+            </tbody>
+          </table>
+        </div>
+        <p class="muted small" style="margin-top:12px">${users.length} user${users.length === 1 ? "" : "s"} · edits apply to website account + hosted license usage.</p>`;
+
+      root.querySelectorAll("tr[data-id]").forEach((tr) => {
+        tr.querySelector(".admin-save")?.addEventListener("click", async () => {
+          const btn = tr.querySelector(".admin-save");
+          btn.disabled = true;
+          btn.textContent = "Saving…";
+          try {
+            const plan = tr.querySelector(".admin-plan").value;
+            await apiAdmin("/api/admin/users", {
+              method: "PATCH",
+              body: {
+                id: tr.getAttribute("data-id"),
+                plan,
+                credits: Number(tr.querySelector(".admin-credits").value) || 0,
+                tokenBudget: Number(tr.querySelector(".admin-budget").value) || 0,
+                tokensUsed: Number(tr.querySelector(".admin-used").value) || 0,
+                expiresAt: tr.querySelector(".admin-expires").value || undefined,
+                licenseActive: tr.querySelector(".admin-lic-active").checked,
+              },
+            });
+            toast("User updated");
+            btn.textContent = "Saved";
+            setTimeout(() => {
+              btn.disabled = false;
+              btn.textContent = "Save";
+            }, 900);
+          } catch (ex) {
+            toast(String(ex.message || ex));
+            btn.disabled = false;
+            btn.textContent = "Save";
+          }
+        });
+      });
+    } catch (ex) {
+      if (String(ex.message || "").toLowerCase().includes("admin")) {
+        setAdminToken("");
+        paintLogin();
+        return;
+      }
+      root.innerHTML = `<div class="alert warn">${escapeHtml(String(ex.message || ex))}</div>`;
+    }
+  }
+
+  async function paintReleases() {
+    root.innerHTML = `<p class="muted">Loading releases…</p>`;
+    try {
+      const data = await apiAdmin("/api/admin/releases");
+      const releases = data.releases || [];
+      root.innerHTML = `
+        <div class="card" style="margin-bottom:16px">
+          <h3 style="margin-top:0">Publish software update</h3>
+          <p class="muted small">Users on older builds will see What's new and must update when Force update is on.</p>
+          <form id="release-form" class="admin-release-form">
+            <div class="field"><label>Version</label><input id="rel-version" class="field" required placeholder="0.1.1" /></div>
+            <div class="field"><label>Title</label><input id="rel-title" class="field" placeholder="Hormachuelos 0.1.1" /></div>
+            <div class="field"><label>What's new</label><textarea id="rel-notes" class="field" rows="5" required placeholder="• Bug fixes&#10;• New features"></textarea></div>
+            <div class="field"><label>MSI download URL</label><input id="rel-msi" class="field" type="url" placeholder="https://…/Hormachuelos_x_x64_en-US.msi" /></div>
+            <div class="field"><label>EXE download URL</label><input id="rel-exe" class="field" type="url" placeholder="https://…/Hormachuelos_x_x64-setup.exe" /></div>
+            <label class="admin-active" style="margin:8px 0 14px;display:inline-flex">
+              <input type="checkbox" id="rel-force" checked /> Force update (block old app until installed)
+            </label>
+            <div class="field-error" id="rel-error" hidden></div>
+            <button class="btn btn-primary" type="submit">Publish update</button>
+          </form>
+        </div>
+        <div class="admin-table-wrap">
+          <table class="admin-table">
+            <thead>
+              <tr>
+                <th>Version</th>
+                <th>Title</th>
+                <th>Force</th>
+                <th>Latest</th>
+                <th>Published</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              ${
+                releases.length
+                  ? releases
+                      .map(
+                        (r) => `<tr data-id="${escapeHtml(r.id)}">
+                  <td class="mono">${escapeHtml(r.version)}${r.isLatest ? " · latest" : ""}</td>
+                  <td>${escapeHtml(r.title || "")}</td>
+                  <td>${r.forceUpdate ? "Yes" : "No"}</td>
+                  <td>${r.isLatest ? "Yes" : "—"}</td>
+                  <td class="mono small">${escapeHtml(String(r.publishedAt || "").slice(0, 10))}</td>
+                  <td><button type="button" class="btn btn-sm admin-toggle-force" data-force="${r.forceUpdate ? "0" : "1"}">${r.forceUpdate ? "Disable force" : "Enable force"}</button></td>
+                </tr>`,
+                      )
+                      .join("")
+                  : `<tr><td colspan="6" class="muted">No releases yet.</td></tr>`
+              }
+            </tbody>
+          </table>
+        </div>`;
+
+      root.querySelector("#release-form").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const err = root.querySelector("#rel-error");
+        const btn = root.querySelector('#release-form button[type="submit"]');
+        err.hidden = true;
+        btn.disabled = true;
+        btn.textContent = "Publishing…";
+        try {
+          await apiAdmin("/api/admin/releases", {
+            method: "POST",
+            body: {
+              version: root.querySelector("#rel-version").value.trim(),
+              title: root.querySelector("#rel-title").value.trim(),
+              whatsNew: root.querySelector("#rel-notes").value.trim(),
+              msiUrl: root.querySelector("#rel-msi").value.trim(),
+              exeUrl: root.querySelector("#rel-exe").value.trim(),
+              forceUpdate: root.querySelector("#rel-force").checked,
+              isLatest: true,
+            },
+          });
+          toast("Update published");
+          await paintAdmin("releases");
+        } catch (ex) {
+          err.hidden = false;
+          err.textContent = String(ex.message || ex);
+          btn.disabled = false;
+          btn.textContent = "Publish update";
+        }
+      });
+
+      root.querySelectorAll(".admin-toggle-force").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const tr = btn.closest("tr");
+          try {
+            await apiAdmin("/api/admin/releases", {
+              method: "PATCH",
+              body: { id: tr.getAttribute("data-id"), forceUpdate: btn.getAttribute("data-force") === "1" },
+            });
+            toast("Release updated");
+            await paintAdmin("releases");
+          } catch (ex) {
+            toast(String(ex.message || ex));
+          }
+        });
+      });
+    } catch (ex) {
+      if (String(ex.message || "").toLowerCase().includes("admin")) {
+        setAdminToken("");
+        paintLogin();
+        return;
+      }
+      root.innerHTML = `<div class="alert warn">${escapeHtml(String(ex.message || ex))}</div>`;
+    }
+  }
+
+  paintAdmin("users");
   return wrap;
 }
 
@@ -933,28 +1520,42 @@ function renderCheckout() {
       };
       addOrder(order);
 
-      const full = findUser(user.email);
-      if (full) {
-        full.plan = planId;
-        full.period = period;
-        full.licenseKey = checkout.licenseKey;
-        const creditBonus =
-          planId === "starter"
-            ? 50000
-            : planId === "pro"
-              ? 500000
-              : planId === "max20"
-                ? 4_000_000
-                : planId === "max10"
-                  ? 2_000_000
-                  : planId.startsWith("max")
-                    ? 1_000_000
-                    : 200000;
-        full.credits = (full.credits || 0) + creditBonus;
-        full.password = full.password;
-        upsertUser(full);
-        const { password: _, ...session } = full;
-        setSessionUser(session);
+      const creditBonus =
+        planId === "starter"
+          ? 50000
+          : planId === "pro"
+            ? 500000
+            : planId === "max20"
+              ? 4_000_000
+              : planId === "max10"
+                ? 2_000_000
+                : planId.startsWith("max")
+                  ? 1_000_000
+                  : 200000;
+      try {
+        const patched = await apiAuth("/api/auth/me", {
+          method: "PATCH",
+          body: {
+            plan: planId,
+            period,
+            licenseKey: checkout.licenseKey,
+            credits: (user.credits || 0) + creditBonus,
+            order,
+          },
+        });
+        setSessionUser(patched.user, getSessionToken());
+      } catch (syncErr) {
+        console.warn("Account sync failed", syncErr);
+        setSessionUser(
+          {
+            ...user,
+            plan: planId,
+            period,
+            licenseKey: checkout.licenseKey,
+            credits: (user.credits || 0) + creditBonus,
+          },
+          getSessionToken(),
+        );
       }
 
       navigate(`/success?order=${order.id}`);
@@ -1004,22 +1605,96 @@ function renderSuccess() {
 
 function renderDownload() {
   const { version, windows } = DESKTOP_DOWNLOADS;
-  return page(`
+  const wrap = page(`
     <div class="prose container">
       <h1>Download Hormachuelos</h1>
-      <p>Install the desktop AI agent on Windows. v${escapeHtml(version)} · 64-bit · includes Cursor runtime bundle.</p>
+      <p id="dl-lead">Install the desktop AI agent on Windows. Loading latest build…</p>
       <div class="card" style="margin:20px 0">
         <h3 style="margin-top:0">Windows</h3>
-        <p class="muted small">Pick MSI for IT-style installs, or EXE for one-click setup. After install, open Hormachuelos and connect your provider—or use Mag-load when hosted billing is live.</p>
-        <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:16px">
-          <a class="btn btn-primary" href="${windows.msi.href}" download="${windows.msi.file}">${escapeHtml(windows.msi.label)}</a>
-          <a class="btn" href="${windows.setup.href}" download="${windows.setup.file}">${escapeHtml(windows.setup.label)}</a>
+        <p class="muted small">After install, open Hormachuelos — it opens this website so you can <strong>log in or sign up</strong>, then the app signs in automatically.</p>
+        <div id="dl-actions" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:16px">
+          <a class="btn btn-primary" id="dl-msi" href="${windows.msi.href}">${escapeHtml(windows.msi.label)}</a>
+          <a class="btn" id="dl-exe" href="${windows.setup.href}">${escapeHtml(windows.setup.label)}</a>
+          <a class="btn btn-ghost" href="#/update">What's new / Update</a>
         </div>
-        <p class="muted small" style="margin:12px 0 0">Need an account for billing? <a href="#/signup">Sign up free</a> · already paid? <a href="#/dashboard">Dashboard</a></p>
+        <ol class="muted small" style="margin:16px 0 0;padding-left:18px;line-height:1.55">
+          <li>Download &amp; install</li>
+          <li>Open the app → browser opens for login/signup</li>
+          <li>Return to the app — you're signed in automatically</li>
+        </ol>
       </div>
-      <p class="muted small">Rebuild installers: <code class="mono">npm run desktop:build</code> then copy <code class="mono">src-tauri/target/release/bundle/*</code> into <code class="mono">website/downloads/</code>.</p>
     </div>
   `);
+  (async () => {
+    try {
+      const data = await fetch("/api/update").then((r) => r.json());
+      const latest = data.latest;
+      if (!latest) return;
+      const lead = wrap.querySelector("#dl-lead");
+      if (lead) {
+        lead.textContent = `Latest: v${latest.version}${latest.title ? ` · ${latest.title}` : ""} · 64-bit Windows`;
+      }
+      const msi = wrap.querySelector("#dl-msi");
+      const exe = wrap.querySelector("#dl-exe");
+      if (msi && latest.msiUrl) {
+        msi.href = latest.msiUrl;
+        msi.textContent = `Windows installer (MSI) v${latest.version}`;
+      }
+      if (exe && latest.exeUrl) {
+        exe.href = latest.exeUrl;
+        exe.textContent = `Windows setup (EXE) v${latest.version}`;
+      }
+    } catch {
+      const lead = wrap.querySelector("#dl-lead");
+      if (lead) lead.textContent = `Install the desktop AI agent on Windows. v${version} · 64-bit.`;
+    }
+  })();
+  return wrap;
+}
+
+function renderUpdate() {
+  const wrap = page(`
+    <div class="prose container">
+      <h1>Update Hormachuelos</h1>
+      <p class="muted" id="upd-lead">Checking for the latest desktop build…</p>
+      <div class="card" id="upd-card" style="margin:20px 0">
+        <p class="muted" style="margin:0">Loading…</p>
+      </div>
+    </div>
+  `);
+  (async () => {
+    const card = wrap.querySelector("#upd-card");
+    const lead = wrap.querySelector("#upd-lead");
+    try {
+      const data = await fetch("/api/update").then((r) => r.json());
+      const latest = data.latest;
+      if (!latest) {
+        lead.textContent = "No published releases yet.";
+        card.innerHTML = `<p class="muted" style="margin:0">Check back soon.</p>`;
+        return;
+      }
+      lead.textContent = latest.forceUpdate
+        ? "A required update is available. Install before using the desktop app."
+        : "Install the latest build to get fixes and new features.";
+      const notes = escapeHtml(latest.whatsNew || "Improvements and fixes.")
+        .replace(/\n/g, "<br>");
+      card.innerHTML = `
+        <div class="eyebrow" style="margin-bottom:10px"><span class="dot"></span> Latest release</div>
+        <h2 style="margin:0 0 8px;font-size:1.45rem">${escapeHtml(latest.title || `v${latest.version}`)}</h2>
+        <p class="mono small muted" style="margin:0 0 16px">Version ${escapeHtml(latest.version)} · ${escapeHtml(String(latest.publishedAt || "").slice(0, 10))}${latest.forceUpdate ? " · required update" : ""}</p>
+        <h3 style="margin:0 0 8px">What's new</h3>
+        <div class="update-notes">${notes}</div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:20px">
+          ${latest.msiUrl ? `<a class="btn btn-primary" href="${escapeHtml(latest.msiUrl)}">Update (MSI)</a>` : ""}
+          ${latest.exeUrl ? `<a class="btn btn-primary" href="${escapeHtml(latest.exeUrl)}">Update (EXE)</a>` : ""}
+          <a class="btn" href="#/download">Download page</a>
+        </div>`;
+    } catch (ex) {
+      lead.textContent = "Could not load update info.";
+      card.innerHTML = `<p class="muted" style="margin:0">${escapeHtml(String(ex.message || ex))}</p>`;
+    }
+  })();
+  return wrap;
 }
 
 function renderFaq() {
@@ -1418,7 +2093,7 @@ function initTextInteractions(root) {
   });
 }
 
-function boot() {
+async function boot() {
   const y = document.getElementById("year");
   if (y) y.textContent = String(new Date().getFullYear());
 
@@ -1429,6 +2104,9 @@ function boot() {
   });
 
   window.addEventListener("hashchange", render);
+  if (getSessionToken()) {
+    await refreshSessionUser();
+  }
   if (!location.hash) location.hash = "#/";
   else render();
 }

@@ -15,7 +15,8 @@
     "desktop:dev": "cargo tauri dev",
     "desktop:build": "cargo tauri build",
     "desktop:debug": "npm run build && cargo tauri build --debug",
-    "installer:art": "powershell -ExecutionPolicy Bypass -File scripts/generate-installer-art.ps1"
+    "installer:art": "powershell -ExecutionPolicy Bypass -File scripts/generate-installer-art.ps1",
+    "release": "node scripts/publish-release.mjs"
   },
   "devDependencies": {
     "@tauri-apps/api": "^2.1.0",

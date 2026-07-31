@@ -928,7 +928,7 @@ export class SettingsModal {
     const keyInput = el("input", {
       class: "field",
       type: "text",
-      placeholder: "HORMA-PRO-… or HORMA-PROPLUS-…",
+      placeholder: "HORMA-PRO-… from hormachuelos.vercel.app checkout",
       autocomplete: "off",
       "aria-label": "License key",
     }) as HTMLInputElement;

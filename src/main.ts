@@ -8,6 +8,8 @@ import { ProjectPicker } from "./components/picker";
 import { WorkspacePanel } from "./components/workspace";
 import { SitePreview, isPreviewableBuild, pickPreviewEntry } from "./components/site-preview";
 import { mountComputerUseHud, updateComputerUseHud, clearComputerUseHud } from "./components/computer-use-hud";
+import { ensureWebsiteSession, showAuthGate } from "./components/auth-gate";
+import { checkDesktopUpdate, showUpdateGate } from "./components/update-gate";
 import { basename, clear, div, el, speakDoneWorking } from "./components/util";
 import {
   loadSessions, saveSession, scheduleSessionSave, flushSessionSaves,
@@ -1139,6 +1141,37 @@ async function init() {
   });
   await sidebar.render().catch((e) => console.error("sidebar render failed", e));
   await refreshHeader().catch((e) => console.error("refreshHeader failed", e));
+
+  // Required app update (published from website Admin → Releases).
+  try {
+    const update = await checkDesktopUpdate();
+    if (update.forceUpdate && update.latest) {
+      document.body.appendChild(showUpdateGate(update));
+      return;
+    }
+  } catch (e) {
+    console.warn("update check failed", e);
+  }
+
+  // Website account required — desktop signs in automatically after browser login/signup.
+  let websiteUser = await ensureWebsiteSession().catch(() => null);
+  if (!websiteUser) {
+    await new Promise<void>((resolve) => {
+      const gate = showAuthGate((user) => {
+        websiteUser = user;
+        resolve();
+      });
+      document.body.appendChild(gate);
+    });
+  }
+  if (websiteUser?.licenseKey) {
+    try {
+      await api.applyLicenseKey(websiteUser.licenseKey);
+      window.dispatchEvent(new CustomEvent("horma:license-updated"));
+    } catch (e) {
+      console.warn("license sync from website account failed", e);
+    }
+  }
 
   // OpenCode-style chips inside the composer card
   modelBar = new ModelBar(() => {

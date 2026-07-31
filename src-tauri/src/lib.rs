@@ -119,6 +119,38 @@ async fn clear_api_key(provider: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn set_website_session(token: String) -> Result<(), String> {
+    config::store_website_session(&token).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_website_session() -> Result<Option<String>, String> {
+    match config::load_website_session() {
+        Ok(t) if !t.trim().is_empty() => Ok(Some(t)),
+        _ => Ok(None),
+    }
+}
+
+#[tauri::command]
+fn clear_website_session() -> Result<(), String> {
+    config::clear_website_session().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn open_external_url(url: String, app: tauri::AppHandle) -> Result<(), String> {
+    let url = url.trim();
+    if !(url.starts_with("https://")
+        || url.starts_with("http://localhost")
+        || url.starts_with("http://127.0.0.1"))
+    {
+        return Err("Only http(s) URLs can be opened.".into());
+    }
+    app.opener()
+        .open_url(url, None::<String>)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn respond_to_question(
     answer: String,
     session_id: String,
@@ -237,26 +269,32 @@ async fn list_provider_models(
     base_url: Option<String>,
 ) -> Result<Vec<String>, String> {
     config::validate_provider_id(&provider).map_err(|e| e.to_string())?;
-    if provider.eq_ignore_ascii_case("cursor") {
-        let key = config::load_cursor_sdk_api_key("cursor").map_err(|_| {
-            "Save a Cursor / OpenAI key before refreshing models.".to_string()
-        })?;
+    let license = license::LicenseStatus::load().unwrap_or_default();
+    let use_hosted = license::should_use_hosted(&license);
+    if provider.eq_ignore_ascii_case("cursor") && !use_hosted {
+        let key = config::load_cursor_sdk_api_key("cursor")
+            .map_err(|_| "Save a Cursor / OpenAI key before refreshing models.".to_string())?;
         return cursor_bridge::list_cursor_models(&key)
             .await
             .map_err(|e| e.to_string());
     }
-    let base_url = base_url
-        .as_deref()
-        .or_else(|| llm::provider_default_base_url(&provider))
-        .ok_or_else(|| "A base URL is required for this provider.".to_string())?;
-    let base_url =
-        llm::validate_provider_base_url(&provider, base_url).map_err(|e| e.to_string())?;
-    let key = if llm::provider_needs_key(&provider) {
-        config::load_api_key(&provider).map_err(|_| {
-            "Save an API key for this provider before refreshing models.".to_string()
-        })?
+    let (key, base_url) = if use_hosted {
+        (license.license_key.clone(), license::hosted_chat_base_url())
     } else {
-        String::new()
+        let base_url = base_url
+            .as_deref()
+            .or_else(|| llm::provider_default_base_url(&provider))
+            .ok_or_else(|| "A base URL is required for this provider.".to_string())?;
+        let base_url =
+            llm::validate_provider_base_url(&provider, base_url).map_err(|e| e.to_string())?;
+        let key = if llm::provider_needs_key(&provider) {
+            config::load_api_key(&provider).map_err(|_| {
+                "Save an API key for this provider before refreshing models.".to_string()
+            })?
+        } else {
+            String::new()
+        };
+        (key, base_url)
     };
     match provider.to_lowercase().as_str() {
         "anthropic" => llm::anthropic::fetch_model_ids(&key, &base_url).await,
@@ -333,8 +371,10 @@ fn get_license_status() -> Result<license::LicenseStatus, String> {
 }
 
 #[tauri::command]
-fn apply_license_key(key: String) -> Result<license::LicenseStatus, String> {
-    license::apply_license_key(&key).map_err(|e| e.to_string())
+async fn apply_license_key(key: String) -> Result<license::LicenseStatus, String> {
+    license::apply_license_key(&key)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -422,6 +462,33 @@ async fn agent_run(
 ) -> Result<(), String> {
     if session_id.trim().is_empty() {
         return Err("Missing session id.".into());
+    }
+    if !config::has_website_session() {
+        return Err(
+            "Sign in with your Hormachuelos website account first (Download → Log in / Sign up)."
+                .into(),
+        );
+    }
+    // Soft server-side reminder if a forced update is published (UI gate is primary).
+    if let Ok(client) = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(4))
+        .build()
+    {
+        let current = env!("CARGO_PKG_VERSION");
+        let url = format!("https://hormachuelos.vercel.app/api/update?current={current}");
+        if let Ok(resp) = client.get(&url).send().await {
+            if let Ok(value) = resp.json::<serde_json::Value>().await {
+                if value.get("forceUpdate").and_then(|v| v.as_bool()) == Some(true) {
+                    let latest = value
+                        .pointer("/latest/version")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("latest");
+                    return Err(format!(
+                        "Update required: install Hormachuelos {latest} from hormachuelos.vercel.app/#/update before running agents."
+                    ));
+                }
+            }
+        }
     }
     let project_root = state
         .project_root
@@ -672,6 +739,10 @@ pub fn run() {
             set_api_key,
             has_api_key,
             clear_api_key,
+            set_website_session,
+            get_website_session,
+            clear_website_session,
+            open_external_url,
             respond_to_question,
             respond_to_confirm,
             test_provider_connection,

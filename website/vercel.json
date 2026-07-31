@@ -1,0 +1,21 @@
+{
+  "cleanUrls": true,
+  "functions": {
+    "api/v1/[...path].js": {
+      "maxDuration": 60
+    }
+  },
+  "rewrites": [
+    { "source": "/api/v1/:path+", "destination": "/api/v1/[...path]?path=:path" },
+    { "source": "/api/auth/:path+", "destination": "/api/auth/[...path]?path=:path" }
+  ],
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "X-Content-Type-Options", "value": "nosniff" },
+        { "key": "Referrer-Policy", "value": "strict-origin-when-cross-origin" }
+      ]
+    }
+  ]
+}

@@ -459,10 +459,16 @@ pub async fn fetch_model_ids(
     if provider_kind != "ollama" {
         request = request.bearer_auth(api_key);
     }
+    if api_key.to_ascii_uppercase().starts_with("HORMA-")
+        || base_url.contains("hormachuelos")
+        || base_url.contains("/api/v1")
+    {
+        request = request.header("X-Horma-Provider", provider_kind);
+    }
     if is_openrouter {
         request = request
             .query(&[("supported_parameters", "tools")])
-            .header("HTTP-Referer", "https://hormachuelos.app")
+            .header("HTTP-Referer", "https://hormachuelos.vercel.app")
             .header("X-Title", "Hormachuelos");
     }
     let response = request
@@ -532,6 +538,12 @@ impl OpenAi {
     fn is_openrouter(&self) -> bool {
         self.provider_kind == "openrouter" || self.base_url.contains("openrouter.ai")
     }
+
+    fn is_hosted_proxy(&self) -> bool {
+        self.api_key.to_ascii_uppercase().starts_with("HORMA-")
+            || self.base_url.contains("hormachuelos")
+            || self.base_url.contains("/api/v1")
+    }
 }
 
 #[async_trait::async_trait]
@@ -554,9 +566,12 @@ impl LlmProvider for OpenAi {
             if !self.skip_auth() {
                 request = request.bearer_auth(&self.api_key);
             }
+            if self.is_hosted_proxy() {
+                request = request.header("X-Horma-Provider", &self.provider_kind);
+            }
             if self.is_openrouter() {
                 request = request
-                    .header("HTTP-Referer", "https://hormachuelos.app")
+                    .header("HTTP-Referer", "https://hormachuelos.vercel.app")
                     .header("X-Title", "Hormachuelos");
             }
             let response = request

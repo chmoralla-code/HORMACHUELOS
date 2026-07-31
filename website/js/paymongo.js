@@ -25,7 +25,7 @@ export function isLivePayMongo() {
   return c.mode === "live" && !!c.createSourceUrl && !!c.publicKey;
 }
 
-/** Map plan id → desktop license key prefix (local activate until server issues real keys). */
+/** Map plan id → desktop license key prefix (offline fallback only). */
 export function licenseKeyForPlan(planId) {
   const suffix = crypto.randomUUID().slice(0, 8).toUpperCase();
   if (planId === "max20") return `HORMA-MAX20-${suffix}`;
@@ -33,6 +33,34 @@ export function licenseKeyForPlan(planId) {
   if (planId === "max5" || planId === "max" || planId === "agency") return `HORMA-MAX-${suffix}`;
   if (planId === "pro") return `HORMA-PRO-${suffix}`;
   return `HORMA-STARTER-${suffix}`;
+}
+
+/** Issue a real server license (Supabase-backed) via the hosted API. */
+export async function issueServerLicense({
+  planId,
+  email,
+  amountPhp,
+  method,
+  paymentId,
+  source = "website-demo",
+}) {
+  const res = await fetch("/api/license/issue", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({
+      planId,
+      email,
+      amountPhp,
+      method,
+      paymentId,
+      source,
+    }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.licenseKey) {
+    throw new Error(data.error || `License issue failed (${res.status})`);
+  }
+  return data;
 }
 
 /**
@@ -51,12 +79,35 @@ export async function createCheckout({
   const c = config();
 
   if (!isLivePayMongo()) {
-    return {
-      demo: true,
-      licenseKey,
-      paymentId: `demo_${crypto.randomUUID()}`,
-      message: "Demo checkout — no real charge. Paste the license key into Hormachuelos → Settings.",
-    };
+    const paymentId = `demo_${crypto.randomUUID()}`;
+    try {
+      const issued = await issueServerLicense({
+        planId,
+        email,
+        amountPhp,
+        method,
+        paymentId,
+        source: "website-demo",
+      });
+      return {
+        demo: true,
+        licenseKey: issued.licenseKey,
+        paymentId,
+        tokenBudget: issued.tokenBudget,
+        message:
+          "Demo checkout — no real charge. Hosted license issued. Paste the key into Hormachuelos → Settings.",
+      };
+    } catch (err) {
+      // Offline / API down: still return a local key so UX isn't blocked.
+      console.warn("Server license issue failed, using local fallback", err);
+      return {
+        demo: true,
+        licenseKey,
+        paymentId,
+        message:
+          "Demo checkout (offline fallback). Server license unavailable — activate may need retry.",
+      };
+    }
   }
 
   // Live path: your backend creates the PayMongo source / intent
