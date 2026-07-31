@@ -147,6 +147,10 @@ impl Settings {
             ("deepseek", "deepseek-reasoner") => s.model = "deepseek-v4-pro".into(),
             _ => {}
         }
+        if s.provider == "hormachuelos_free" {
+            s.model = "hormachuelos-v1".into();
+            s.base_url = Some("https://hormachuelos.vercel.app/api/v1".into());
+        }
         if s.provider == "deepseek" && s.base_url.as_deref() == Some("https://api.deepseek.com/v1")
         {
             s.base_url = Some("https://api.deepseek.com".into());
@@ -224,6 +228,16 @@ impl Settings {
             );
             crate::llm::validate_provider_base_url(&self.provider, base_url)?;
         }
+        if self.provider == "hormachuelos_free" {
+            ensure!(
+                self.model == "hormachuelos-v1",
+                "HORMACHUELOS FREE only supports Hormachuelos v1."
+            );
+            ensure!(
+                self.base_url.as_deref() == Some("https://hormachuelos.vercel.app/api/v1"),
+                "HORMACHUELOS FREE uses the protected Hormachuelos endpoint."
+            );
+        }
         Ok(())
     }
 }
@@ -237,6 +251,7 @@ pub fn validate_provider_id(provider: &str) -> Result<()> {
                 | "glm"
                 | "openai"
                 | "cursor"
+                | "hormachuelos_free"
                 | "anthropic"
                 | "gemini"
                 | "ollama"
@@ -353,5 +368,22 @@ mod tests {
     #[test]
     fn computer_use_is_opt_in() {
         assert!(!Settings::default().computer_use_enabled);
+    }
+
+    #[test]
+    fn permits_only_the_pinned_hormachuelos_free_alias() {
+        let settings = Settings {
+            provider: "hormachuelos_free".into(),
+            model: "hormachuelos-v1".into(),
+            base_url: Some("https://hormachuelos.vercel.app/api/v1".into()),
+            ..Settings::default()
+        };
+        assert!(settings.validate().is_ok());
+
+        let wrong_model = Settings {
+            model: "deepseek-v4-flash".into(),
+            ..settings
+        };
+        assert!(wrong_model.validate().is_err());
     }
 }

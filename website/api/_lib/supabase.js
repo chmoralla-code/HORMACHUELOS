@@ -50,7 +50,15 @@ export async function getLicenseByKey(licenseKey) {
 export async function getLicenseByEmail(email) {
   const normalized = String(email || "").trim().toLowerCase();
   if (!normalized) return null;
-  const q = `licenses?email=eq.${encodeURIComponent(normalized)}&select=*&order=created_at.desc&limit=1`;
+  const q = `licenses?email=eq.${encodeURIComponent(normalized)}&plan=neq.hormachuelos_free&select=*&order=created_at.desc&limit=1`;
+  const rows = await sb(q);
+  return Array.isArray(rows) && rows.length ? rows[0] : null;
+}
+
+export async function getHormachuelosFreeLicenseByEmail(email) {
+  const normalized = String(email || "").trim().toLowerCase();
+  if (!normalized) return null;
+  const q = `licenses?email=eq.${encodeURIComponent(normalized)}&plan=eq.hormachuelos_free&select=*&order=created_at.desc&limit=1`;
   const rows = await sb(q);
   return Array.isArray(rows) && rows.length ? rows[0] : null;
 }

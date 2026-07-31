@@ -97,6 +97,7 @@ pub fn to_billable_tokens(provider: &str, model: &str, raw: u64) -> u64 {
     let weight: f64 = match p.as_str() {
         "deepseek" if m.contains("flash") => 0.10, // ~$0.18/1M vs ~$2.50 target
         "deepseek" => 0.30,                        // V4 Pro
+        "hormachuelos_free" => 0.10,
         "ollama" => 0.05,
         "openrouter" if m.contains("free") || m.ends_with(":free") => 0.05,
         "openrouter" => 0.45,

@@ -509,6 +509,7 @@ impl OpenAi {
             "deepseek" => "https://api.deepseek.com",
             "glm" => "https://open.bigmodel.cn/api/paas/v4",
             "cursor" => "https://api.cursor.com/v1",
+            "hormachuelos_free" => "https://hormachuelos.vercel.app/api/v1",
             _ => "https://api.openai.com/v1",
         };
         Self {

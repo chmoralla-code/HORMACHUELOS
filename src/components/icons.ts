@@ -37,6 +37,7 @@ export const icons = {
 
 // Real brand logos — official marks rendered with currentColor.
 export const logos = {
+  hormachuelos: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="1.5" y="1.5" width="21" height="21" rx="6" fill="#081421" stroke="#45adff"/><path d="M6 6h3v4.5h6V6h3v12h-3v-4.5H9V18H6V6Z" fill="#45adff"/><path d="m13 2.8-3.2 7h2.8l-1.8 5 5-7.7h-3.1l2.5-4.3H13Z" fill="#d9f4ff"/></svg>`,
   grok: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 5l14 14M19 5 5 19"/><circle cx="12" cy="12" r="9" opacity=".35"/></svg>`,
   // DeepSeek — stylized whale mark
   deepseek: `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M20.2 8.4c-1.1-2.8-3.7-4.6-6.8-4.6-1.4 0-2.7.4-3.9 1.1C8 3.4 5.7 2.6 3.8 3.2c-.4.1-.6.6-.4 1 1.1 1.8 1.4 3.6 1.2 5.2C2.8 11 2 13.2 2 15.4c0 3.6 3.4 6.5 7.8 6.5 1.6 0 3.1-.4 4.3-1.1.9.4 1.9.6 3 .6 4.2 0 7.1-2.8 7.1-6.3 0-2.3-1.2-4.4-4-6.7z"/></svg>`,

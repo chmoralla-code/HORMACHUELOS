@@ -26,6 +26,14 @@ const PROVIDERS = {
     env: ["POLLINATIONS_API_KEY"],
     optionalKey: true,
   },
+  hormachuelos_free: {
+    base: "https://api.neuralwatt.com/v1",
+    env: ["NEURALWATT_API_KEY"],
+    noFallback: true,
+    modelAliases: {
+      "hormachuelos-v1": "deepseek-v4-flash",
+    },
+  },
 };
 
 export function resolveUpstream(providerId) {
@@ -53,7 +61,7 @@ export function resolveUpstream(providerId) {
   }
   if (!apiKey && !cfg.optionalKey) {
     // Fallback: OpenRouter can serve many models if the direct key is missing.
-    if (id !== "openrouter") {
+    if (id !== "openrouter" && !cfg.noFallback) {
       const or = resolveUpstream("openrouter");
       if (or.apiKey) {
         return { ...or, provider: "openrouter", requested: id, viaOpenRouter: true };
@@ -67,8 +75,24 @@ export function resolveUpstream(providerId) {
     base: cfg.base,
     apiKey: apiKey || "unused",
     headers: cfg.headers || {},
+    modelAliases: cfg.modelAliases || null,
     viaOpenRouter: false,
   };
+}
+
+/** Resolve a public model id without allowing shared credentials to access arbitrary models. */
+export function resolveHostedModel(upstream, requestedModel) {
+  const requested = String(requestedModel || "").trim();
+  if (!upstream?.modelAliases) {
+    return requested
+      ? { requestedModel: requested, upstreamModel: requested }
+      : { error: "A model is required." };
+  }
+  const upstreamModel = upstream.modelAliases[requested];
+  if (!upstreamModel) {
+    return { error: "HORMACHUELOS FREE only supports Hormachuelos v1." };
+  }
+  return { requestedModel: requested, upstreamModel };
 }
 
 export function hostedProvidersStatus() {

@@ -397,7 +397,15 @@ Current user request:\n{prompt}",
     let auth_request_routed = routed_auth_tool.is_some();
     let license = crate::license::LicenseStatus::load().unwrap_or_default();
     let use_hosted = crate::license::should_use_hosted(&license);
-    let (key, base_url_override) = if use_hosted {
+    let uses_hormachuelos_free = settings.provider.eq_ignore_ascii_case("hormachuelos_free");
+    let (key, base_url_override) = if uses_hormachuelos_free {
+        let session = crate::config::load_website_session().map_err(|_| {
+            anyhow::anyhow!(
+                "Sign in to Hormachuelos before using HORMACHUELOS FREE. Open the account menu and connect this desktop app."
+            )
+        })?;
+        (session, Some(crate::license::hosted_chat_base_url()))
+    } else if use_hosted {
         (
             license.license_key.clone(),
             Some(crate::license::hosted_chat_base_url()),
@@ -1494,7 +1502,10 @@ fn display_model_name(model_id: &str) -> String {
     if raw.is_empty() {
         return "provider default".into();
     }
-    raw.to_string()
+    match raw.to_ascii_lowercase().as_str() {
+        "hormachuelos-v1" => "Hormachuelos v1".into(),
+        _ => raw.to_string(),
+    }
 }
 
 /// Honest provider label derived from the backend actually being invoked.
@@ -1503,6 +1514,7 @@ fn display_provider_name(provider_id: &str) -> String {
         "ollama" => "Ollama".into(),
         "deepseek" => "DeepSeek".into(),
         "cursor" => "Cursor SDK".into(),
+        "hormachuelos_free" => "HORMACHUELOS FREE".into(),
         "openai" => "OpenAI".into(),
         "glm" => "GLM".into(),
         "openrouter" => "OpenRouter".into(),
@@ -1608,6 +1620,11 @@ mod tests {
         assert_eq!(display_model_name("vendor/model:free"), "vendor/model:free");
         assert_eq!(display_provider_name("cursor"), "Cursor SDK");
         assert_eq!(display_provider_name("glm"), "GLM");
+        assert_eq!(display_model_name("hormachuelos-v1"), "Hormachuelos v1");
+        assert_eq!(
+            display_provider_name("hormachuelos_free"),
+            "HORMACHUELOS FREE"
+        );
 
         let identity = identity_instructions("grok-4.5", "Cursor SDK");
         assert!(identity.contains("Actual provider for this request: Cursor SDK"));

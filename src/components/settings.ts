@@ -17,7 +17,8 @@ type ProviderDef = {
     | "glm"
     | "ollama"
     | "openai"
-    | "grok";
+    | "grok"
+    | "hormachuelos";
   logoSrc: string;
   defaultModel: string;
   defaultBaseUrl: string;
@@ -55,6 +56,17 @@ export const PROVIDERS: ProviderDef[] = [
     keyRequired: true,
     models: ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
     hidden: true,
+  },
+  {
+    id: "hormachuelos_free",
+    label: "HORMACHUELOS FREE",
+    logoKey: "hormachuelos",
+    logoSrc: "./logos/hormachuelos-free.svg",
+    defaultModel: "hormachuelos-v1",
+    defaultBaseUrl: "https://hormachuelos.vercel.app/api/v1",
+    keyUrl: "",
+    keyRequired: false,
+    models: ["hormachuelos-v1"],
   },
   {
     id: "ollama",
@@ -128,6 +140,7 @@ export function visibleProviders(): ProviderDef[] {
 
 /** Friendly labels for model IDs (API id unchanged). */
 const MODEL_DISPLAY_NAMES: Record<string, string> = {
+  "hormachuelos-v1": "Hormachuelos v1",
   "deepseek-v4-flash": "DeepSeek V4 Flash",
   "deepseek-v4-pro": "DeepSeek V4 Pro",
   "grok-4.5": "GPT 5.6 Sol",
@@ -160,8 +173,15 @@ const MODEL_DISPLAY_NAMES: Record<string, string> = {
 /** Providers routed through the Cursor local SDK (not chat-completions). */
 export const CURSOR_SDK_PROVIDER_IDS = new Set(["cursor"]);
 
+/** Provider catalogs that are deliberately pinned to branded model aliases. */
+export const STATIC_MODEL_PROVIDER_IDS = new Set(["cursor", "hormachuelos_free"]);
+
 export function isCursorSdkProvider(providerId: string): boolean {
   return CURSOR_SDK_PROVIDER_IDS.has(providerId);
+}
+
+export function hasStaticModelCatalog(providerId: string): boolean {
+  return STATIC_MODEL_PROVIDER_IDS.has(providerId);
 }
 
 /**
@@ -224,6 +244,12 @@ export function isUltraEffort(value: string | null | undefined): boolean {
 /** Resolve locally selected models to the provider that actually serves them. */
 export function backendForModel(modelId: string): { provider: string; baseUrl: string | null } {
   const id = (modelId || "").trim();
+  if (id === "hormachuelos-v1") {
+    return {
+      provider: "hormachuelos_free",
+      baseUrl: "https://hormachuelos.vercel.app/api/v1",
+    };
+  }
   if (id === "deepseek-v4-flash" || id === "deepseek-v4-pro") {
     return { provider: "deepseek", baseUrl: "https://api.deepseek.com" };
   }
@@ -350,6 +376,10 @@ export function normalizeSettings(s: Settings): Settings {
   }
   if (s.provider === "cursor" && s.model !== "grok-4.5") {
     s.model = "grok-4.5";
+  }
+  if (s.provider === "hormachuelos_free") {
+    s.model = "hormachuelos-v1";
+    s.base_url = meta.defaultBaseUrl;
   }
   if (s.provider === "deepseek" && s.model === "deepseek-chat") {
     s.model = "deepseek-v4-flash";
@@ -509,8 +539,8 @@ export class SettingsModal {
   private async discoverModels(providerId: string, opts?: { silent?: boolean; reRender?: boolean }) {
     const provider = PROVIDERS.find((p) => p.id === providerId);
     if (!provider) return;
-    // The Cursor SDK integration intentionally exposes only the pinned model.
-    if (isCursorSdkProvider(providerId)) return;
+    // Branded integrations intentionally expose only their pinned model alias.
+    if (hasStaticModelCatalog(providerId)) return;
     if (provider.keyRequired && !this.keyStates[providerId]) return;
 
     if (!opts?.silent) {
@@ -703,9 +733,11 @@ export class SettingsModal {
     const uiIdForKeys = uiProviderId(this.settings.provider, this.settings.model);
     const discoveryProvider = PROVIDERS.find((provider) => provider.id === uiIdForKeys) || PROVIDERS[0];
     const discoveryRow = el("div", { class: "set-row" });
-    const msg =
+      const msg =
       this.modelDiscoveryMessages[discoveryProvider.id] ||
-      (uiIdForKeys === "ollama"
+      (uiIdForKeys === "hormachuelos_free"
+        ? "Hormachuelos v1 is included for signed-in users. No provider key is stored on this computer."
+        : uiIdForKeys === "ollama"
         ? "Select a locally installed Ollama model above."
         : discoveryProvider.keyRequired && !this.keyStates[discoveryProvider.id]
           ? "Paste and save an API key — models load automatically from the provider."
@@ -716,6 +748,10 @@ export class SettingsModal {
     body.appendChild(this.field("Base URL (optional)", () => {
       const activeProvider = PROVIDERS.find((provider) => provider.id === this.settings.provider)!;
       const inp = el("input", { class: "field", type: "text", value: this.settings.base_url || "", placeholder: activeProvider.defaultBaseUrl }) as HTMLInputElement;
+      if (activeProvider.id === "hormachuelos_free") {
+        inp.readOnly = true;
+        inp.setAttribute("aria-readonly", "true");
+      }
       inp.addEventListener("input", () => (this.settings.base_url = inp.value || null));
       return inp;
     }));
@@ -795,7 +831,9 @@ export class SettingsModal {
       }
     } else {
       const note = el("div", { class: "set-hint", style: "padding:8px 10px;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--fg-2)" });
-      note.textContent = `${activeProvider.label} does not require an API key. Just pick a model and start building.`;
+      note.textContent = activeProvider.id === "hormachuelos_free"
+        ? "Included for signed-in Hormachuelos users. The provider credential is protected by the hosted service and is never bundled with the app."
+        : `${activeProvider.label} does not require an API key. Just pick a model and start building.`;
       keyRow.appendChild(note);
     }
     body.appendChild(keyRow);

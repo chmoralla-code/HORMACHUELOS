@@ -20,12 +20,18 @@ def main() -> None:
         providers = (body.get_attribute("data-providers") or "").split(",")
         assert providers == [
             "cursor",
+            "hormachuelos_free",
             "ollama",
             "deepseek",
             "openrouter",
             "glm",
         ], f"unexpected visible provider catalog: {providers}"
         assert body.get_attribute("data-cursor-models") == "grok-4.5"
+        assert body.get_attribute("data-hormachuelos-free-models") == "hormachuelos-v1"
+        assert body.get_attribute("data-tool-animation") == "lightningToolSpawnBlue"
+        assert body.get_attribute("data-agentic-animation") == "lightningFadeInOutBlue"
+        assert body.get_attribute("data-agentic-color") == "rgb(85, 185, 255)"
+        assert body.get_attribute("data-agentic-chip-animation") == "lightningChipFadeBlue"
 
         android = page.get_by_role("button", name="Toggle Android device preview")
         software = page.get_by_role("button", name="Toggle software window preview")

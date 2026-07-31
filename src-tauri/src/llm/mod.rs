@@ -123,7 +123,10 @@ pub mod glm;
 pub mod openai;
 
 pub fn provider_needs_key(provider: &str) -> bool {
-    !matches!(provider.to_lowercase().as_str(), "ollama")
+    !matches!(
+        provider.to_lowercase().as_str(),
+        "ollama" | "hormachuelos_free"
+    )
 }
 
 pub fn provider_default_base_url(provider: &str) -> Option<&'static str> {
@@ -135,6 +138,7 @@ pub fn provider_default_base_url(provider: &str) -> Option<&'static str> {
         "glm" => Some("https://open.bigmodel.cn/api/paas/v4"),
         "openai" => Some("https://api.openai.com/v1"),
         "cursor" => Some("https://api.cursor.com/v1"),
+        "hormachuelos_free" => Some("https://hormachuelos.vercel.app/api/v1"),
         "anthropic" => Some("https://api.anthropic.com"),
         "gemini" => Some("https://generativelanguage.googleapis.com"),
         _ => None,
@@ -183,7 +187,9 @@ pub fn build_provider(
         .transpose()?;
     let base = validated_base.as_deref();
     match prov.as_str() {
-        "openai" | "cursor" => Ok(Box::new(openai::OpenAi::new(&key, base, model, &prov))),
+        "openai" | "cursor" | "hormachuelos_free" => {
+            Ok(Box::new(openai::OpenAi::new(&key, base, model, &prov)))
+        }
         "anthropic" => Ok(Box::new(anthropic::Anthropic::new(api_key, base, model))),
         "gemini" | "google" => Ok(Box::new(gemini::Gemini::new(api_key, base, model))),
         "ollama" => Ok(Box::new(openai::OpenAi::new(&key, base, model, &prov))),
@@ -192,7 +198,7 @@ pub fn build_provider(
         "deepseek" => Ok(Box::new(openai::OpenAi::new(&key, base, model, &prov))),
         "glm" => Ok(Box::new(openai::OpenAi::new(&key, base, model, &prov))),
         other => Err(anyhow!(
-            "Unknown provider: {other}. Use deepseek | openrouter | glm | openai | cursor | anthropic | gemini | ollama | pollinations"
+            "Unknown provider: {other}. Use hormachuelos_free | deepseek | openrouter | glm | openai | cursor | anthropic | gemini | ollama | pollinations"
         )),
     }
 }
@@ -236,5 +242,10 @@ mod tests {
             );
         }
         assert!(!provider_needs_key("ollama"));
+        assert_eq!(
+            provider_default_base_url("hormachuelos_free"),
+            Some("https://hormachuelos.vercel.app/api/v1")
+        );
+        assert!(!provider_needs_key("hormachuelos_free"));
     }
 }

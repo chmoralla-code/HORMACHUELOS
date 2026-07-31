@@ -49,6 +49,30 @@
       window.__preview = preview;
       document.body.dataset.providers = visibleProviders().map((provider) => provider.id).join(",");
       document.body.dataset.cursorModels = getProviderMeta("cursor")?.models.join(",") || "";
+      document.body.dataset.hormachuelosFreeModels =
+        getProviderMeta("hormachuelos_free")?.models.join(",") || "";
+
+      const toolProbe = document.createElement("div");
+      toolProbe.className = "tool-card-wrap tool-spawn";
+      document.body.appendChild(toolProbe);
+      document.body.dataset.toolAnimation = getComputedStyle(toolProbe).animationName;
+      toolProbe.remove();
+
+      const lightningProbe = document.createElement("div");
+      lightningProbe.className = "tool-card pending";
+      lightningProbe.innerHTML = '<span class="shine-ch shine-red">H</span>';
+      document.body.appendChild(lightningProbe);
+      const lightningStyle = getComputedStyle(lightningProbe.firstElementChild);
+      document.body.dataset.agenticAnimation = lightningStyle.animationName;
+      document.body.dataset.agenticColor = lightningStyle.color;
+      lightningProbe.remove();
+
+      const chipProbe = document.createElement("button");
+      chipProbe.className = "chip chip-cap chip-cap-agentic";
+      document.body.appendChild(chipProbe);
+      document.body.dataset.agenticChipAnimation =
+        getComputedStyle(chipProbe, "::after").animationName;
+      chipProbe.remove();
       await preview.open({
         projectRoot: "C:\\preview-fixture",
         entryPath: "index.html",

@@ -1102,6 +1102,44 @@
     text-shadow: 0 0 8px rgba(255, 70, 60, 0.45);
   }
 }
+/* HORMACHUELOS live tools: blue lightning that fades in/out without layout work. */
+@keyframes lightningFadeInOutBlue {
+  0%, 100% { opacity: 0.42; transform: translateY(0) scale(0.985); }
+  16% { opacity: 1; transform: translateY(-0.5px) scale(1.025); }
+  24% { opacity: 0.58; transform: translateY(0.5px) scale(0.995); }
+  34%, 68% { opacity: 1; transform: translateY(0) scale(1); }
+  78% { opacity: 0.68; transform: translateY(0.5px) scale(0.99); }
+}
+@keyframes lightningToolSpawnBlue {
+  0% { opacity: 0; transform: translateY(5px) scale(0.992); }
+  34% { opacity: 1; transform: translateY(0) scale(1.006); }
+  46% { opacity: 0.58; transform: translateY(1px) scale(0.998); }
+  58% { opacity: 1; transform: translateY(0) scale(1); }
+  76% { opacity: 0.78; transform: translateY(0) scale(1); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes lightningChipFadeBlue {
+  0%, 100% { opacity: 0.22; transform: scale(0.96); }
+  30% { opacity: 0.92; transform: scale(1); }
+  42% { opacity: 0.38; transform: scale(0.985); }
+  56% { opacity: 0.78; transform: scale(1); }
+}
+
+.chip-cap-agentic {
+  position: relative;
+  color: #72c8ff !important;
+  border-color: rgba(69, 173, 255, 0.48) !important;
+}
+.chip-cap-agentic::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border: 1px solid rgba(85, 185, 255, 0.88);
+  border-radius: inherit;
+  pointer-events: none;
+  animation: lightningChipFadeBlue 1.5s ease-in-out infinite;
+  will-change: opacity, transform;
+}
 @keyframes toolSpawn {
   0%   { opacity: 0; }
   100% { opacity: 1; }
@@ -1227,21 +1265,23 @@
 .shine-ch.shine-red,
 .activity-shimmer.shine-red .shine-ch {
   display: inline-block;
-  color: #c44a44 !important;
+  color: #55b9ff !important;
   -webkit-text-fill-color: currentColor !important;
-  animation-name: letterShineRed !important;
-  animation-duration: 1.25s !important;
+  text-shadow: 0 0 8px rgba(49, 158, 255, 0.72), 0 0 18px rgba(20, 112, 255, 0.36);
+  animation-name: lightningFadeInOutBlue !important;
+  animation-duration: 1.05s !important;
   animation-timing-function: ease-in-out !important;
   animation-iteration-count: infinite !important;
-  animation-delay: calc(var(--i, 0) * 0.045s) !important;
-  will-change: color, text-shadow;
+  animation-delay: calc(var(--i, 0) * 0.035s) !important;
+  will-change: opacity, transform;
 }
 .activity-shimmer.shine-red,
 .thinking-wrap:not(.thinking-done) .thinking-toggle-row .thinking-simple-label.shine-red,
 .tool-batch-wrap.is-running .tool-batch-label.shine-red,
 .tool-card.pending .tool-name.shine-red,
 .thinking-running .thinking-simple-label.shine-red {
-  color: #e06058 !important;
+  color: #72c8ff !important;
+  text-shadow: 0 0 10px rgba(36, 145, 255, 0.48);
   letter-spacing: 0.02em;
   font-weight: 500;
 }
@@ -1488,7 +1528,7 @@
   color: rgba(205, 205, 205, 0.82);
 }
 
-/* Slow fade-in for tools / confirm / summary */
+/* Lightning fade-in/fade-out for tools, confirmations, and agentic summaries. */
 .tool-card-wrap.tool-spawn,
 .tool-card.tool-spawn,
 .tool-confirm-wrap.tool-spawn,
@@ -1496,11 +1536,15 @@
 .integration-auth-wrap.tool-spawn,
 .done-card.tool-spawn,
 .summary-card.tool-spawn,
-.tool-batch-wrap.tool-spawn,
+.tool-batch-wrap.tool-spawn {
+  animation: lightningToolSpawnBlue var(--fade-in, 0.72s) ease-out both;
+  will-change: opacity, transform;
+  /* Fallback if animation is killed / frozen at 0% (WebView2 + reduced motion) */
+  opacity: 1;
+}
 .msg-enter {
   animation: toolSpawn var(--fade-in, 0.9s) ease both;
   will-change: opacity;
-  /* Fallback if animation is killed / frozen at 0% (WebView2 + reduced motion) */
   opacity: 1;
 }
 
@@ -3383,3 +3427,38 @@
 }
 
 /* plus-menu-v2 */
+
+@media (prefers-reduced-motion: reduce) {
+  .tool-card-wrap.tool-spawn,
+  .tool-card.tool-spawn,
+  .tool-confirm-wrap.tool-spawn,
+  .tool-confirm.tool-spawn,
+  .integration-auth-wrap.tool-spawn,
+  .done-card.tool-spawn,
+  .summary-card.tool-spawn,
+  .tool-batch-wrap.tool-spawn {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+  }
+
+  .activity-shimmer .shine-ch,
+  .thinking-wrap:not(.thinking-done) .shine-ch,
+  .tool-batch-wrap.is-running .shine-ch,
+  .tool-card.pending .shine-ch,
+  .thinking-running .shine-ch,
+  .shine-ch.shine-red,
+  .activity-shimmer.shine-red .shine-ch {
+    animation: none !important;
+    color: #72c8ff !important;
+    opacity: 1 !important;
+    transform: none !important;
+    text-shadow: none !important;
+  }
+
+  .chip-cap-agentic::after {
+    animation: none !important;
+    opacity: 0.45 !important;
+    transform: none !important;
+  }
+}

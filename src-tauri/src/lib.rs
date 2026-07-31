@@ -203,7 +203,25 @@ async fn test_provider_connection(
     }
 
     let started = std::time::Instant::now();
-    let key = if llm::provider_needs_key(&provider) {
+    let is_hormachuelos_free = provider.eq_ignore_ascii_case("hormachuelos_free");
+    let effective_base_url = if is_hormachuelos_free {
+        Some(license::hosted_chat_base_url())
+    } else {
+        base_url.clone()
+    };
+    let key = if is_hormachuelos_free {
+        match config::load_website_session() {
+            Ok(session) => session,
+            Err(_) => {
+                return Ok(ConnectionTestResult {
+                    ok: false,
+                    latency_ms: started.elapsed().as_millis(),
+                    error_code: Some("sign_in_required".into()),
+                    message: "Sign in to Hormachuelos before using HORMACHUELOS FREE.".into(),
+                });
+            }
+        }
+    } else if llm::provider_needs_key(&provider) {
         match config::load_api_key(&provider) {
             Ok(key) => key,
             Err(_) => {
@@ -219,7 +237,7 @@ async fn test_provider_connection(
         String::new()
     };
 
-    let client = llm::build_provider(&provider, &key, base_url.as_deref(), model.trim())
+    let client = llm::build_provider(&provider, &key, effective_base_url.as_deref(), model.trim())
         .map_err(|e| e.to_string())?;
     let messages = [
         llm::ChatMessage::system("This is a connection test. Reply with OK only."),
@@ -269,6 +287,9 @@ async fn list_provider_models(
     base_url: Option<String>,
 ) -> Result<Vec<String>, String> {
     config::validate_provider_id(&provider).map_err(|e| e.to_string())?;
+    if provider.eq_ignore_ascii_case("hormachuelos_free") {
+        return Ok(vec!["hormachuelos-v1".into()]);
+    }
     let license = license::LicenseStatus::load().unwrap_or_default();
     let use_hosted = license::should_use_hosted(&license);
     if provider.eq_ignore_ascii_case("cursor") && !use_hosted {

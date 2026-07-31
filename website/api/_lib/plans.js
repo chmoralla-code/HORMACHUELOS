@@ -41,6 +41,7 @@ export function billableTokens(provider, model, raw) {
   let weight = 1;
   if (p === "deepseek" && m.includes("flash")) weight = 0.1;
   else if (p === "deepseek") weight = 0.3;
+  else if (p === "hormachuelos_free") weight = 0.1;
   else if (p === "ollama") weight = 0.05;
   else if (p === "openrouter" && (m.includes("free") || m.endsWith(":free"))) weight = 0.05;
   else if (p === "openrouter") weight = 0.45;

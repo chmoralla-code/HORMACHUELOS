@@ -1,5 +1,5 @@
 import { api, type Settings } from "../ipc";
-import { PROVIDERS, effortOptionsForProvider, displayModelName, getProviderMeta, getSettingsSafe, isCursorSdkProvider, isUltraEffort, normalizeEffortForProvider, uiProviderId, visibleProviders } from "./settings";
+import { PROVIDERS, effortOptionsForProvider, displayModelName, getProviderMeta, getSettingsSafe, hasStaticModelCatalog, isCursorSdkProvider, isUltraEffort, normalizeEffortForProvider, uiProviderId, visibleProviders } from "./settings";
 import { clear, el } from "./util";
 import { icon, icons } from "./icons";
 
@@ -132,7 +132,7 @@ export class ModelBar {
     if (this.discoveredModels[providerId]?.length) return;
     const meta = getProviderMeta(providerId);
     if (!meta) return;
-    if (isCursorSdkProvider(providerId)) return;
+    if (hasStaticModelCatalog(providerId)) return;
     try {
       // Keyless providers always; others need a saved key (backend enforces).
       const models = await api.listProviderModels(
@@ -543,7 +543,13 @@ export class ModelBar {
       const caps = CAPABILITIES[mode];
       const cap = caps.find((c) => c.id === this.capabilityId) || caps[0];
       const capWrap = el("div", { class: "chip-wrap" });
-      const capBtn = this.chipBtn(cap.label, cap.title, `Capability: ${cap.label}`, "chip-cap");
+      const agentic = mode === "auto" || mode === "full";
+      const capBtn = this.chipBtn(
+        cap.label,
+        cap.title,
+        `Capability: ${cap.label}`,
+        "chip-cap" + (agentic ? " chip-cap-agentic" : ""),
+      );
       capBtn.addEventListener("click", (ev) => {
         ev.preventDefault();
         ev.stopPropagation();

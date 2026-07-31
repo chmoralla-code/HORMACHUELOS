@@ -22,7 +22,7 @@ export type Settings = {
   model_effort?: string;
 };
 
-export type Provider = "deepseek" | "openrouter" | "glm" | "openai" | "cursor" | "anthropic" | "gemini" | "ollama" | "pollinations";
+export type Provider = "deepseek" | "openrouter" | "glm" | "openai" | "cursor" | "hormachuelos_free" | "anthropic" | "gemini" | "ollama" | "pollinations";
 
 export type ConnectionTestResult = {
   ok: boolean;
