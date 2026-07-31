@@ -1,0 +1,199 @@
+/**
+ * Playwright check: serve dist/, open UI, assert sandwich drawer buttons
+ * are visible, click them, screenshot.
+ */
+import { createServer } from "http";
+import { readFileSync, existsSync, mkdirSync, writeFileSync } from "fs";
+import { join, extname, dirname } from "path";
+import { fileURLToPath } from "url";
+import { chromium } from "playwright";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const ROOT = join(__dirname, "..");
+const DIST = join(ROOT, "dist");
+const SHOTS = join(ROOT, "test_screenshots");
+mkdirSync(SHOTS, { recursive: true });
+
+const MIME = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".ico": "image/x-icon",
+  ".json": "application/json",
+};
+
+function serveDist(port = 4177) {
+  const server = createServer((req, res) => {
+    let urlPath = decodeURIComponent((req.url || "/").split("?")[0]);
+    if (urlPath === "/") urlPath = "/index.html";
+    const file = join(DIST, urlPath.replace(/^\//, ""));
+    if (!file.startsWith(DIST) || !existsSync(file)) {
+      res.writeHead(404);
+      res.end("not found: " + urlPath);
+      return;
+    }
+    const ext = extname(file);
+    res.writeHead(200, { "Content-Type": MIME[ext] || "application/octet-stream" });
+    res.end(readFileSync(file));
+  });
+  return new Promise((resolve) => {
+    server.listen(port, "127.0.0.1", () => resolve({ server, port }));
+  });
+}
+
+const tauriMock = `
+(() => {
+  const callbacks = new Map();
+  const settings = {
+    provider: "deepseek",
+    model: "deepseek-v4-pro",
+    base_url: "https://api.deepseek.com",
+    max_iterations: 25,
+    command_timeout_secs: 120,
+    auto_approve: false,
+  };
+  const invoke = async (cmd) => {
+    if (cmd === "list_recent_projects") return [];
+    if (cmd === "app_version") return "0.1.0";
+    if (cmd === "get_settings") return settings;
+    if (cmd === "has_api_key") return false;
+    if (cmd === "get_project_root") return null;
+    if (cmd === "list_project_files") return { nodes: [], truncated: false };
+    return null;
+  };
+  window.__TAURI_INTERNALS__ = {
+    invoke,
+    transformCallback(callback, once = false) {
+      const id = crypto.getRandomValues(new Uint32Array(1))[0];
+      callbacks.set(id, (data) => {
+        if (once) callbacks.delete(id);
+        return callback && callback(data);
+      });
+      return id;
+    },
+    unregisterCallback(id) { callbacks.delete(id); },
+    runCallback(id, data) {
+      const cb = callbacks.get(id);
+      if (cb) cb(data);
+    },
+    convertFileSrc(path) { return path; },
+  };
+  window.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
+    unregisterListener(_e, id) { callbacks.delete(id); },
+  };
+})();
+`;
+
+function box(el) {
+  return el.evaluate((n) => {
+    const r = n.getBoundingClientRect();
+    const s = getComputedStyle(n);
+    return {
+      text: (n.textContent || "").trim().slice(0, 40),
+      x: Math.round(r.x),
+      y: Math.round(r.y),
+      w: Math.round(r.width),
+      h: Math.round(r.height),
+      display: s.display,
+      visibility: s.visibility,
+      opacity: s.opacity,
+      color: s.color,
+      bg: s.backgroundColor,
+      z: s.zIndex,
+      inDom: document.body.contains(n),
+    };
+  });
+}
+
+async function main() {
+  const report = { ok: false, checks: [], errors: [] };
+  const { server, port } = await serveDist(4177);
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+
+  page.on("pageerror", (e) => report.errors.push("pageerror: " + e.message));
+  page.on("console", (msg) => {
+    if (msg.type() === "error") report.errors.push("console: " + msg.text());
+  });
+
+  await page.addInitScript(tauriMock);
+
+  try {
+    await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: "networkidle", timeout: 15000 });
+    await page.waitForTimeout(800);
+
+    const left = page.locator("#drawer-left-btn");
+    const right = page.locator("#drawer-right-btn");
+    const header = page.locator("#header");
+
+    const leftCount = await left.count();
+    const rightCount = await right.count();
+    report.checks.push({ name: "left btn in DOM", pass: leftCount === 1, detail: String(leftCount) });
+    report.checks.push({ name: "right btn in DOM", pass: rightCount === 1, detail: String(rightCount) });
+
+    if (leftCount) {
+      const b = await box(left);
+      report.checks.push({
+        name: "left btn visible box",
+        pass: b.w > 20 && b.h > 20 && b.opacity !== "0" && b.visibility !== "hidden" && b.display !== "none",
+        detail: JSON.stringify(b),
+      });
+      report.checks.push({
+        name: "left btn on screen",
+        pass: b.x >= 0 && b.y >= 0 && b.x < 1280,
+        detail: `x=${b.x} y=${b.y}`,
+      });
+    }
+    if (rightCount) {
+      const b = await box(right);
+      report.checks.push({
+        name: "right btn visible box",
+        pass: b.w > 20 && b.h > 20 && b.opacity !== "0" && b.visibility !== "hidden" && b.display !== "none",
+        detail: JSON.stringify(b),
+      });
+    }
+
+    // Header HTML snapshot
+    const headerHtml = await header.innerHTML().catch(() => "(missing)");
+    report.headerHtml = headerHtml.slice(0, 800);
+
+    await page.screenshot({ path: join(SHOTS, "drawer_initial.png"), fullPage: true });
+
+    if (leftCount) {
+      await left.click();
+      await page.waitForTimeout(400);
+      const closedLeft = await page.locator("#app.left-drawer-closed").count();
+      report.checks.push({ name: "left click toggles closed", pass: closedLeft === 1, detail: String(closedLeft) });
+      await page.screenshot({ path: join(SHOTS, "drawer_left_closed.png"), fullPage: true });
+      await left.click();
+      await page.waitForTimeout(400);
+    }
+    if (rightCount) {
+      await right.click();
+      await page.waitForTimeout(400);
+      const closedRight = await page.locator("#app.right-drawer-closed").count();
+      report.checks.push({ name: "right click toggles closed", pass: closedRight === 1, detail: String(closedRight) });
+      await page.screenshot({ path: join(SHOTS, "drawer_right_closed.png"), fullPage: true });
+    }
+
+    report.ok = report.checks.every((c) => c.pass);
+  } catch (e) {
+    report.errors.push(String(e));
+    report.ok = false;
+    try {
+      await page.screenshot({ path: join(SHOTS, "drawer_error.png"), fullPage: true });
+    } catch { /* ignore */ }
+  } finally {
+    await browser.close();
+    server.close();
+  }
+
+  const out = join(SHOTS, "drawer_report.json");
+  writeFileSync(out, JSON.stringify(report, null, 2));
+  console.log(JSON.stringify(report, null, 2));
+  process.exit(report.ok ? 0 : 1);
+}
+
+main();

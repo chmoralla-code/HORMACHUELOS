@@ -1,0 +1,103 @@
+# AI-Forge
+
+A monochrome agentic desktop studio. Natural language in → websites, games, and apps out.
+Runs a hidden PowerShell agent backed by any LLM provider (OpenAI / Anthropic / Gemini).
+
+## Build artifacts
+
+| File | Size | Purpose |
+|------|------|---------|
+| `ai-forge.exe` | ~5.9 MB | Standalone executable |
+| `AI-Forge_0.1.0_x64_en-US.msi` | ~2.4 MB | MSI installer |
+| `AI-Forge_0.1.0_x64-setup.exe` | ~1.7 MB | NSIS setup wizard |
+
+Located in `src-tauri/target/release/` (exe) and `src-tauri/target/release/bundle/` (installers).
+
+## First run
+
+1. Launch `ai-forge.exe`.
+2. Click **Settings** (sidebar) → pick a provider → paste your API key → **Save key** → **Test connection** → **Save**.
+3. Click **New Project** → choose a parent folder + name → **Create**.
+4. Type a prompt like *"Make a portfolio website with dark theme"* and press Enter.
+5. The agent scaffolds, writes files, and runs build commands. PowerShell runs **hidden** — output streams into the Console panel.
+
+## What it does
+
+- **Hidden PowerShell**: every `run_command` tool call spawns `powershell -NoProfile -NonInteractive` with `CREATE_NO_WINDOW=0x08000000`. No terminal window ever appears — stdout/stderr are captured and shown in the in-app Console.
+- **Agentic loop**: think → tool_call → observe → repeat, up to 25 iterations (configurable). User can press Stop to cancel.
+- **Verified providers**: test credentials and model access before a run, and refresh the provider's current model catalog from Settings.
+- **Foundry Desk workspace**: responsive build ledger with an in-flow Forge Dock and a Files / Changes / Console inspector.
+- **Project explorer and preview**: search a bounded project tree and inspect UTF-8 source files without leaving the app.
+- **Run change ledger**: captures successful file tools and compares before/after project metadata, including command-driven changes.
+- **Project inspector boundary**: file browsing derives paths from the active canonical project root, rejects traversal/symlink escapes, skips build/dependency folders, and caps tree and preview sizes.
+- **Tools**: `read_file`, `write_file`, `edit_file`, `list_dir`, `glob`, `grep`, `run_command`, `git_init`, `git_add_all`, `git_commit`, `git_status`, `done`.
+- **API keys**: stored in the Windows Credential Manager via the `keyring` crate — never written to disk plaintext, never logged.
+
+## Computer use (Windows)
+
+With **Cursor SDK** selected, open **Settings → Agent → Computer use** and enable the opt-in toggle. The agent can list allowed windows, capture a selected window, focus it, and request clicks, typing, key presses, scrolling, or dragging.
+
+- Every observation is short-lived and can authorize only one subsequent action.
+- Clicks, typing, key presses, and drags always require action-time approval—even in Full mode.
+- Realtime keyboard games use one bounded native Arrow/WASD/Space sequence (up to 30 seconds) instead of waiting for a model response between moves.
+- Terminal, Run, authentication, password-manager, Windows Security/privacy, ChatGPT, Codex, and AI-Forge windows are blocked.
+- Press **Ctrl+Alt+Esc** at any time to pause computer use and stop active runs. Resume it explicitly from Settings.
+
+## Providers
+
+| Provider | Default model | Key URL |
+|----------|---------------|---------|
+| DeepSeek | `deepseek-v4-pro` | https://platform.deepseek.com/api_keys |
+| OpenRouter | tool-capable free models | https://openrouter.ai/keys |
+| GLM / Z.AI | `glm-5.2` | https://open.bigmodel.cn/usercenter/apikeys |
+
+All three use an OpenAI-compatible function-calling schema. A custom HTTPS `base_url` can be set for trusted proxies or compatible endpoints.
+
+## Theme
+
+“Foundry Desk” uses furnace-black surfaces, parchment text, one ember action color, etched dividers, and a subtle drafting grid. It relies on packaged Windows-native typography (`Segoe UI Variable`, `Bahnschrift`, and `Cascadia Code`), includes visible keyboard focus, reduced-motion support, selectable code/output, and a compact 900×600 inspector layout.
+
+## Development
+
+```bash
+npm install          # frontend deps
+npm run build        # build frontend (vite)
+cargo tauri build    # full release build → exe + installers
+cargo tauri dev      # dev mode with hot reload
+```
+
+## Architecture
+
+```
+src-tauri/src/
+  lib.rs        Tauri commands + plugin registration
+  agent.rs      Agentic loop orchestrator
+  cursor_bridge.rs  Cursor SDK bridge + host approval protocol
+  computer_use.rs  Native Windows observation/input safety broker
+  config.rs     Settings + OS keychain API key storage
+  state.rs      AppState (project root, settings, recents, cancel flag)
+  tools.rs      Tool schemas + execution (incl. hidden PowerShell runner)
+  workspace.rs  Project-root-contained file tree and read-only preview API
+  llm/mod.rs    LlmProvider trait
+  llm/openai.rs OpenAI provider (chat/completions + tool_calls)
+  llm/anthropic.rs  Anthropic provider (messages + tool_use)
+  llm/gemini.rs Gemini provider (generateContent + functionCall)
+
+src/
+  main.ts          App bootstrap, IPC glue, event routing
+  ipc.ts           Typed invoke() wrappers + agent event listener
+  app.css          App layout + component styles (monochrome)
+  theme/tokens.css Design tokens (colors, fonts, motion)
+  theme/globals.css Reset + utility classes
+  components/      sidebar, chat, console, settings, picker, icons
+  components/workspace.ts  file explorer, preview, inspector tabs, run review
+  theme/workspace.css      Foundry Desk layout and responsive styling
+```
+
+## Tech
+
+- Tauri 2.11 (Rust backend + WebView2 frontend)
+- Vanilla TypeScript + Vite (no React → 23 KB JS bundle)
+- reqwest for LLM API calls
+- keyring for OS credential storage
+- Native `std::process::Command` with `CREATE_NO_WINDOW` for hidden PowerShell

@@ -1,0 +1,19 @@
+Hormachuelos — End User License Agreement (Summary)
+
+Thank you for installing Hormachuelos, a Pinoy-made desktop AI agent for builders.
+
+BY INSTALLING OR USING THIS SOFTWARE, YOU AGREE TO THE FOLLOWING:
+
+1. License. You receive a personal, non-exclusive license to install and use Hormachuelos on devices you own or control, subject to your plan or bring-your-own-key (BYOK) terms.
+
+2. Your projects. You keep ownership of the code and files you create. Hormachuelos runs locally on your machine; send only what you choose to AI providers you configure.
+
+3. Payments. Paid plans and top-ups may be billed in Philippine pesos via GCash, Maya, or other supported methods when checkout is live. Demo checkouts do not charge real money.
+
+4. Acceptable use. Do not use the software for illegal activity, abuse of third-party APIs, or redistributing license keys.
+
+5. Disclaimer. The software is provided “as is” without warranties. We are not liable for lost data, failed builds, or third-party model costs.
+
+6. Support. For help, contact Hormachuelos support via Messenger / the channels listed on hormachuelos.com (or your download page).
+
+Full product and privacy terms may be published on the Hormachuelos website and supersede this summary when they conflict.

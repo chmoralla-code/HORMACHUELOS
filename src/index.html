@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#1e1e1e" />
+    <title>Hormachuelos</title>
+    <link rel="stylesheet" href="/theme/tokens.css" />
+    <link rel="stylesheet" href="/theme/globals.css" />
+    <link rel="stylesheet" href="/app.css" />
+    <link rel="stylesheet" href="/theme/workspace.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#chat">Skip to chat</a>
+    <div id="app">
+      <nav class="sidebar" id="sidebar" aria-label="Projects"></nav>
+      <section class="main" id="workspace" aria-label="Workspace">
+        <header class="header" id="header">
+          <button
+            type="button"
+            class="drawer-btn drawer-btn-left active"
+            id="drawer-left-btn"
+            aria-pressed="true"
+            title="Toggle left panel"
+            aria-label="Toggle left panel"
+          >
+            <span class="drawer-btn-bars" aria-hidden="true"><i></i><i></i><i></i></span>
+          </button>
+          <!-- Project path lives in the left sandwich drawer -->
+          <div class="h-project" id="header-project" hidden aria-hidden="true"></div>
+          <div class="h-provider" id="header-actions"></div>
+          <button
+            type="button"
+            class="drawer-btn drawer-btn-right active"
+            id="drawer-right-btn"
+            aria-pressed="true"
+            title="Toggle right panel"
+            aria-label="Toggle right panel"
+          >
+            <span class="drawer-btn-bars" aria-hidden="true"><i></i><i></i><i></i></span>
+          </button>
+        </header>
+        <div class="workspace workbench">
+          <section class="stage" aria-label="Build ledger">
+            <main class="chat" id="chat" tabindex="-1" role="log" aria-live="polite"></main>
+            <section class="file-viewer" id="file-viewer" aria-label="File preview" hidden></section>
+            <section class="forge-dock" id="forge-dock" aria-label="Composer"></section>
+          </section>
+          <aside class="inspector" id="inspector" aria-label="Project inspector">
+            <div class="inspector-tabs" role="tablist" aria-label="Inspector views">
+              <button id="files-tab" class="inspector-tab active" role="tab" data-inspector-tab="files" aria-controls="files-panel" aria-selected="true" tabindex="0">Files</button>
+              <button id="changes-tab" class="inspector-tab" role="tab" data-inspector-tab="changes" aria-controls="changes-panel" aria-selected="false" tabindex="-1">Changes</button>
+              <button id="console-tab" class="inspector-tab" role="tab" data-inspector-tab="console" aria-controls="console-panel" aria-selected="false" tabindex="-1">Console</button>
+            </div>
+            <section class="inspector-panel" id="files-panel" role="tabpanel" aria-labelledby="files-tab"></section>
+            <section class="inspector-panel" id="changes-panel" role="tabpanel" aria-labelledby="changes-tab" hidden></section>
+            <section class="console inspector-panel" id="console-panel" role="tabpanel" aria-labelledby="console-tab" hidden></section>
+          </aside>
+          <aside class="site-preview" id="site-preview-slot" aria-label="Build preview" hidden></aside>
+        </div>
+      </section>
+      <div class="modal-root" id="modal-root"></div>
+      <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+    </div>
+    <script type="module" src="/main.ts"></script>
+  </body>
+</html>

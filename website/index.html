@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="Hormachuelos — AI coding agent for Filipinos. Pay with GCash. PHP pricing." />
+  <title>Hormachuelos — AI for builders who pay with GCash</title>
+  <link rel="stylesheet" href="css/styles.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="site-header" id="site-header">
+    <div class="container header-inner">
+      <a href="#/" class="brand" data-link>
+        <span class="brand-mark" aria-hidden="true">H</span>
+        <span class="brand-name">Hormachuelos</span>
+      </a>
+      <nav class="nav" id="nav" aria-label="Primary">
+        <a href="#/" data-link>Home</a>
+        <a href="#/features" data-link>Features</a>
+        <a href="#/pricing" data-link>Pricing</a>
+        <a href="#/faq" data-link>FAQ</a>
+        <a href="#/support" data-link>Support</a>
+      </nav>
+      <div class="header-actions" id="header-actions">
+        <!-- filled by app.js -->
+      </div>
+      <button type="button" class="nav-toggle" id="nav-toggle" aria-label="Open menu" aria-expanded="false">
+        <span></span><span></span>
+      </button>
+    </div>
+  </header>
+
+  <main id="main" class="main"></main>
+
+  <footer class="site-footer">
+    <div class="container footer-grid">
+      <div>
+        <div class="brand brand-footer">
+          <span class="brand-mark" aria-hidden="true">H</span>
+          <span class="brand-name">Hormachuelos</span>
+        </div>
+        <p class="muted small">AI coding agent for Filipinos. Local payment. Local support.</p>
+      </div>
+      <div>
+        <h4 class="footer-heading">Product</h4>
+        <a href="#/features" data-link>Features</a>
+        <a href="#/pricing" data-link>Pricing</a>
+        <a href="#/download" data-link>Download</a>
+      </div>
+      <div>
+        <h4 class="footer-heading">Account</h4>
+        <a href="#/login" data-link>Log in</a>
+        <a href="#/signup" data-link>Sign up</a>
+        <a href="#/dashboard" data-link>Dashboard</a>
+      </div>
+      <div>
+        <h4 class="footer-heading">Legal</h4>
+        <a href="#/terms" data-link>Terms</a>
+        <a href="#/privacy" data-link>Privacy</a>
+        <a href="#/refund" data-link>Refunds</a>
+      </div>
+    </div>
+    <div class="container footer-bottom">
+      <span class="muted small">© <span id="year"></span> Hormachuelos · PH</span>
+      <span class="pay-badges" title="Payment methods">
+        <span class="pay-badge">GCash</span>
+        <span class="pay-badge">Maya</span>
+        <span class="pay-badge">₱ PHP</span>
+      </span>
+    </div>
+  </footer>
+
+  <div id="toast" class="toast" hidden role="status"></div>
+  <script src="js/app.js" type="module"></script>
+</body>
+</html>

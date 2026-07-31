@@ -1,0 +1,3628 @@
+import { api, type AgentEvent, type ComputerUseFxEvent } from "../ipc";
+import { icon } from "./icons";
+import type { SessionMessage } from "./session";
+import { ToolArgsStreamDecoder, type ToolArgField } from "./tool-args-stream";
+import { clear, div, el, escapeHtml, formatChatTime, renderMarkdown, setShimmerText } from "./util";
+
+type ToolCardEl = { head: HTMLElement; body: HTMLElement; card: HTMLElement };
+type PendingTool = { id: string; name: string; arguments: any };
+type ToolStreamState = {
+  name: string;
+  decoder: ToolArgsStreamDecoder;
+  paintFrame: number | null;
+  renderedField: ToolArgField | null;
+  renderedContent: string;
+};
+
+export class Chat {
+  node: HTMLElement;
+  composer: HTMLElement;
+  input!: HTMLTextAreaElement;
+  sendBtn!: HTMLButtonElement;
+  stopBtn!: HTMLButtonElement;
+  /** Compact strip above the chat box for queued (pending) messages. */
+  private pendingRail!: HTMLElement;
+  running = false;
+  stopping = false;
+  /**
+   * True when the user hit Stop (or the backend reported cancelled).
+   * Prevents auto-draining the pending queue after a cancelled run — the next
+   * message must be an intentional send.
+   */
+  private userCancelled = false;
+  /** True while force-finishing live tool rows so we don't spawn idle Thinking… */
+  private sealingTools = false;
+  /** Messages queued while the agent is still working on the current run. */
+  private pendingQueue: { id: string; text: string; el: HTMLElement }[] = [];
+  private drainingPending = false;
+  toolCards = new Map<string, ToolCardEl>();
+  /** Tools that have started; cards appear immediately and update on result. */
+  private pendingTools = new Map<string, PendingTool>();
+  /** Incremental, display-only tool argument streams keyed by preview/final id. */
+  private toolStreams = new Map<string, ToolStreamState>();
+  pendingAssistant: HTMLElement | null = null;
+  /** Message shell for the current assistant bubble (for timestamps). */
+  private pendingAssistantMsg: HTMLElement | null = null;
+  /** Assistant Markdown bodies waiting for one batched paint on the next frame. */
+  private assistantPaintTargets = new Set<HTMLElement>();
+  private assistantPaintFrame: number | null = null;
+  thinking: HTMLElement | null = null;
+  thinkingBody: HTMLElement | null = null;
+  thinkingText: string = "";
+  onSend: (prompt: string) => void;
+  onStop: () => void;
+  onNeedProject: () => void;
+  /** Open an existing project folder (change AI work directory). */
+  onOpenProject: () => void;
+  /** Create a new project folder. */
+  onNewProject: () => void;
+  /** Reveal current project in the system file explorer. */
+  onRevealProject: () => void;
+  /** Open Settings, optionally scrolled to an integration card. */
+  onOpenSettings: (integrationId?: string) => void;
+  /** Active session id for tool confirm / ask_user responses. */
+  getSessionId: () => string | null;
+  projectReady = false;
+  private providerReady = true;
+  private providerLabel = "provider";
+  private projectMenu: HTMLElement | null = null;
+  private projectOutsideClose: ((e: MouseEvent) => void) | null = null;
+  /** True when usage windows / plan period are exhausted — no new prompts. */
+  usageExhausted = false;
+  /** Shown when composer is blocked by plan period limits. */
+  usageExhaustedReason = "";
+  messages: SessionMessage[] = [];
+  private replaying = false;
+  private hasUsedTools = false;
+  private thinkingStartTime: number | null = null;
+  private thinkingTimerId: ReturnType<typeof setInterval> | null = null;
+  private thinkingLabelPrefix = "Thinking…";
+  /** Last measured thinking duration (ms) — kept after the timer stops. */
+  private thinkingLastElapsed = 0;
+  /** Wall-clock start of the current agent run (for “Worked for …” under the date). */
+  private runStartTime: number | null = null;
+  /** Full text we want to type into the thinking body. */
+  private thinkingTarget = "";
+  /** How many characters of thinkingTarget are currently revealed. */
+  private thinkingRevealed = 0;
+  private typewriterId: ReturnType<typeof setTimeout> | null = null;
+  /** True once real model reasoning (not status placeholders) is in the thought body. */
+  private thinkingHasReasoning = false;
+  /** Hold assistant reply chunks until the thought typewriter catches up. */
+  private deferredAssistantChunks: string[] = [];
+  /** Speed up thought reveal when the reply is waiting. */
+  private thoughtRevealUrgent = false;
+  /** Whether the current thought body is expanded (toggled via chevron). Default collapsed. */
+  private thinkingBodyOpen = false;
+  /** Live “Running · tool…” row while tools execute (separate from Thought blocks). */
+  private runningIndicator: HTMLElement | null = null;
+  /** Cursor-style batch header: “Running N commands” / “Ran N commands”. */
+  private toolBatchEl: HTMLElement | null = null;
+  private toolBatchCount = 0;
+  private toolBatchOpen = false;
+  /** Periodically re-kick water-wave dots — WebView can freeze CSS animations after heavy DOM updates. */
+  private dotsPulseId: ReturnType<typeof setInterval> | null = null;
+  /**
+   * When the agent is still running but the UI went quiet (after text / between tools),
+   * show a live “Thinking…” row so the session never looks stuck blank.
+   */
+  private idleActivityTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * When true, live AI updates keep the view pinned to the latest message.
+   * Becomes false as soon as the user scrolls up; free scrolling is allowed while AI works.
+   */
+  private pinToBottom = true;
+  private escHandler: ((e: KeyboardEvent) => void) | null = null;
+  /** Internal visual profile; model identity is rendered separately. */
+  private replyProfile: "default" | "sol" | "claude" = "default";
+  private replyModelLabel = "";
+  /** Ultra effort — drives blue/purple gradient chrome (no emoji FX). */
+  private ultraEffort = false;
+
+  constructor(handlers: {
+    onSend: (p: string) => void;
+    onStop: () => void;
+    onNeedProject: () => void;
+    onOpenProject: () => void;
+    onNewProject: () => void;
+    onRevealProject: () => void;
+    onOpenSettings: (integrationId?: string) => void;
+    getSessionId: () => string | null;
+  }) {
+    this.onSend = handlers.onSend;
+    this.onStop = handlers.onStop;
+    this.onNeedProject = handlers.onNeedProject;
+    this.onOpenProject = handlers.onOpenProject;
+    this.onNewProject = handlers.onNewProject;
+    this.onRevealProject = handlers.onRevealProject;
+    this.onOpenSettings = handlers.onOpenSettings;
+    this.getSessionId = handlers.getSessionId;
+    this.node = document.getElementById("chat")!;
+    this.node.addEventListener(
+      "scroll",
+      () => {
+        // User is free to leave the bottom while the agent runs
+        this.pinToBottom = this.isNearBottom();
+      },
+      { passive: true },
+    );
+    this.renderEmpty();
+    this.composer = this.buildComposer();
+    this.setComposerProject(null);
+    const dock = document.getElementById("forge-dock")!;
+    dock.appendChild(this.composer);
+    this.escHandler = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && this.running && !this.stopping) {
+        e.preventDefault();
+        this.requestStop();
+      }
+    };
+    window.addEventListener("keydown", this.escHandler);
+  }
+
+  /** Switch response chrome while keeping the displayed model identity honest. */
+  setReplyProfile(opts: { provider: string; model: string; effort?: string }) {
+    const provider = (opts.provider || "").trim().toLowerCase();
+    const model = (opts.model || "").trim().toLowerCase();
+    const effort = (opts.effort || "").trim().toLowerCase();
+    const isCursorOpenAi =
+      provider === "cursor" || model.includes("grok") || model === "grok-4.5";
+    const sol =
+      isCursorOpenAi ||
+      provider === "openai" ||
+      model === "gpt-5.6-sol" ||
+      model.includes("sol");
+    const claude =
+      !isCursorOpenAi &&
+      (provider === "anthropic" || model.includes("claude") || model.includes("composer"));
+    this.replyProfile = sol ? "sol" : claude ? "claude" : "default";
+    this.replyModelLabel = isCursorOpenAi
+      ? "GPT 5.6 Sol"
+      : sol
+        ? "GPT 5.6 Sol"
+        : provider === "anthropic" || model.includes("claude")
+          ? "Claude"
+          : model;
+    this.ultraEffort = effort === "ultra" || effort === "max";
+    this.node.classList.toggle("chat-sol", sol);
+    this.node.classList.toggle("chat-claude", claude && !sol);
+    this.node.classList.toggle("chat-premium", sol || claude);
+    this.node.classList.toggle("chat-ultra", this.ultraEffort);
+    this.composer?.classList.toggle("composer-sol", sol);
+    this.composer?.classList.toggle("composer-premium", sol || claude);
+    this.composer?.classList.toggle("composer-ultra", this.ultraEffort);
+    // Re-paint live shimmer so red letters apply after provider switch
+    this.refreshLiveShimmerTone();
+  }
+
+  /** Re-apply premium letter shine on currently live activity labels. */
+  private refreshLiveShimmerTone() {
+    const live = this.node.querySelectorAll(
+      ".activity-shimmer[data-shimmer], .tool-batch-wrap.is-running .tool-batch-label[data-shimmer], .tool-card.pending .tool-name[data-shimmer], .thinking-wrap:not(.thinking-done) .thinking-simple-label[data-shimmer], .thinking-running .thinking-simple-label[data-shimmer]",
+    );
+    live.forEach((node) => {
+      const el = node as HTMLElement;
+      const text = el.getAttribute("data-shimmer") || el.getAttribute("aria-label") || "";
+      if (!text) return;
+      el.removeAttribute("data-shimmer");
+      setShimmerText(el, text, true);
+    });
+  }
+
+  private isPremiumReply(): boolean {
+    return this.replyProfile === "sol" || this.replyProfile === "claude";
+  }
+
+  /** Live activity label — premium models feel deliberative, not generic. */
+  private liveThinkingLabel(): string {
+    return this.isPremiumReply() ? "Reasoning…" : "Thinking…";
+  }
+
+  private decorateAssistantMsg(msg: HTMLElement) {
+    if (this.replyProfile === "sol") {
+      msg.classList.add("sol-reply");
+      if (!msg.querySelector(".msg-role-sol")) {
+        const role = el("div", { class: "msg-role msg-role-sol" });
+        role.appendChild(
+          el("span", {
+            class: "sol-mark",
+            "aria-hidden": "true",
+            html: `<img class="sol-openai-logo" src="./logos/openai.svg" alt="" width="12" height="12" draggable="false" />`,
+          }),
+        );
+        role.appendChild(el("span", { class: "sol-name" }, [this.replyModelLabel || "GPT 5.6 Sol"]));
+        role.appendChild(
+          el("span", { class: "sol-tag" + (this.ultraEffort ? " sol-tag-ultra" : "") }, [
+            this.ultraEffort ? "Ultra" : "Flagship",
+          ]),
+        );
+        msg.insertBefore(role, msg.firstChild);
+      }
+      return;
+    }
+    if (this.replyProfile === "claude") {
+      msg.classList.add("claude-reply");
+      if (!msg.querySelector(".msg-role-claude")) {
+        const role = el("div", { class: "msg-role msg-role-claude" });
+        role.appendChild(el("span", { class: "claude-mark", "aria-hidden": "true" }, ["✦"]));
+        role.appendChild(el("span", { class: "claude-name" }, [this.replyModelLabel || "Model"]));
+        role.appendChild(el("span", { class: "claude-tag" }, ["Premium"]));
+        msg.insertBefore(role, msg.firstChild);
+      }
+    }
+  }
+
+  /** Keep Ultra gradient chrome in sync (no emoji FX). */
+  applyUltraChrome() {
+    this.ultraEffort = true;
+    this.node.classList.toggle("chat-ultra", true);
+    this.composer?.classList.toggle("composer-ultra", true);
+  }
+
+  private decorateThinkingWrap(wrap: HTMLElement) {
+    if (this.replyProfile === "sol") wrap.classList.add("sol-thinking");
+    if (this.replyProfile === "claude") wrap.classList.add("claude-thinking");
+    if (this.isPremiumReply()) wrap.classList.add("premium-thinking");
+  }
+
+  /** Stamp a footer with date · time · year under a message. */
+  private stamp(at?: number, hidden = false): HTMLElement {
+    const node = el("div", { class: "msg-time" }, [formatChatTime(at)]);
+    if (hidden) {
+      node.hidden = true;
+      node.classList.add("msg-time-pending");
+    }
+    return node;
+  }
+
+  private now(): number {
+    return Date.now();
+  }
+
+  /**
+   * Meta row under messages.
+   * For live AI replies, hide the timestamp until the run finishes (`showTime: false`).
+   */
+  private messageMeta(getText: () => string, at?: number, opts?: { showTime?: boolean; workMs?: number }): HTMLElement {
+    const row = div("msg-meta");
+    const showTime = opts?.showTime !== false;
+    const stack = div("msg-time-stack");
+    stack.appendChild(this.stamp(at, !showTime));
+    if (showTime && opts?.workMs != null && opts.workMs >= 0) {
+      this.setWorkDuration(stack, opts.workMs);
+    }
+    row.appendChild(stack);
+    row.appendChild(this.copyButton(getText));
+    return row;
+  }
+
+  /**
+   * Place date/time on the last AI chat item once the agent is done replying.
+   * Skips user messages, thinking rows, and intermediate tool noise when a later AI block exists.
+   * Also stamps “Worked for …” under the date when a run duration is known.
+   */
+  private sealAiTimestamp(at?: number, workMs?: number) {
+    const when = at ?? this.now();
+    const label = formatChatTime(when);
+    const durationMs =
+      workMs ??
+      (this.runStartTime != null ? Math.max(0, when - this.runStartTime) : null);
+
+    const reveal = (host: HTMLElement) => {
+      let timeEl = host.querySelector(".msg-time") as HTMLElement | null;
+      let stack = host.querySelector(".msg-time-stack") as HTMLElement | null;
+      if (!timeEl) {
+        // Prefer meta row under assistant messages; otherwise append under the host
+        const meta = host.querySelector(".msg-meta") as HTMLElement | null;
+        stack = div("msg-time-stack");
+        timeEl = this.stamp(when);
+        stack.appendChild(timeEl);
+        if (meta) meta.insertBefore(stack, meta.firstChild);
+        else host.appendChild(stack);
+      } else if (!stack) {
+        // Wrap an existing bare .msg-time so duration can sit below it
+        stack = div("msg-time-stack");
+        timeEl.replaceWith(stack);
+        stack.appendChild(timeEl);
+      }
+      timeEl.hidden = false;
+      timeEl.classList.remove("msg-time-pending");
+      timeEl.textContent = label;
+      timeEl.classList.add("msg-time-final");
+      // Only the sealed (last) stamp should be emphasized
+      this.node.querySelectorAll(".msg-time-final").forEach((n) => {
+        if (n !== timeEl) n.classList.remove("msg-time-final");
+      });
+      this.setWorkDuration(stack, durationMs);
+    };
+
+    // Live assistant bubble still open
+    if (this.pendingAssistantMsg) {
+      reveal(this.pendingAssistantMsg);
+      (this.pendingAssistantMsg as any).__timeEl =
+        this.pendingAssistantMsg.querySelector(".msg-time");
+      return;
+    }
+
+    // Walk backwards to the last AI-produced block (assistant / done / tool / question)
+    const kids = Array.from(this.node.children) as HTMLElement[];
+    for (let i = kids.length - 1; i >= 0; i--) {
+      const child = kids[i];
+      if (child.classList.contains("thinking-wrap")) continue;
+      if (child.classList.contains("msg") && child.classList.contains("user")) break;
+      if (child.classList.contains("msg") && child.classList.contains("system")) continue;
+      if (
+        (child.classList.contains("msg") && child.classList.contains("assistant")) ||
+        child.classList.contains("done-card") ||
+        child.classList.contains("summary-card") ||
+        child.classList.contains("tool-card-wrap") ||
+        child.classList.contains("question-card")
+      ) {
+        reveal(child);
+        return;
+      }
+    }
+  }
+
+  /** Compact duration beside the date, e.g. "11s". */
+  private setWorkDuration(stack: HTMLElement | null, workMs: number | null | undefined) {
+    if (!stack) return;
+    let dur = stack.querySelector(".msg-work-duration") as HTMLElement | null;
+    if (workMs == null || workMs < 0) {
+      dur?.remove();
+      return;
+    }
+    const label = this.formatDuration(workMs);
+    if (!dur) {
+      dur = el("span", { class: "msg-work-duration" }, [label]);
+      stack.appendChild(dur);
+    } else {
+      dur.textContent = label;
+    }
+  }
+
+  /** Elapsed ms for the active run, or null if not tracking. */
+  private currentWorkMs(at?: number): number | null {
+    if (this.runStartTime == null) return null;
+    return Math.max(0, (at ?? this.now()) - this.runStartTime);
+  }
+
+  private copyButton(getText: () => string): HTMLButtonElement {
+    const btn = el("button", {
+      class: "msg-copy",
+      type: "button",
+      title: "Copy",
+      "aria-label": "Copy message",
+      html: `${icon("copy", 11)}<span class="msg-copy-label sr-only">Copy</span>`,
+    }) as HTMLButtonElement;
+    btn.addEventListener("click", async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const text = (getText() || "").trim();
+      if (!text) return;
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.left = "-9999px";
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+          document.execCommand("copy");
+        } catch {
+          /* ignore */
+        }
+        document.body.removeChild(ta);
+      }
+      btn.classList.add("copied");
+      btn.title = "Copied";
+      const label = btn.querySelector(".msg-copy-label");
+      if (label) label.textContent = "Copied";
+      window.setTimeout(() => {
+        btn.classList.remove("copied");
+        btn.title = "Copy";
+        if (label) label.textContent = "Copy";
+      }, 1200);
+    });
+    return btn;
+  }
+
+  private buildComposer(): HTMLElement {
+    // OpenCode-style shell: floating card + toolbar chips + project chip
+    const shell = el("div", { class: "composer-shell" });
+    const c = el("div", { class: "composer" });
+
+    this.input = el("textarea", {
+      class: "composer-input",
+      id: "forge-prompt",
+      "aria-label": "Message",
+      placeholder: "Ask anything, paste an image, / for commands…",
+    }) as HTMLTextAreaElement;
+    this.input.rows = 1;
+    this.input.addEventListener("input", () => this.autosize());
+    this.input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+        e.preventDefault();
+        this.submit();
+      }
+    });
+    this.input.addEventListener("paste", (e) => {
+      void this.handleComposerPaste(e);
+    });
+
+    const attachRail = el("div", {
+      class: "composer-attach-rail",
+      id: "composer-attach-rail",
+      hidden: "true",
+      "aria-label": "Attached images",
+    });
+
+    const bar = el("div", { class: "composer-toolbar" });
+    const left = el("div", { class: "composer-toolbar-left", id: "composer-side" });
+    const right = el("div", { class: "composer-toolbar-right" });
+
+    // Stop only shown while a run is active (send still works to queue more)
+    this.stopBtn = el("button", {
+      class: "send-btn send-btn-circle stop-btn",
+      type: "button",
+      "aria-label": "Stop or cancel this run",
+      title: "Stop / cancel run (Esc)",
+      hidden: "true",
+      html: icon("stop", 14),
+    }) as HTMLButtonElement;
+    this.stopBtn.addEventListener("click", () => this.requestStop());
+    right.appendChild(this.stopBtn);
+
+    this.sendBtn = el("button", {
+      class: "send-btn send-btn-circle",
+      type: "button",
+      "aria-label": "Send message",
+      title: "Send",
+      html: icon("send", 16),
+    }) as HTMLButtonElement;
+    this.sendBtn.addEventListener("click", () => this.submit());
+    right.appendChild(this.sendBtn);
+
+    bar.appendChild(left);
+    bar.appendChild(right);
+    c.appendChild(attachRail);
+    c.appendChild(this.input);
+    c.appendChild(bar);
+
+    // Drag-and-drop images onto the composer card
+    c.addEventListener("dragover", (e) => {
+      if (!this.eventHasImageFiles(e)) return;
+      e.preventDefault();
+      c.classList.add("is-drop-target");
+    });
+    c.addEventListener("dragleave", () => c.classList.remove("is-drop-target"));
+    c.addEventListener("drop", (e) => {
+      c.classList.remove("is-drop-target");
+      void this.handleComposerDrop(e);
+    });
+
+    // Interactive project chip — change the folder the AI works in
+    const projectWrap = el("div", {
+      class: "composer-project-wrap chip-wrap",
+      id: "composer-project-wrap",
+    });
+    const projectChip = el("button", {
+      class: "composer-project-chip",
+      id: "composer-project-chip",
+      type: "button",
+      title: "Change project folder — where the AI works",
+      "aria-label": "Change project folder",
+      "aria-haspopup": "menu",
+      "aria-expanded": "false",
+    }) as HTMLButtonElement;
+    projectChip.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (projectChip.classList.contains("menu-open")) {
+        this.closeProjectMenu();
+        return;
+      }
+      this.openProjectMenu(projectChip, projectWrap);
+    });
+    projectWrap.appendChild(projectChip);
+
+    // Pending queue — small chips sit above the composer card
+    this.pendingRail = el("div", {
+      class: "pending-rail",
+      id: "pending-rail",
+      hidden: "true",
+      "aria-label": "Queued messages waiting for AI",
+      role: "status",
+    });
+    shell.appendChild(this.pendingRail);
+    shell.appendChild(c);
+    // Project chip hidden — switch folders via left drawer New/Open Project
+    projectWrap.hidden = true;
+    projectWrap.setAttribute("aria-hidden", "true");
+    shell.appendChild(projectWrap);
+    // Keep a reference on shell for usage-exhausted styling
+    (shell as any).__composerCard = c;
+    // Placeholder chip is filled after constructor assigns this.composer
+    return shell;
+  }
+
+  /** Mount mode / model / capability chips into the composer toolbar. */
+  attachComposerSide(node: HTMLElement) {
+    const side =
+      this.composer.querySelector("#composer-side") ||
+      this.composer.querySelector(".composer-toolbar-left");
+    if (!side) return;
+    clear(side as HTMLElement);
+    side.appendChild(node);
+  }
+
+  /** Insert text at the composer caret (used by + menu Image / Skills). */
+  insertComposerText(text: string) {
+    if (!this.input) return;
+    const el = this.input;
+    const start = el.selectionStart ?? el.value.length;
+    const end = el.selectionEnd ?? el.value.length;
+    const before = el.value.slice(0, start);
+    const after = el.value.slice(end);
+    el.value = before + text + after;
+    const caret = start + text.length;
+    el.focus();
+    el.setSelectionRange(caret, caret);
+    this.autosize();
+  }
+
+  private eventHasImageFiles(e: DragEvent): boolean {
+    const types = e.dataTransfer?.types;
+    if (!types) return false;
+    return Array.from(types).includes("Files");
+  }
+
+  private async handleComposerPaste(e: ClipboardEvent) {
+    const items = e.clipboardData?.items;
+    if (!items?.length) return;
+    const files: File[] = [];
+    for (const item of Array.from(items)) {
+      if (!item.type.startsWith("image/")) continue;
+      const file = item.getAsFile();
+      if (file) files.push(file);
+    }
+    if (!files.length) return;
+    e.preventDefault();
+    await this.attachImageFiles(files);
+  }
+
+  private async handleComposerDrop(e: DragEvent) {
+    const list = e.dataTransfer?.files;
+    if (!list?.length) return;
+    const files = Array.from(list).filter((f) => f.type.startsWith("image/"));
+    if (!files.length) return;
+    e.preventDefault();
+    await this.attachImageFiles(files);
+  }
+
+  private async attachImageFiles(files: File[]) {
+    let ok = 0;
+    for (const file of files) {
+      try {
+        const path = await this.persistImageFile(file);
+        if (!path) continue;
+        this.insertComposerText(`[Attached image: ${path}]\n`);
+        this.addComposerAttachPreview(path, file);
+        ok += 1;
+      } catch (err) {
+        console.error(err);
+      }
+    }
+    if (!ok) {
+      const toast = document.getElementById("toast");
+      if (toast) {
+        toast.textContent = "Could not paste image";
+        toast.hidden = false;
+        window.setTimeout(() => {
+          toast.hidden = true;
+        }, 4000);
+      }
+    }
+  }
+
+  private async persistImageFile(file: File): Promise<string | null> {
+    const buf = new Uint8Array(await file.arrayBuffer());
+    if (!buf.length) return null;
+    let binary = "";
+    const chunk = 0x8000;
+    for (let i = 0; i < buf.length; i += chunk) {
+      binary += String.fromCharCode(...buf.subarray(i, i + chunk));
+    }
+    const dataBase64 = btoa(binary);
+    return api.savePastedImage(dataBase64, file.type || "image/png");
+  }
+
+  private addComposerAttachPreview(path: string, file: File) {
+    const rail = this.composer?.querySelector("#composer-attach-rail") as HTMLElement | null;
+    if (!rail) return;
+    rail.hidden = false;
+    const chip = el("div", { class: "composer-attach-chip", title: path });
+    const url = URL.createObjectURL(file);
+    const img = document.createElement("img");
+    img.src = url;
+    img.alt = "Attached image";
+    img.className = "composer-attach-thumb";
+    const remove = el("button", {
+      class: "composer-attach-remove",
+      type: "button",
+      title: "Remove attachment",
+      "aria-label": "Remove attached image",
+      html: icon("close", 12),
+    }) as HTMLButtonElement;
+    remove.addEventListener("click", () => {
+      URL.revokeObjectURL(url);
+      const marker = `[Attached image: ${path}]`;
+      if (this.input) {
+        this.input.value = this.input.value
+          .split("\n")
+          .filter((line) => line.trim() !== marker)
+          .join("\n");
+        this.autosize();
+      }
+      chip.remove();
+      if (!rail.querySelector(".composer-attach-chip")) rail.hidden = true;
+    });
+    chip.append(img, remove);
+    rail.appendChild(chip);
+  }
+
+  /** Small project pill under the composer — click to change AI work directory. */
+  setComposerProject(path: string | null) {
+    this.closeProjectMenu();
+    if (!this.composer) return;
+    const chip = this.composer.querySelector("#composer-project-chip") as HTMLButtonElement | null;
+    if (!chip) return;
+    clear(chip);
+
+    if (!path) {
+      chip.classList.add("is-empty");
+      chip.title = "Select a project folder for the AI to work in";
+      chip.setAttribute("aria-label", "Select project folder");
+      chip.appendChild(el("span", { class: "composer-project-badge empty" }, ["+"]));
+      chip.appendChild(el("span", { class: "composer-project-name" }, ["Select project"]));
+      chip.appendChild(el("span", { class: "chip-caret", "aria-hidden": "true" }, ["▾"]));
+      return;
+    }
+
+    chip.classList.remove("is-empty");
+    const name = path.replace(/\\/g, "/").split("/").filter(Boolean).pop() || path;
+    const letter = (name[0] || "P").toUpperCase();
+    chip.title = `${path}\nClick to change project folder`;
+    chip.setAttribute("aria-label", `Project: ${name}. Change project folder`);
+    chip.appendChild(el("span", { class: "composer-project-badge" }, [letter]));
+    chip.appendChild(el("span", { class: "composer-project-name", title: path }, [name]));
+    chip.appendChild(el("span", { class: "chip-caret", "aria-hidden": "true" }, ["▾"]));
+  }
+
+  private closeProjectMenu() {
+    if (this.projectMenu) {
+      this.projectMenu.remove();
+      this.projectMenu = null;
+    }
+    const chip = this.composer?.querySelector("#composer-project-chip") as HTMLElement | null;
+    if (chip) {
+      chip.classList.remove("menu-open");
+      chip.setAttribute("aria-expanded", "false");
+    }
+    if (this.projectOutsideClose) {
+      document.removeEventListener("mousedown", this.projectOutsideClose, true);
+      this.projectOutsideClose = null;
+    }
+  }
+
+  private openProjectMenu(btn: HTMLElement, wrap: HTMLElement) {
+    this.closeProjectMenu();
+    btn.classList.add("menu-open");
+    btn.setAttribute("aria-expanded", "true");
+
+    const hasProject = this.projectReady;
+    const menu = el("div", {
+      class: "chip-menu composer-project-menu",
+      role: "menu",
+      "aria-label": "Project folder",
+    });
+
+    const pathHead = el("div", { class: "chip-menu-head" }, ["AI work directory"]);
+    menu.appendChild(pathHead);
+
+    const mkItem = (label: string, title: string, action: () => void, disabled = false) => {
+      const attrs: Record<string, string> = {
+        class: "chip-menu-item",
+        type: "button",
+        role: "menuitem",
+        title,
+      };
+      if (disabled) attrs.disabled = "true";
+      const item = el("button", attrs, [label]) as HTMLButtonElement;
+      if (!disabled) {
+        item.addEventListener("click", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          this.closeProjectMenu();
+          action();
+        });
+      }
+      menu.appendChild(item);
+    };
+
+    mkItem("Change project…", "Open a different folder for the AI to work in", () => {
+      this.onOpenProject();
+    });
+    mkItem("New project…", "Create a new project folder", () => {
+      this.onNewProject();
+    });
+    mkItem(
+      "Reveal in Explorer",
+      "Open the current project folder in File Explorer",
+      () => this.onRevealProject(),
+      !hasProject,
+    );
+
+    wrap.appendChild(menu);
+    this.projectMenu = menu;
+    this.projectOutsideClose = (e: MouseEvent) => {
+      if (!wrap.contains(e.target as Node)) this.closeProjectMenu();
+    };
+    window.setTimeout(() => {
+      if (this.projectOutsideClose) {
+        document.addEventListener("mousedown", this.projectOutsideClose, true);
+      }
+    }, 0);
+  }
+
+  /** User requested stop/cancel of the active run. */
+  requestStop() {
+    if (!this.running) return;
+    // Idempotent: already stopping still refreshes pending clear / stop IPC
+    if (this.stopping) {
+      this.clearPendingQueue();
+      this.onStop();
+      return;
+    }
+    this.stopping = true;
+    this.userCancelled = true;
+    // Drop queued messages immediately so cancel doesn't auto-continue them
+    this.clearPendingQueue();
+    this.finalizeThinking();
+    this.clearRunningIndicator();
+    if (this.stopBtn) {
+      this.stopBtn.classList.add("stopping");
+      this.stopBtn.disabled = true;
+      this.stopBtn.setAttribute("aria-label", "Stopping run");
+      this.stopBtn.title = "Stopping…";
+    }
+    if (this.input) {
+      this.input.placeholder = "Stopping…";
+    }
+    this.onStop();
+  }
+
+  /** Whether the last run was stopped by the user (or backend cancelled). */
+  wasCancelled(): boolean {
+    return this.userCancelled;
+  }
+
+  /** Clear the cancel latch after the run IPC has fully finished. */
+  clearCancelledFlag() {
+    this.userCancelled = false;
+  }
+
+  private autosize() {
+    this.input.style.height = "auto";
+    this.input.style.height = Math.min(this.input.scrollHeight, 200) + "px";
+  }
+
+  private submit() {
+    const text = this.input.value.trim();
+    if (!text) return;
+    if (!this.projectReady) {
+      this.onNeedProject();
+      return;
+    }
+    if (this.usageExhausted) {
+      // Refuse send + queue while at 0% — keep text so user can retry after reset
+      this.onSend(text);
+      return;
+    }
+    this.input.value = "";
+    this.autosize();
+    // While stopping, do not queue — put text back so cancel stays a full stop
+    if (this.stopping || this.userCancelled) {
+      this.input.value = text;
+      this.autosize();
+      this.input.placeholder = "Stopping… wait for cancel, then send";
+      return;
+    }
+    // While AI is working, queue the message as pending (semi-transparent)
+    if (this.running || this.drainingPending) {
+      this.enqueuePending(text);
+      return;
+    }
+    this.onSend(text);
+  }
+
+  /** Queue a message as a small chip above the chat box until the current run finishes. */
+  private enqueuePending(text: string) {
+    const id =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `p-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const el = this.appendPendingChip(text, id);
+    this.pendingQueue.push({ id, text, el });
+    this.syncPendingRail();
+    this.refreshPlaceholder();
+  }
+
+  /** Compact pending chip in the strip above the composer (not in the transcript). */
+  private appendPendingChip(text: string, id: string): HTMLElement {
+    if (!this.pendingRail) {
+      // Extremely early — shouldn't happen after buildComposer
+      return el("div");
+    }
+    const chip = el("div", {
+      class: "pending-chip",
+      "data-pending-id": id,
+      title: text,
+    });
+    chip.appendChild(el("span", { class: "pending-chip-badge" }, ["Pending"]));
+    const body = el("span", { class: "pending-chip-text" }, [text]);
+    chip.appendChild(body);
+    const remove = el("button", {
+      class: "pending-chip-x",
+      type: "button",
+      "aria-label": "Remove from queue",
+      title: "Remove",
+    }, ["×"]) as HTMLButtonElement;
+    remove.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.removePending(id);
+    });
+    chip.appendChild(remove);
+    this.pendingRail.appendChild(chip);
+    return chip;
+  }
+
+  private removePending(id: string) {
+    const i = this.pendingQueue.findIndex((p) => p.id === id);
+    if (i < 0) return;
+    const [item] = this.pendingQueue.splice(i, 1);
+    item.el.remove();
+    this.syncPendingRail();
+    this.refreshPlaceholder();
+  }
+
+  private syncPendingRail() {
+    if (!this.pendingRail) return;
+    const n = this.pendingQueue.length;
+    this.pendingRail.hidden = n === 0;
+    this.pendingRail.classList.toggle("has-items", n > 0);
+    // Keep label on rail when items exist
+    let label = this.pendingRail.querySelector(".pending-rail-label") as HTMLElement | null;
+    if (n > 0) {
+      if (!label) {
+        label = el("div", { class: "pending-rail-label" }, ["Queued"]);
+        this.pendingRail.insertBefore(label, this.pendingRail.firstChild);
+      }
+      label.textContent = n === 1 ? "1 queued" : `${n} queued`;
+    } else if (label) {
+      label.remove();
+    }
+  }
+
+  /** After a run ends, fire the next queued message (FIFO). */
+  private drainPendingQueue() {
+    if (this.usageExhausted) {
+      this.clearPendingQueue();
+      return;
+    }
+    if (this.running || this.drainingPending) return;
+    const next = this.pendingQueue.shift();
+    if (!next) {
+      this.syncPendingRail();
+      this.refreshPlaceholder();
+      return;
+    }
+    this.drainingPending = true;
+    // Remove chip — onSend / continueSession appends a normal user message in chat
+    next.el.remove();
+    this.syncPendingRail();
+    this.refreshPlaceholder();
+    try {
+      this.onSend(next.text);
+    } finally {
+      // onSend sets running=true; clear drain flag so further queues work mid-run
+      this.drainingPending = false;
+    }
+  }
+
+  /** Drop all queued pending messages (e.g. session switch / clear). */
+  clearPendingQueue() {
+    for (const p of this.pendingQueue) p.el.remove();
+    this.pendingQueue = [];
+    this.drainingPending = false;
+    this.syncPendingRail();
+    // Guard: constructor calls renderEmpty() before buildComposer() creates the input
+    if (this.input) this.refreshPlaceholder();
+  }
+
+  /**
+   * @param processQueue When false, only update UI (e.g. mid-event). Queue drain must
+   * wait until the backend run fully finishes — otherwise agent_run hits "already running".
+   * Cancelled runs never auto-drain the queue.
+   */
+  setRunning(running: boolean, opts?: { processQueue?: boolean }) {
+    this.running = running;
+    if (running) {
+      // Fresh run — clear prior cancel latch and start work timer
+      this.userCancelled = false;
+      this.stopping = false;
+      this.runStartTime = Date.now();
+      this.startDotsPulse();
+      // Show Thinking… immediately — don't wait for the first backend event
+      this.ensureLiveActivity(this.liveThinkingLabel());
+    } else {
+      this.stopping = false;
+      this.runStartTime = null;
+      this.stopDotsPulse();
+      this.clearIdleActivityTimer();
+      // Finish any tool rows still shimmering (Cursor SDK often omits matching results)
+      this.sealPendingTools(this.userCancelled ? "cancelled" : "done");
+      this.finalizeThinking();
+      this.freezeAllWorkingDots();
+      this.clearRunningIndicator();
+      this.sealToolBatch();
+    }
+    this.node.setAttribute("aria-busy", String(running));
+    // Always keep input open so the user can queue more messages
+    if (this.input) this.input.disabled = this.usageExhausted;
+    if (this.sendBtn) {
+      this.sendBtn.disabled = this.usageExhausted;
+      this.sendBtn.classList.remove("stop", "stopping");
+      this.sendBtn.innerHTML = icon("send", 16);
+      this.sendBtn.setAttribute(
+        "aria-label",
+        running ? "Queue message while AI works" : "Send message",
+      );
+      this.sendBtn.title = running
+        ? "Queue message (sent when AI finishes current work)"
+        : "Send";
+    }
+
+    if (running) {
+      if (this.stopBtn) {
+        this.stopBtn.hidden = false;
+        this.stopBtn.disabled = false;
+        this.stopBtn.classList.remove("stopping");
+        this.stopBtn.classList.add("stop");
+        this.stopBtn.innerHTML = icon("stop", 14);
+        this.stopBtn.setAttribute("aria-label", "Stop or cancel this run (Esc)");
+        this.stopBtn.title = "Stop / cancel run (Esc)";
+      }
+      this.composer?.classList.add("is-running");
+    } else {
+      if (this.stopBtn) {
+        this.stopBtn.hidden = true;
+        this.stopBtn.disabled = false;
+        this.stopBtn.classList.remove("stop", "stopping");
+      }
+      this.composer?.classList.remove("is-running");
+      this.clearRunningIndicator();
+      this.applyComposerEnabled();
+      // Never auto-send queued follow-ups after a user cancel or usage limit
+      const shouldDrain =
+        !!opts?.processQueue && !this.userCancelled && !this.usageExhausted;
+      if (this.userCancelled || this.usageExhausted) {
+        this.clearPendingQueue();
+        this.userCancelled = false;
+      }
+      // Only drain after the full agent_run IPC returns (caller sets processQueue: true)
+      if (shouldDrain) {
+        queueMicrotask(() => this.drainPendingQueue());
+      }
+    }
+    this.refreshPlaceholder();
+  }
+
+  /** Public: process next queued message after backend run is fully cleared. */
+  processPendingQueue() {
+    this.drainPendingQueue();
+  }
+
+  setProjectReady(ready: boolean) {
+    this.projectReady = ready;
+    this.refreshPlaceholder();
+    this.applyComposerEnabled();
+  }
+
+  /** Block sends until the configured provider has the credential it requires. */
+  setProviderReady(ready: boolean, label = "provider") {
+    const changed = this.providerReady !== ready || this.providerLabel !== label;
+    this.providerReady = ready;
+    this.providerLabel = label || "provider";
+    this.refreshPlaceholder();
+    this.applyComposerEnabled();
+    if (changed && this.node.querySelector(".chat-empty")) this.renderEmpty();
+  }
+
+  /** When usage remaining is 0%, block continuing any session. */
+  setUsageExhausted(exhausted: boolean, reason?: string) {
+    this.usageExhausted = exhausted;
+    this.usageExhaustedReason = reason || "";
+    if (exhausted) {
+      this.clearPendingQueue();
+    }
+    this.refreshPlaceholder();
+    this.applyComposerEnabled();
+  }
+
+  private refreshPlaceholder() {
+    if (!this.input) return;
+    if (!this.projectReady) {
+      this.input.placeholder = "Open or create a project, then ask anything…";
+    } else if (!this.providerReady) {
+      this.input.placeholder = `Connect ${this.providerLabel} in Settings to start…`;
+    } else if (this.usageExhausted && this.running) {
+      this.input.placeholder =
+        this.usageExhaustedReason ||
+        "Usage limit reached — stopping…";
+    } else if (this.usageExhausted) {
+      this.input.placeholder =
+        this.usageExhaustedReason ||
+        "Usage limit reached. Wait for reset or Mag-load via GCash.";
+    } else if (this.stopping || (this.running && this.userCancelled)) {
+      this.input.placeholder = "Stopping…";
+    } else if (this.running) {
+      const n = this.pendingQueue.length;
+      this.input.placeholder =
+        n > 0
+          ? `AI is working… ${n} message${n === 1 ? "" : "s"} pending — send more anytime`
+          : "AI is working… send another message to queue it";
+    } else if (this.pendingQueue.length > 0) {
+      this.input.placeholder = "Queued messages will send next…";
+    } else {
+      this.input.placeholder = "Ask anything, / for commands, @ for context…";
+    }
+  }
+
+  private applyComposerEnabled() {
+    if (!this.input || !this.sendBtn || !this.composer) return;
+    // Always enforce usage lock even while a run is being cancelled
+    if (this.usageExhausted) {
+      this.input.disabled = true;
+      this.sendBtn.disabled = true;
+      this.sendBtn.title =
+        this.usageExhaustedReason || "Usage limit reached. Cannot continue until it resets.";
+      this.composer.classList.add("usage-exhausted");
+      this.composer.querySelector(".composer")?.classList.add("usage-exhausted");
+      if (this.running) return;
+    }
+    if (this.running) return;
+    const blocked = this.usageExhausted || !this.providerReady;
+    this.input.disabled = blocked;
+    this.sendBtn.disabled = blocked;
+    this.sendBtn.title = blocked
+      ? this.usageExhausted
+        ? this.usageExhaustedReason || "Usage limit reached. Cannot continue until it resets."
+        : `Connect ${this.providerLabel} in Settings`
+      : "Send";
+    this.composer.classList.toggle("usage-exhausted", this.usageExhausted);
+    this.composer.querySelector(".composer")?.classList.toggle("usage-exhausted", this.usageExhausted);
+    this.composer.classList.toggle("provider-unavailable", !this.providerReady);
+    this.composer.querySelector(".composer")?.classList.toggle("provider-unavailable", !this.providerReady);
+  }
+
+  renderEmpty() {
+    this.clearPendingQueue();
+    this.cancelAssistantPaints();
+    this.clearToolStreams();
+    this.toolBatchEl = null;
+    this.toolBatchCount = 0;
+    this.toolBatchOpen = false;
+    clear(this.node);
+    const empty = div("chat-empty");
+    empty.appendChild(el("div", { class: "chat-empty-mark", "aria-hidden": "true" }, ["Hormachuelos"]));
+    empty.appendChild(el("h2", {}, ["What would you like to build?"]));
+    if (!this.providerReady) {
+      empty.appendChild(el("p", { class: "chat-empty-provider" }, [
+        `Connect ${this.providerLabel} before sending your first request.`,
+      ]));
+      const connect = el("button", { class: "btn primary", type: "button" }, ["Connect provider"]);
+      connect.addEventListener("click", () => this.onOpenSettings());
+      empty.appendChild(connect);
+    }
+    this.node.appendChild(empty);
+  }
+
+  startSession(prompt: string) {
+    this.clearPendingQueue();
+    this.cancelAssistantPaints();
+    clear(this.node);
+    this.toolCards.clear();
+    this.pendingTools.clear();
+    this.clearToolStreams();
+    this.toolBatchEl = null;
+    this.toolBatchCount = 0;
+    this.toolBatchOpen = false;
+    this.pendingAssistant = null;
+    this.thinking = null;
+    this.thinkingBody = null;
+    this.thinkingText = "";
+    this.hasUsedTools = false;
+    this.stopTypewriter();
+    this.thinkingTarget = "";
+    this.thinkingRevealed = 0;
+    this.thinkingHasReasoning = false;
+    this.thinkingBodyOpen = false;
+    this.deferredAssistantChunks = [];
+    this.thoughtRevealUrgent = false;
+    this.clearRunningIndicator();
+    this.stopThinkingTimer();
+    const at = this.now();
+    this.appendUser(prompt, at);
+    if (!this.replaying) {
+      this.messages = [{ type: "user", text: prompt, at }];
+    }
+  }
+
+  getMessages(): SessionMessage[] {
+    return this.messages;
+  }
+
+  /** Append a follow-up user message to the existing conversation without clearing. */
+  continueSession(prompt: string) {
+    this.finalizeThinking();
+    this.flushAssistantPaints();
+    this.pendingAssistant = null;
+    this.pendingAssistantMsg = null;
+    const at = this.now();
+    this.appendUser(prompt, at);
+    if (!this.replaying) {
+      this.messages.push({ type: "user", text: prompt, at });
+    }
+  }
+
+  loadSession(msgs: SessionMessage[]) {
+    this.clearPendingQueue();
+    this.cancelAssistantPaints();
+    this.replaying = true;
+    this.hasUsedTools = msgs.some((m) => m.type === "tool_call");
+    clear(this.node);
+    this.toolCards.clear();
+    this.pendingTools.clear();
+    this.clearToolStreams();
+    this.toolBatchEl = null;
+    this.toolBatchCount = 0;
+    this.toolBatchOpen = false;
+    this.pendingAssistant = null;
+    this.thinking = null;
+    this.messages = [...msgs];
+    for (const msg of msgs) {
+      switch (msg.type) {
+        case "user": this.appendUser(msg.text, msg.at); break;
+        case "thinking":
+          this.showThinking(msg.iteration);
+          if (msg.text) this.appendThinkingText(msg.text);
+          this.markThinkingDone();
+          break;
+        case "assistant": {
+          this.hideThinking();
+          const m = div("msg assistant");
+          const body = el("div", { class: "msg-body md" });
+          (body as any).__raw = msg.text;
+          body.innerHTML = renderMarkdown(msg.text);
+          m.appendChild(body);
+          this.decorateAssistantMsg(m);
+          // Session history: show timestamp (final state of a completed reply)
+          m.appendChild(this.messageMeta(() => (body as any).__raw || msg.text, msg.at, { showTime: true }));
+          this.node.appendChild(m);
+          break;
+        }
+        // Queue tool calls; only render cards when the result arrives
+        case "tool_call": this.queueTool(msg.id, msg.name, msg.arguments); break;
+        case "tool_result": this.appendToolResult(msg.id, msg.name, msg.ok, msg.content, msg.at); break;
+        case "done": this.appendDone(msg); break;
+        case "end": this.appendEnd(msg.reason, msg.at, msg.workMs); break;
+        case "question": this.showQuestion(msg.id, msg.question, msg.options, msg.allow_other, msg.answer, msg.at); break;
+        case "cancelled":
+          this.appendSystemNote("Run cancelled.", msg.at);
+          if (msg.workMs != null) this.sealAiTimestamp(msg.at, msg.workMs);
+          break;
+      }
+    }
+    this.replaying = false;
+    // Restore work duration under the last AI date from the terminal event
+    const terminal = [...msgs].reverse().find(
+      (m) => m.type === "done" || m.type === "end" || m.type === "cancelled",
+    ) as { workMs?: number; at?: number } | undefined;
+    if (terminal?.workMs != null) {
+      this.sealAiTimestamp(terminal.at, terminal.workMs);
+    }
+    this.scrollToBottom(true);
+  }
+
+  appendUser(text: string, at?: number) {
+    const msg = div("msg user");
+    msg.appendChild(el("div", { class: "msg-role" }, ["You"]));
+    msg.appendChild(el("div", { class: "msg-body" }, [text]));
+    msg.appendChild(this.messageMeta(() => text, at ?? this.now()));
+    this.node.appendChild(msg);
+    // Always jump to the message the user just sent
+    this.scrollToBottom(true);
+  }
+
+  /** Neutral system/status line (cancel, limits, etc.). */
+  appendSystemNote(text: string, at?: number) {
+    this.hideThinking();
+    this.pendingAssistant = null;
+    this.pendingAssistantMsg = null;
+    const msg = div("msg system");
+    msg.appendChild(el("div", { class: "msg-body" }, [text]));
+    msg.appendChild(this.stamp(at ?? this.now()));
+    this.node.appendChild(msg);
+    this.scrollToBottom();
+  }
+
+  /** Whole-second duration — no frantic 0.1s decimals. */
+  private formatDuration(ms: number): string {
+    const totalSecs = Math.max(0, Math.floor(ms / 1000));
+    if (totalSecs < 60) return `${totalSecs}s`;
+    const mins = Math.floor(totalSecs / 60);
+    const secs = totalSecs % 60;
+    if (mins < 60) return `${mins}m ${String(secs).padStart(2, "0")}s`;
+    const hrs = Math.floor(mins / 60);
+    const remMins = mins % 60;
+    return `${hrs}h ${remMins}m`;
+  }
+
+  /** Cursor-style sealed thought label. */
+  private thoughtSummaryLabel(elapsedMs: number): string {
+    if (this.isPremiumReply()) {
+      if (elapsedMs < 2500) return "Reasoned briefly";
+      return `Reasoned for ${this.formatDuration(elapsedMs)}`;
+    }
+    if (elapsedMs < 2500) return "Thought briefly";
+    return `Thought for ${this.formatDuration(elapsedMs)}`;
+  }
+
+  /**
+   * Client-facing tool label — never show raw API names (read_file, Shell, …).
+   * Playful but clear so premium runs feel polished.
+   */
+  private friendlyToolName(name: string): string {
+    const key = (name || "")
+      .trim()
+      .replace(/([a-z])([A-Z])/g, "$1_$2")
+      .replace(/[\s.-]+/g, "_")
+      .toLowerCase();
+    const map: Record<string, string> = {
+      read_file: "File look",
+      read: "File look",
+      readfile: "File look",
+      write_file: "File craft",
+      write: "File craft",
+      writefile: "File craft",
+      edit_file: "Patch edit",
+      edit: "Patch edit",
+      strreplace: "Patch edit",
+      str_replace: "Patch edit",
+      apply_patch: "Patch edit",
+      applypatch: "Patch edit",
+      list_dir: "Folder scan",
+      listdir: "Folder scan",
+      list_directory: "Folder scan",
+      glob: "File find",
+      glob_file_search: "File find",
+      globtool: "File find",
+      grep: "Code search",
+      ripgrep: "Code search",
+      greptool: "Code search",
+      run_command: "Shell run",
+      shell: "Shell run",
+      bash: "Shell run",
+      run_terminal_cmd: "Shell run",
+      shelltool: "Shell run",
+      terminal: "Shell run",
+      git_init: "Git start",
+      git_add_all: "Git stage",
+      git_commit: "Git save",
+      git_status: "Git check",
+      list_drives: "Drive map",
+      sys_info: "System peek",
+      env_vars: "Env peek",
+      list_processes: "Process list",
+      kill_process: "Process stop",
+      open_url: "Open link",
+      open_path: "Open path",
+      download_file: "File fetch",
+      move_file: "File move",
+      copy_file: "File copy",
+      delete_file: "File remove",
+      delete: "File remove",
+      make_dir: "Folder make",
+      mkdir: "Folder make",
+      file_info: "File peek",
+      web_search: "Web scout",
+      websearch: "Web scout",
+      browse_page: "Page browse",
+      webfetch: "Page browse",
+      web_fetch: "Page browse",
+      semantic_search: "Deep search",
+      codebase_search: "Deep search",
+      semanticsearch: "Deep search",
+      export_client_pack: "Client pack",
+      connect_account: "Link account",
+      integration_status: "Link status",
+      computer_list_windows: "Window list",
+      computer_observe: "Screen look",
+      computer_focus_window: "Window focus",
+      computer_click: "Desktop click",
+      computer_type_text: "Desktop type",
+      computer_press_key: "Key press",
+      computer_scroll: "Desktop scroll",
+      computer_drag: "Desktop drag",
+      computer_game_sequence: "Game controls",
+      ask_user: "Ask you",
+      askquestion: "Ask you",
+      todo_write: "Task list",
+      todowrite: "Task list",
+      done: "Wrap up",
+      await: "Wait",
+      awaitshell: "Wait",
+      task: "Delegate",
+      switchmode: "Mode switch",
+    };
+    if (map[key]) return map[key];
+    const pretty = key
+      .replace(/_/g, " ")
+      .replace(/\b\w/g, (c) => c.toUpperCase())
+      .trim();
+    return pretty || "Action";
+  }
+
+  /** Noun-ish title used under Running/Ran (premium-friendly, never raw tool ids). */
+  private toolRunTitle(name: string, args: any): string {
+    const friendly = this.friendlyToolName(name);
+    const path =
+      typeof args?.path === "string"
+        ? args.path
+        : typeof args?.target_file === "string"
+          ? args.target_file
+          : typeof args?.file_path === "string"
+            ? args.file_path
+            : "";
+    const cmd = typeof args?.command === "string" ? args.command : "";
+    const pattern =
+      typeof args?.pattern === "string"
+        ? args.pattern
+        : typeof args?.query === "string"
+          ? args.query
+          : "";
+    const clip = (s: string, n = 42) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
+    if (path) return `${friendly} · ${clip(path)}`;
+    if (cmd) return `${friendly} · ${clip(cmd, 36)}`;
+    if (pattern) return `${friendly} · ${clip(pattern, 36)}`;
+    return friendly;
+  }
+
+  private toolRunningLabel(name: string, args: any): string {
+    return this.isPremiumReply()
+      ? `Working · ${this.toolRunTitle(name, args)}`
+      : `Running ${this.toolRunTitle(name, args)}`;
+  }
+
+  private toolRanLabel(name: string, args: any, ok: boolean, content: string): string {
+    const title = this.toolRunTitle(name, args);
+    if (!ok) {
+      const first = (content || "failed").split("\n")[0].trim();
+      const err = first.length > 48 ? first.slice(0, 45) + "…" : first;
+      return this.isPremiumReply()
+        ? `Missed · ${title}${err ? ` · ${err}` : ""}`
+        : `Failed ${title}${err ? ` · ${err}` : ""}`;
+    }
+    return this.isPremiumReply() ? `Done · ${title}` : `Ran ${title}`;
+  }
+
+  private toolArgsHeader(name: string, args: any): string {
+    const friendly = this.friendlyToolName(name);
+    let displayArgs = args;
+    if (name.startsWith("computer_") && args && typeof args === "object") {
+      displayArgs = { ...args };
+      if ("observation_token" in displayArgs) {
+        displayArgs.observation_token = "[fresh observation]";
+      }
+      if (name === "computer_type_text" && typeof displayArgs.text === "string") {
+        displayArgs.text = `[hidden · ${displayArgs.text.length} characters]`;
+      }
+    }
+    const argsStr = typeof displayArgs === "string"
+      ? displayArgs
+      : JSON.stringify(displayArgs ?? {}, null, 2);
+    return `· ${friendly}\n${argsStr}`;
+  }
+
+  private paintToolBatchLabel() {
+    if (!this.toolBatchEl) return;
+    const n = this.toolBatchCount;
+    const premium = this.isPremiumReply();
+    const unit = premium
+      ? n === 1
+        ? "step"
+        : "steps"
+      : n === 1
+        ? "command"
+        : "commands";
+    const label = this.toolBatchEl.querySelector(".tool-batch-label") as HTMLElement | null;
+    if (!label) return;
+    if (this.toolBatchOpen || this.pendingTools.size > 0) {
+      setShimmerText(label, `${premium ? "Working" : "Running"} ${n} ${unit}`, true);
+      this.toolBatchEl.classList.add("is-running");
+      this.toolBatchEl.classList.remove("is-done");
+    } else {
+      setShimmerText(label, `${premium ? "Done" : "Ran"} ${n} ${unit}`, false);
+      this.toolBatchEl.classList.remove("is-running");
+      this.toolBatchEl.classList.add("is-done");
+    }
+  }
+
+  /** Ensure a Cursor-style “Running N commands” header sits above the current tool streak. */
+  private ensureToolBatch() {
+    if (this.toolBatchEl && this.toolBatchEl.isConnected && this.toolBatchOpen) {
+      this.toolBatchCount += 1;
+      this.paintToolBatchLabel();
+      return;
+    }
+    this.sealToolBatch();
+    this.toolBatchCount = 1;
+    this.toolBatchOpen = true;
+    const head = el("button", {
+      class: "tool-batch-head",
+      type: "button",
+      "aria-expanded": "false",
+      title: "Show or hide tool activity",
+    }) as HTMLButtonElement;
+    head.appendChild(el("span", { class: "tool-batch-label" }, []));
+    const batchLabel = head.querySelector(".tool-batch-label") as HTMLElement;
+    setShimmerText(
+      batchLabel,
+      this.isPremiumReply() ? "Working 1 step" : "Running 1 command",
+      true,
+    );
+    head.appendChild(el("span", { class: "tool-batch-chev", html: icon("chevronDown", 12) }));
+    const wrap = div("tool-batch-wrap tool-spawn collapsed is-running");
+    wrap.appendChild(head);
+    head.addEventListener("click", () => {
+      wrap.classList.toggle("collapsed");
+      const collapsed = wrap.classList.contains("collapsed");
+      head.setAttribute("aria-expanded", String(!collapsed));
+      // Collapse/expand following contiguous tool cards until next batch/assistant/thought
+      let sib = wrap.nextElementSibling;
+      while (sib && sib.classList.contains("tool-card-wrap")) {
+        (sib as HTMLElement).hidden = collapsed;
+        sib = sib.nextElementSibling;
+      }
+    });
+    this.node.appendChild(wrap);
+    this.toolBatchEl = wrap;
+    this.paintToolBatchLabel();
+  }
+
+  private isToolBatchCollapsed(): boolean {
+    return !!this.toolBatchEl?.classList.contains("collapsed");
+  }
+
+  /** Show every tool card in the current batch (undo collapse / hidden). */
+  private revealToolBatchCards() {
+    if (!this.toolBatchEl) return;
+    this.toolBatchEl.classList.remove("collapsed");
+    const head = this.toolBatchEl.querySelector(".tool-batch-head");
+    head?.setAttribute("aria-expanded", "true");
+    let sib = this.toolBatchEl.nextElementSibling;
+    while (sib && sib.classList.contains("tool-card-wrap")) {
+      (sib as HTMLElement).hidden = false;
+      sib = sib.nextElementSibling;
+    }
+  }
+
+  private sealToolBatch() {
+    if (!this.toolBatchEl) return;
+    this.toolBatchOpen = false;
+    this.paintToolBatchLabel();
+    this.toolBatchEl = null;
+    this.toolBatchCount = 0;
+  }
+
+  /**
+   * Force-finish any tool rows still showing Running… / shimmer after the agent
+   * stops (missing tool_result, mismatched ids, or early done/end).
+   */
+  private sealPendingTools(mode: "done" | "cancelled" = "done") {
+    this.sealingTools = true;
+    try {
+      if (mode === "cancelled") {
+        this.pendingTools.clear();
+        this.clearToolStreams();
+        for (const tc of this.toolCards.values()) {
+          if (!tc.card.classList.contains("pending") && !tc.card.classList.contains("streaming")) {
+            continue;
+          }
+          tc.card.classList.remove("pending", "streaming");
+          tc.card.classList.add("cancelled");
+          tc.head.querySelectorAll(".tool-wave-dots").forEach((n) => n.remove());
+          const nameEl = tc.head.querySelector(".tool-name") as HTMLElement | null;
+          if (nameEl) {
+            const base = (nameEl.getAttribute("data-shimmer") || nameEl.textContent || "Tool")
+              .replace(/^Running\s+/i, "Ran ")
+              .replace(/\s*·\s*cancelled$/, "");
+            setShimmerText(nameEl, `${base} · cancelled`, false);
+          }
+          const statusIco = tc.head.querySelector(".status-ico") as HTMLElement | null;
+          if (statusIco) statusIco.innerHTML = icon("alert", 12);
+        }
+      } else {
+        const pending = [...this.pendingTools.entries()];
+        for (const [id, meta] of pending) {
+          this.appendToolResult(id, meta.name, true, "(completed)");
+        }
+        this.pendingTools.clear();
+        this.clearToolStreams();
+        for (const [id, tc] of [...this.toolCards.entries()]) {
+          if (!tc.card.classList.contains("pending") && !tc.card.classList.contains("streaming")) {
+            continue;
+          }
+          const nameHint =
+            (tc.head.querySelector(".badge") as HTMLElement | null)?.textContent || "tool";
+          this.appendToolResult(id, nameHint, true, "(completed)");
+        }
+      }
+
+      this.toolBatchOpen = false;
+      this.paintToolBatchLabel();
+      this.sealToolBatch();
+      this.clearRunningIndicator();
+      // Kill any leftover letter-shine animations in this chat pane
+      this.node.querySelectorAll(".activity-shimmer").forEach((n) => {
+        const el = n as HTMLElement;
+        const text = el.getAttribute("data-shimmer") || el.textContent || "";
+        setShimmerText(
+          el,
+          text.replace(/^Running\b/i, "Ran").replace(/\s*·\s*cancelled$/, ""),
+          false,
+        );
+      });
+    } finally {
+      this.sealingTools = false;
+      this.clearIdleActivityTimer();
+    }
+  }
+
+  private thinkingElapsedNow(): number {
+    if (this.thinkingStartTime != null) {
+      return Date.now() - this.thinkingStartTime;
+    }
+    return this.thinkingLastElapsed;
+  }
+
+  private paintThinkingLabel(labelEl: HTMLElement | null, prefix?: string) {
+    if (!labelEl) return;
+    const p = prefix ?? this.thinkingLabelPrefix;
+    // Live thought row stays as a short status — duration is only shown after seal
+    // ("Thought briefly" / "Thought for 3s"), matching Cursor's reply chrome.
+    const isLive =
+      !!this.thinking && !this.thinking.classList.contains("thinking-done");
+    setShimmerText(labelEl, p, isLive);
+  }
+
+  private startThinkingTimer(labelEl: HTMLElement | null) {
+    this.stopThinkingTimer();
+    this.thinkingStartTime = Date.now();
+    this.thinkingLastElapsed = 0;
+    if (!labelEl) return;
+    // Immediate paint; live label does not tick a duration (Cursor-style)
+    this.paintThinkingLabel(labelEl);
+    this.thinkingTimerId = setInterval(() => {
+      if (!this.thinkingStartTime) return;
+      this.thinkingLastElapsed = Date.now() - this.thinkingStartTime;
+    }, 1000);
+  }
+
+  private setThinkingLabel(prefix: string) {
+    this.thinkingLabelPrefix = prefix;
+    const root = this.thinking?.classList.contains("thinking-wrap")
+      ? this.thinking.querySelector(".thinking-toggle-row") ||
+        this.thinking.querySelector(".thinking-toggle") ||
+        this.thinking.querySelector(".thinking-simple")
+      : this.thinking;
+    const label = root?.querySelector(".thinking-simple-label") as HTMLElement | null;
+    this.paintThinkingLabel(label, prefix);
+  }
+
+  private stopTypewriter() {
+    if (this.typewriterId != null) {
+      clearTimeout(this.typewriterId);
+      this.typewriterId = null;
+    }
+  }
+
+  private clearIdleActivityTimer() {
+    if (this.idleActivityTimer != null) {
+      clearTimeout(this.idleActivityTimer);
+      this.idleActivityTimer = null;
+    }
+  }
+
+  /**
+   * After a quiet stretch while still running, surface a live Thinking… row.
+   * Cancelled when tools / thinking / end arrive so we don't double-stack.
+   */
+  private scheduleIdleActivity(label?: string) {
+    const activity = label ?? this.liveThinkingLabel();
+    this.clearIdleActivityTimer();
+    if (!this.running || this.stopping || this.userCancelled || this.replaying) return;
+    this.idleActivityTimer = setTimeout(() => {
+      this.idleActivityTimer = null;
+      this.ensureLiveActivity(activity);
+    }, 280);
+  }
+
+  /** Keep a visible live activity row while the agent is working. */
+  private ensureLiveActivity(label?: string) {
+    const activity = label ?? this.liveThinkingLabel();
+    if (!this.running || this.stopping || this.userCancelled || this.replaying) return;
+    // Pending / streaming tools already show what is happening
+    if (this.pendingTools.size > 0) return;
+    if (this.node.querySelector(".tool-card.pending, .integration-auth-wrap:not(.integration-auth-done)")) {
+      return;
+    }
+    if (this.thinking && !this.thinking.classList.contains("thinking-done") && this.thinking.isConnected) {
+      this.setThinkingLabel(activity);
+      this.scrollToBottom();
+      return;
+    }
+    this.showThinking(0);
+    this.setThinkingLabel(activity);
+  }
+
+  private clearRunningIndicator() {
+    this.runningIndicator?.remove();
+    this.runningIndicator = null;
+    this.node.querySelectorAll(".thinking-running").forEach((n) => n.remove());
+  }
+
+  /** Seal the current thought block so tools appear after it (Thought → tool → Thought). */
+  private sealThoughtBeforeTools() {
+    if (!this.thinking || this.thinking.classList.contains("thinking-done")) return;
+    // Only seal real reasoning text — never invent "Planning next step"
+    if (!this.thinkingText.trim() && this.thinkingHasReasoning && this.thinkingTarget.trim()) {
+      this.thinkingText = this.thinkingTarget.trim();
+    }
+    this.markThinkingDone();
+  }
+
+  /** Status / placeholder lines — never typewritten (not real model thinking). */
+  private isThinkingPlaceholder(text: string): boolean {
+    const t = text.trim();
+    if (!t) return true;
+    return (
+      t === "Planning next step…" ||
+      t === "Planning next step..." ||
+      t === "Working…" ||
+      t === "Working..."
+    );
+  }
+
+  /** Toggle thought body via the three-dots control. */
+  private setThinkingBodyOpen(open: boolean, wrap?: HTMLElement | null) {
+    const host = wrap || this.thinking;
+    if (!host) return;
+    this.thinkingBodyOpen = open;
+    host.classList.toggle("expanded", open);
+    host.classList.toggle("collapsed", !open);
+    const panel = host.querySelector(".thinking-panel") as HTMLElement | null;
+    if (panel) {
+      panel.hidden = !open;
+      panel.style.display = open ? "" : "none";
+    }
+    // Restore sealed thought text when expanding (state may have been cleared).
+    if (open) {
+      this.ensureSealedThoughtVisible(host);
+      this.scrollThinkingBody(host);
+    }
+    const btn =
+      (host.querySelector(".thinking-toggle-row") as HTMLElement | null) ||
+      (host.querySelector(".thinking-dots-btn") as HTMLElement | null);
+    if (btn) {
+      btn.setAttribute("aria-expanded", String(open));
+      btn.title = open ? "Hide what it's thinking" : "Show what it's thinking";
+      btn.setAttribute("aria-label", open ? "Hide thinking" : "Show thinking");
+      btn.classList.toggle("is-open", open);
+    }
+  }
+
+  /** Re-paint sealed thought body from data attribute if the DOM body is empty. */
+  private ensureSealedThoughtVisible(wrap: HTMLElement) {
+    const body = wrap.querySelector(".thinking-body") as HTMLElement | null;
+    if (!body) return;
+    const saved = (wrap.getAttribute("data-thought") || "").trim();
+    const hasText = !!(body.textContent && body.textContent.trim());
+    if (!hasText && saved) {
+      body.classList.remove("is-empty");
+      body.textContent = "";
+      const textSpan = document.createElement("span");
+      textSpan.className = "thinking-stream";
+      textSpan.textContent = saved;
+      body.appendChild(textSpan);
+      wrap.classList.add("has-detail");
+    }
+  }
+
+  private bindThinkingToggle(wrap: HTMLElement) {
+    const btn =
+      (wrap.querySelector(".thinking-toggle-row") as HTMLButtonElement | null) ||
+      (wrap.querySelector(".thinking-dots-btn") as HTMLButtonElement | null);
+    if (!btn) return;
+    // Re-bind safely after seal (old listeners stay fine; guard duplicate only once)
+    if ((btn as any).__bound) return;
+    (btn as any).__bound = true;
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const currentlyOpen =
+        wrap.classList.contains("expanded") && !wrap.classList.contains("collapsed");
+      this.setThinkingBodyOpen(!currentlyOpen, wrap);
+    });
+  }
+
+  /**
+   * Paint revealed reasoning text with a live caret while typewriting.
+   * Body only visible when the dots control is expanded.
+   */
+  private paintThinkingBody() {
+    if (!this.thinkingBody) return;
+    const raw = this.thinkingTarget.slice(0, this.thinkingRevealed);
+    const typing =
+      this.thinkingHasReasoning &&
+      (this.typewriterId != null ||
+        (!!this.thinking &&
+          !this.thinking.classList.contains("thinking-done") &&
+          this.thinkingRevealed < this.thinkingTarget.length));
+
+    this.thinkingBody.textContent = "";
+
+    if (!this.thinkingHasReasoning || !this.thinkingTarget.trim()) {
+      const live =
+        !!this.thinking &&
+        !this.thinking.classList.contains("thinking-done") &&
+        this.running;
+      if (live) {
+        // Waiting for first reasoning token — keep a live caret under Thinking…
+        this.thinkingBody.classList.remove("is-empty");
+        const c = document.createElement("span");
+        c.className = "thinking-caret";
+        c.setAttribute("aria-hidden", "true");
+        this.thinkingBody.appendChild(c);
+        this.thinking?.classList.add("is-typing");
+        this.thinking?.classList.remove("has-detail");
+        return;
+      }
+      // No real reasoning yet — keep panel empty (no "Planning next step" typing)
+      this.thinkingBody.classList.add("is-empty");
+      this.thinking?.classList.remove("is-typing");
+      this.thinking?.classList.toggle("has-detail", false);
+      return;
+    }
+
+    this.thinkingBody.classList.remove("is-empty");
+    const textSpan = document.createElement("span");
+    textSpan.className = "thinking-stream";
+    textSpan.textContent = raw;
+    this.thinkingBody.appendChild(textSpan);
+
+    if (typing) {
+      const c = document.createElement("span");
+      c.className = "thinking-caret";
+      c.setAttribute("aria-hidden", "true");
+      this.thinkingBody.appendChild(c);
+    } else if (
+      this.running &&
+      this.thinking &&
+      !this.thinking.classList.contains("thinking-done")
+    ) {
+      // Live stream caught up — keep caret so it still feels like realtime typing
+      const c = document.createElement("span");
+      c.className = "thinking-caret";
+      c.setAttribute("aria-hidden", "true");
+      this.thinkingBody.appendChild(c);
+      this.thinking.classList.add("is-typing");
+    }
+
+    this.thinking?.classList.toggle("has-detail", true);
+    this.thinking?.classList.toggle("is-typing", typing || (!!this.running && !!this.thinking && !this.thinking.classList.contains("thinking-done")));
+    this.scrollThinkingBody();
+  }
+
+  /** Keep the live thought stream pinned to the bottom of its invisible scroll box. */
+  private scrollThinkingBody(wrap?: HTMLElement | null) {
+    const body =
+      (wrap?.querySelector(".thinking-body") as HTMLElement | null) ||
+      this.thinkingBody;
+    if (!body || body.classList.contains("is-empty")) return;
+    requestAnimationFrame(() => {
+      body.scrollTop = body.scrollHeight;
+    });
+  }
+
+  /**
+   * Typewriter for **real** model reasoning only — character-by-character as tokens arrive.
+   */
+  private startTypewriter() {
+    this.stopTypewriter();
+    if (this.replaying || !this.thinkingHasReasoning) {
+      this.thinkingRevealed = this.thinkingTarget.length;
+      this.paintThinkingBody();
+      return;
+    }
+    const tick = () => {
+      if (!this.thinkingHasReasoning) {
+        this.typewriterId = null;
+        return;
+      }
+      if (this.thinkingRevealed >= this.thinkingTarget.length) {
+        this.typewriterId = null;
+        this.paintThinkingBody();
+        this.flushDeferredAssistant();
+        return;
+      }
+      const backlog = this.thinkingTarget.length - this.thinkingRevealed;
+      // Stay close to realtime stream: type char-by-char, catch up if model is fast
+      let step = 1;
+      if (this.thoughtRevealUrgent) {
+        if (backlog > 200) step = 64;
+        else if (backlog > 80) step = 24;
+        else if (backlog > 24) step = 8;
+        else step = 3;
+      } else if (backlog > 400) step = 24;
+      else if (backlog > 160) step = 10;
+      else if (backlog > 60) step = 4;
+      else if (backlog > 24) step = 2;
+
+      const nextIdx = Math.min(this.thinkingTarget.length, this.thinkingRevealed + step);
+      const justTyped = this.thinkingTarget.slice(this.thinkingRevealed, nextIdx);
+      this.thinkingRevealed = nextIdx;
+      this.paintThinkingBody();
+      // Prefer internal thought scroll so long reasoning doesn't blow up the chat
+      if (this.thinkingBodyOpen) this.scrollThinkingBody();
+
+      const last = justTyped[justTyped.length - 1] || "";
+      let delay = this.thoughtRevealUrgent ? 4 : 18;
+      if (!this.thoughtRevealUrgent) {
+        if (last === "\n") delay = 42;
+        else if (/[.!?]/.test(last)) delay = 32;
+        else if (/[,;:]/.test(last)) delay = 22;
+        else if (backlog > 200) delay = 6;
+        else if (backlog > 80) delay = 10;
+        else if (backlog > 30) delay = 14;
+      }
+
+      this.typewriterId = window.setTimeout(tick, delay);
+    };
+    tick();
+  }
+
+  /** True when thought text is still being typed out and the reply should wait. */
+  private shouldDeferAssistantForThought(): boolean {
+    if (this.replaying) return false;
+    if (!this.thinking || this.thinking.classList.contains("thinking-done")) return false;
+    if (!this.thinkingHasReasoning || !this.thinkingTarget.trim()) return false;
+    return this.thinkingRevealed < this.thinkingTarget.length;
+  }
+
+  private flushDeferredAssistant() {
+    this.thoughtRevealUrgent = false;
+    if (!this.deferredAssistantChunks.length) return;
+    const chunks = this.deferredAssistantChunks.splice(0);
+    for (const chunk of chunks) {
+      this.appendAssistantText(chunk);
+    }
+  }
+
+  /**
+   * Set thought body text.
+   * @param instant skip typewriter (status, tools, replay)
+   * @param isReasoning true only for model reasoning stream
+   */
+  private setThinkingDetail(text: string, instant = false, isReasoning = false) {
+    if (!this.thinking) this.showThinking(0);
+    if (!this.thinkingBody) {
+      const panel = this.thinking?.querySelector(".thinking-panel") as HTMLElement | null;
+      const body = el("div", { class: "thinking-body" }) as HTMLElement;
+      (panel || this.thinking)?.appendChild(body);
+      this.thinkingBody = body;
+    }
+
+    // Status placeholders are never shown as "thinking content"
+    if (!isReasoning && this.isThinkingPlaceholder(text)) {
+      if (!this.thinkingHasReasoning) {
+        this.thinkingTarget = "";
+        this.thinkingRevealed = 0;
+        this.stopTypewriter();
+        this.paintThinkingBody();
+      }
+      return;
+    }
+
+    const detail = text.replace(/\r\n/g, "\n").trimEnd();
+    if (isReasoning) this.thinkingHasReasoning = true;
+
+    const prevRevealed = this.thinkingRevealed;
+    const isExtension =
+      !!this.thinkingTarget &&
+      detail.startsWith(this.thinkingTarget) &&
+      detail.length >= this.thinkingTarget.length;
+    if (!isExtension && isReasoning) {
+      // New reasoning block — type from start
+      this.thinkingRevealed = 0;
+    }
+    if (this.thinkingRevealed > detail.length) this.thinkingRevealed = detail.length;
+
+    this.thinkingTarget = detail;
+    this.thinking?.classList.toggle("has-detail", !!detail && this.thinkingHasReasoning);
+    // Stay collapsed by default — user expands to read reasoning
+
+    if (instant || this.replaying || !detail || !isReasoning) {
+      this.stopTypewriter();
+      this.thinkingRevealed = detail.length;
+      this.paintThinkingBody();
+      if (this.thinkingBodyOpen) {
+        this.scrollThinkingBody();
+        this.scrollToBottom();
+      }
+      return;
+    }
+
+    const jump = detail.length - prevRevealed;
+    // Tiny live deltas paint immediately; larger jumps type out so the user sees realtime thinking
+    if (jump > 0 && jump <= 12) {
+      this.stopTypewriter();
+      this.thinkingRevealed = detail.length;
+      this.paintThinkingBody();
+      if (this.thinkingBodyOpen) {
+        this.scrollThinkingBody();
+        this.scrollToBottom();
+      }
+      return;
+    }
+
+    // Stream chunks / full dumps — animate so thoughts type in realtime
+    if (this.typewriterId == null) this.startTypewriter();
+  }
+
+  /** Append model reasoning — paints live as tokens arrive. */
+  appendThinkingText(text: string) {
+    if (!text) return;
+    if (!this.thinking) this.showThinking(0);
+    // Content updates while collapsed; expand stays user-controlled
+    const chunk = text.replace(/\r\n/g, "\n");
+    // Drop any prior placeholder; start clean reasoning stream
+    if (!this.thinkingHasReasoning) {
+      this.thinkingText = chunk.replace(/^\n+/, "");
+      this.thinkingTarget = "";
+      this.thinkingRevealed = 0;
+    } else {
+      this.thinkingText = this.thinkingText ? this.thinkingText + chunk : chunk.replace(/^\n+/, "");
+    }
+    this.setThinkingDetail(this.thinkingText, this.replaying, true);
+    if (this.thinkingLabelPrefix === "Thinking…" || this.thinkingLabelPrefix === "Reasoning…" || this.thinkingLabelPrefix.startsWith("Thinking") || this.thinkingLabelPrefix.startsWith("Reasoning")) {
+      this.setThinkingLabel(this.liveThinkingLabel());
+    }
+  }
+
+  /** Keep the completed thought visible and toggleable — or remove empty placeholders. */
+  private markThinkingDone(elapsedMs?: number) {
+    if (!this.thinking) return;
+    const elapsed = elapsedMs ?? this.stopThinkingTimer();
+    this.thinkingLastElapsed = elapsed;
+    this.stopTypewriter();
+
+    // Prefer the fullest available reasoning text
+    const sealedText = (
+      this.thinkingText.trim() ||
+      this.thinkingTarget.trim() ||
+      ""
+    ).trim();
+    if (sealedText) {
+      this.thinkingText = sealedText;
+      this.thinkingTarget = sealedText;
+      this.thinkingHasReasoning = true;
+    }
+
+    this.thinkingRevealed = this.thinkingTarget.length;
+    this.paintThinkingBody();
+    const wrap = this.thinking;
+
+    // Empty "…" with nothing to show — remove instead of leaving dead toggles
+    if (!sealedText) {
+      wrap.remove();
+      this.thinking = null;
+      this.thinkingBody = null;
+      this.thinkingText = "";
+      this.thinkingTarget = "";
+      this.thinkingRevealed = 0;
+      this.thinkingHasReasoning = false;
+      this.thinkingLabelPrefix = this.liveThinkingLabel();
+      return;
+    }
+
+    wrap.setAttribute("data-thought", sealedText);
+    wrap.classList.add("thinking-done", "has-detail");
+    wrap.classList.remove("thinking-enter", "is-typing", "thinking-wave-live");
+    wrap.classList.add("dots-frozen");
+
+    // Cursor-style summary row: "Thought briefly" / "Thought for 3s" + chevron
+    const toggle =
+      (wrap.querySelector(".thinking-toggle-row") as HTMLElement | null) ||
+      (wrap.querySelector(".thinking-dots-btn") as HTMLElement | null);
+    if (toggle) {
+      toggle.classList.add("thinking-toggle-row");
+      toggle.classList.remove("thinking-dots-btn", "thinking-simple", "thinking-row");
+      const summary = this.thoughtSummaryLabel(elapsed);
+      toggle.innerHTML =
+        `<span class="thinking-simple-label">${escapeHtml(summary)}</span>` +
+        `<span class="thinking-chev" aria-hidden="true">${icon("chevronDown", 12)}</span>`;
+    }
+
+    // Seal body text into the panel so toggle always has content
+    const body = wrap.querySelector(".thinking-body") as HTMLElement | null;
+    if (body) {
+      body.classList.remove("is-empty");
+      body.textContent = "";
+      const textSpan = document.createElement("span");
+      textSpan.className = "thinking-stream";
+      textSpan.textContent = sealedText;
+      body.appendChild(textSpan);
+    }
+
+    // Start collapsed after seal (Cursor: expand to read thoughts)
+    this.bindThinkingToggle(wrap);
+    this.setThinkingBodyOpen(false, wrap);
+
+    this.thinking = null;
+    this.thinkingBody = null;
+    this.thinkingText = "";
+    this.thinkingTarget = "";
+    this.thinkingRevealed = 0;
+    this.thinkingHasReasoning = false;
+    this.thinkingLabelPrefix = this.liveThinkingLabel();
+  }
+
+  /** Stop the water wave on a sealed thought (idle / new reply). */
+  private freezeDotsOn(wrap: HTMLElement) {
+    wrap.classList.remove("thinking-wave-live");
+    wrap.classList.add("dots-frozen");
+    const dots = wrap.querySelector(".dots") as HTMLElement | null;
+    if (dots) dots.classList.add("dots-static");
+    wrap.querySelectorAll(".dots span").forEach((span) => {
+      const el = span as HTMLElement;
+      el.style.animation = "none";
+    });
+  }
+
+  /** Freeze every working-indicator wave (run finished / cancelled). */
+  private freezeAllWorkingDots() {
+    this.node.querySelectorAll(".thinking-wrap.thinking-wave-live, .thinking-wrap.thinking-done:not(.dots-frozen)").forEach((n) => {
+      this.freezeDotsOn(n as HTMLElement);
+    });
+  }
+
+  private startDotsPulse() {
+    if (this.dotsPulseId != null) return;
+    this.dotsPulseId = setInterval(() => {
+      if (!this.running || this.stopping) return;
+      // Live tool row
+      if (this.runningIndicator) this.kickThinkingDots(this.runningIndicator);
+      // Active / sealed-but-still-working thought dots
+      this.node.querySelectorAll(
+        ".thinking-wrap:not(.dots-frozen) .dots, .thinking-running .dots, .thinking-dots-btn .dots",
+      ).forEach((dots) => {
+        const host = (dots as HTMLElement).closest(".thinking-wrap, .thinking-running, .thinking-dots-btn") || dots;
+        this.kickThinkingDots(host);
+      });
+      // Pending tool cards that carry wave dots
+      this.node.querySelectorAll(".tool-card.pending .tool-wave-dots").forEach((d) => {
+        this.kickThinkingDots(d);
+      });
+    }, 1600);
+  }
+
+  private stopDotsPulse() {
+    if (this.dotsPulseId != null) {
+      clearInterval(this.dotsPulseId);
+      this.dotsPulseId = null;
+    }
+  }
+
+  /** Human-readable line for the thinking indicator while a tool runs. */
+  private describeToolAction(name: string, args: any): string {
+    const clip = (s: string, n = 48) =>
+      s.length > n ? s.slice(0, n - 1) + "…" : s;
+    const path = typeof args?.path === "string" ? args.path : "";
+    const src = typeof args?.src === "string" ? args.src : "";
+    const dst = typeof args?.dst === "string" ? args.dst : typeof args?.dest === "string" ? args.dest : "";
+    const cmd = typeof args?.command === "string" ? args.command : "";
+    const pattern = typeof args?.pattern === "string" ? args.pattern : "";
+    const url = typeof args?.url === "string" ? args.url : "";
+    const msg = typeof args?.message === "string" ? args.message : "";
+    const question = typeof args?.question === "string" ? args.question : "";
+
+    switch (name) {
+      case "read_file":
+        return path ? `Reading ${clip(path)}` : "Reading a file";
+      case "write_file":
+        return path ? `Writing ${clip(path)}` : "Writing a file";
+      case "edit_file":
+        return path ? `Editing ${clip(path)}` : "Editing a file";
+      case "list_dir":
+        return path && path !== "." ? `Listing ${clip(path)}` : "Listing folder";
+      case "glob":
+        return pattern ? `Finding files · ${clip(pattern, 40)}` : "Finding files";
+      case "grep":
+        return pattern ? `Searching · ${clip(pattern, 40)}` : "Searching code";
+      case "run_command":
+        return cmd ? `Running · ${clip(cmd, 44)}` : "Running a command";
+      case "git_init":
+        return "Initializing git";
+      case "git_add_all":
+        return "Staging all changes";
+      case "git_commit":
+        return msg ? `Committing · ${clip(msg, 36)}` : "Creating commit";
+      case "git_status":
+        return "Checking git status";
+      case "list_drives":
+        return "Listing drives";
+      case "sys_info":
+        return "Reading system info";
+      case "env_vars":
+        return "Reading environment";
+      case "list_processes":
+        return "Listing processes";
+      case "kill_process":
+        return args?.pid != null ? `Stopping process ${args.pid}` : "Stopping a process";
+      case "open_url":
+        return url ? `Opening ${clip(url, 40)}` : "Opening a link";
+      case "open_path":
+        return path ? `Opening ${clip(path)}` : "Opening a path";
+      case "download_file":
+        return path ? `Downloading → ${clip(path)}` : "Downloading a file";
+      case "move_file":
+        return src || dst ? `Moving ${clip(src || "file", 28)} → ${clip(dst || "…", 28)}` : "Moving a file";
+      case "copy_file":
+        return src || dst ? `Copying ${clip(src || "file", 28)} → ${clip(dst || "…", 28)}` : "Copying a file";
+      case "delete_file":
+        return path ? `Deleting ${clip(path)}` : "Deleting a file";
+      case "make_dir":
+        return path ? `Creating folder ${clip(path)}` : "Creating a folder";
+      case "file_info":
+        return path ? `Inspecting ${clip(path)}` : "Inspecting a file";
+      case "computer_list_windows":
+        return "Listing controllable windows";
+      case "computer_observe":
+        return args?.window_id != null
+          ? `Observing window ${clip(String(args.window_id), 30)}`
+          : "Observing a window";
+      case "computer_focus_window":
+        return "Focusing the selected window";
+      case "computer_click":
+        return args?.x != null && args?.y != null
+          ? `Clicking desktop at ${args.x}, ${args.y}`
+          : "Clicking the desktop";
+      case "computer_type_text":
+        return "Typing approved text";
+      case "computer_press_key":
+        return args?.keys
+          ? `Pressing ${clip(String(args.keys), 30)}`
+          : "Pressing a key";
+      case "computer_scroll":
+        return "Scrolling the selected window";
+      case "computer_drag":
+        return "Dragging in the selected window";
+      case "computer_game_sequence":
+        return Array.isArray(args?.steps)
+          ? `Running ${args.steps.length} timed game controls`
+          : "Running timed game controls";
+      case "ask_user":
+        return question ? `Asking · ${clip(question, 40)}` : "Waiting for your choice";
+      case "done":
+        return "Wrapping up";
+      default:
+        return this.friendlyToolName(name) || "Working…";
+    }
+  }
+
+  /** Live desktop FX mirror inside the chat while Computer Use runs. */
+  handleComputerFx(event: ComputerUseFxEvent) {
+    if (this.replaying || event.kind === "clear") return;
+    let label = "Desktop control";
+    if (event.kind === "click") label = `Click at ${event.x}, ${event.y}`;
+    else if (event.kind === "type_char" || event.kind === "type_done") {
+      label = event.kind === "type_done" ? "Typed" : "Typing…";
+    } else if (event.kind === "drag") label = `Drag to ${event.x}, ${event.y}`;
+    else if (event.kind === "scroll") label = `Scroll at ${event.x}, ${event.y}`;
+    else if (event.kind === "cursor_move") label = `Cursor ${event.x}, ${event.y}`;
+
+    if (this.runningIndicator && this.runningIndicator.isConnected) {
+      const lab = this.runningIndicator.querySelector(".thinking-simple-label") as HTMLElement | null;
+      const detail = this.runningIndicator.querySelector(".computer-fx-live") as HTMLElement | null;
+      if (lab) setShimmerText(lab, label, true);
+      if (detail) {
+        detail.hidden = !(event.kind === "type_char" || event.kind === "type_done");
+        if (!detail.hidden) detail.textContent = event.text ?? "";
+      } else if (event.kind === "type_char" || event.kind === "type_done") {
+        const row = document.createElement("div");
+        row.className = "computer-fx-live";
+        row.textContent = event.text ?? "";
+        this.runningIndicator.appendChild(row);
+      }
+      this.scrollToBottom();
+    }
+  }
+
+  /** Live running-tool row (not a Thought block) while tools execute. */
+  private showToolThinking(name: string, args: any) {
+    if (this.replaying) return;
+    const label = this.toolRunTitle(name, args);
+    const n = this.pendingTools.size;
+    const suffix = n > 1 ? ` · ${n} steps` : "";
+    const prefix = this.isPremiumReply() ? "Working" : "Running";
+    // Reuse the live row when possible so the wave isn't torn down every tool
+    if (this.runningIndicator && this.runningIndicator.isConnected) {
+      const lab = this.runningIndicator.querySelector(".thinking-simple-label") as HTMLElement | null;
+      if (lab) setShimmerText(lab, `${prefix} · ${label}${suffix}`, true);
+      this.kickThinkingDots(this.runningIndicator);
+      this.startDotsPulse();
+      this.scrollToBottom();
+      return;
+    }
+    this.clearRunningIndicator();
+    const row = div("thinking-running");
+    const isComputer = name.startsWith("computer_");
+    row.innerHTML =
+      `<span class="dots" aria-hidden="true"><span></span><span></span><span></span></span>` +
+      `<span class="thinking-simple-label"></span>` +
+      (isComputer ? `<span class="computer-fx-cursor" aria-hidden="true"></span>` : "");
+    const lab = row.querySelector(".thinking-simple-label") as HTMLElement;
+    setShimmerText(lab, `${prefix} · ${label}${suffix}`, true);
+    this.node.appendChild(row);
+    this.runningIndicator = row;
+    this.kickThinkingDots(row);
+    this.startDotsPulse();
+    this.scrollToBottom();
+  }
+
+  /** Longer detail line for the thinking body (full path / command). */
+  private describeToolDetail(name: string, args: any): string {
+    const path = typeof args?.path === "string" ? args.path : "";
+    const src = typeof args?.src === "string" ? args.src : "";
+    const dst = typeof args?.dst === "string" ? args.dst : typeof args?.dest === "string" ? args.dest : "";
+    const cmd = typeof args?.command === "string" ? args.command : "";
+    const pattern = typeof args?.pattern === "string" ? args.pattern : "";
+    const url = typeof args?.url === "string" ? args.url : "";
+    const msg = typeof args?.message === "string" ? args.message : "";
+    const question = typeof args?.question === "string" ? args.question : "";
+    const content = typeof args?.content === "string" ? args.content : "";
+    const oldStr = typeof args?.old_string === "string" ? args.old_string : "";
+
+    switch (name) {
+      case "read_file":
+        return path ? `Reading ${path}` : "Reading a file";
+      case "write_file":
+        return path
+          ? `Writing ${path}${content ? `\n${content.slice(0, 280)}${content.length > 280 ? "…" : ""}` : ""}`
+          : "Writing a file";
+      case "edit_file":
+        return path
+          ? `Editing ${path}${oldStr ? `\nReplacing: ${oldStr.slice(0, 160)}${oldStr.length > 160 ? "…" : ""}` : ""}`
+          : "Editing a file";
+      case "list_dir":
+        return path ? `Listing ${path}` : "Listing project folder";
+      case "glob":
+        return pattern ? `Finding files matching ${pattern}` : "Finding files";
+      case "grep":
+        return pattern ? `Searching for ${pattern}${path ? ` in ${path}` : ""}` : "Searching code";
+      case "run_command":
+        return cmd ? `Running:\n${cmd}` : "Running a command";
+      case "git_commit":
+        return msg ? `Committing: ${msg}` : "Creating commit";
+      case "open_url":
+        return url ? `Opening ${url}` : "Opening a link";
+      case "open_path":
+        return path ? `Opening ${path}` : "Opening a path";
+      case "download_file":
+        return path ? `Downloading to ${path}` : "Downloading a file";
+      case "move_file":
+        return `Moving ${src || "?"} → ${dst || "?"}`;
+      case "copy_file":
+        return `Copying ${src || "?"} → ${dst || "?"}`;
+      case "delete_file":
+        return path ? `Deleting ${path}` : "Deleting a file";
+      case "make_dir":
+        return path ? `Creating folder ${path}` : "Creating a folder";
+      case "file_info":
+        return path ? `Inspecting ${path}` : "Inspecting a file";
+      case "computer_list_windows":
+        return "Listing Windows apps that can be controlled";
+      case "computer_observe":
+        return args?.window_id != null
+          ? `Capturing a fresh observation of window ${String(args.window_id)}`
+          : "Capturing a fresh observation of the selected window";
+      case "computer_focus_window":
+        return "Bringing the selected app window to the foreground";
+      case "computer_click":
+        return args?.x != null && args?.y != null
+          ? `Clicking the approved point at ${args.x}, ${args.y}`
+          : "Clicking an approved point in the selected window";
+      case "computer_type_text":
+        return "Typing approved text into the currently focused control";
+      case "computer_press_key":
+        return args?.keys
+          ? `Sending the approved key press: ${String(args.keys)}`
+          : "Sending an approved key press";
+      case "computer_scroll":
+        return "Scrolling within the selected window";
+      case "computer_drag":
+        return "Dragging between approved points in the selected window";
+      case "computer_game_sequence":
+        return Array.isArray(args?.steps)
+          ? `Running ${args.steps.length} bounded realtime game-control steps`
+          : "Running a bounded realtime game-control sequence";
+      case "ask_user":
+        return question || "Waiting for your choice";
+      case "done":
+        return "Wrapping up the run";
+      default:
+        try {
+          const pretty = JSON.stringify(args ?? {}, null, 2);
+          const label = this.friendlyToolName(name);
+          return pretty && pretty !== "{}" ? `${label}\n${pretty.slice(0, 400)}` : label;
+        } catch {
+          return this.friendlyToolName(name) || "Working…";
+        }
+    }
+  }
+
+  private stopThinkingTimer(): number {
+    if (this.thinkingTimerId) {
+      clearInterval(this.thinkingTimerId);
+      this.thinkingTimerId = null;
+    }
+    const elapsed = this.thinkingStartTime
+      ? Date.now() - this.thinkingStartTime
+      : this.thinkingLastElapsed;
+    if (this.thinkingStartTime != null) {
+      this.thinkingLastElapsed = elapsed;
+    }
+    this.thinkingStartTime = null;
+    return elapsed;
+  }
+
+  showThinking(iteration: number) {
+    this.clearIdleActivityTimer();
+    this.clearRunningIndicator();
+    // Reuse live panel when possible so detail doesn't flash away
+    if (this.thinking && !this.thinking.classList.contains("thinking-done") && !this.replaying) {
+      // Keep existing real reasoning; only label stays visible until user expands
+      if (this.thinkingHasReasoning && this.thinkingText) {
+        this.setThinkingDetail(this.thinkingText, true, true);
+      } else {
+        this.paintThinkingBody();
+      }
+      this.setThinkingLabel(this.liveThinkingLabel());
+      this.scrollToBottom();
+      return;
+    }
+
+    this.finalizeThinking();
+    this.pendingAssistant = null;
+    this.pendingAssistantMsg = null;
+    this.thinkingText = "";
+    this.thinkingTarget = "";
+    this.thinkingRevealed = 0;
+    this.thinkingHasReasoning = false;
+    this.thinkingBodyOpen = false;
+    this.thinkingLabelPrefix = this.liveThinkingLabel();
+
+    // Collapsed by default — expand to read reasoning
+    const wrap = div("thinking-wrap collapsed");
+    const toggle = el("button", {
+      class: "thinking-toggle-row",
+      type: "button",
+      "aria-expanded": "false",
+      title: "Show what it's thinking",
+      "aria-label": "Show thinking",
+    }) as HTMLButtonElement;
+    toggle.appendChild(el("span", { class: "thinking-simple-label" }, []));
+    toggle.appendChild(el("span", { class: "thinking-chev", html: icon("chevronDown", 12) }));
+
+    const panel = el("div", { class: "thinking-panel" }) as HTMLElement;
+    const body = el("div", {
+      class: "thinking-body",
+      "aria-live": "polite",
+      "aria-label": "What the AI is thinking",
+    }) as HTMLElement;
+    panel.appendChild(body);
+    wrap.appendChild(toggle);
+    wrap.appendChild(panel);
+    this.decorateThinkingWrap(wrap);
+    this.node.appendChild(wrap);
+    this.bindThinkingToggle(wrap);
+    this.setThinkingBodyOpen(false, wrap);
+    wrap.classList.add("thinking-enter");
+    wrap.style.opacity = "1";
+    this.thinking = wrap;
+    this.thinkingBody = body;
+    this.startThinkingTimer(toggle.querySelector(".thinking-simple-label") as HTMLElement);
+    this.paintThinkingBody();
+    this.scrollToBottom();
+    void iteration;
+  }
+
+  /** Resume the infinite wave without resetting its timeline on streamed updates. */
+  private kickThinkingDots(root?: Element | null) {
+    const scope = root || this.thinking;
+    if (!scope) return;
+    // Skip sealed thoughts that are intentionally frozen
+    if (
+      scope instanceof Element &&
+      (scope.classList.contains("dots-frozen") ||
+        scope.closest?.(".thinking-wrap.dots-frozen"))
+    ) {
+      return;
+    }
+    const spans = scope.querySelectorAll(
+      ".thinking-toggle .dots span, .thinking-simple .dots span, .thinking-running .dots span, .tool-wave-dots span, .dots span",
+    );
+    spans.forEach((span, i) => {
+      const el = span as HTMLElement;
+      // Don't revive static / frozen dots
+      if (el.closest(".dots-static, .dots-frozen, .thinking-wrap.dots-frozen")) return;
+      // Clearing an old inline `animation: none` lets the CSS animation continue.
+      // Never force reflow/restart here: file-content chunks can arrive many times
+      // per second and repeated restarts make the dots look completely frozen.
+      el.style.animation = "";
+      el.style.animationPlayState = "running";
+      el.style.opacity = "";
+      el.style.transform = "";
+      el.style.animationDelay = `${(i % 3) * -0.16}s`;
+    });
+  }
+
+  /** Finish thinking: keep a Thought block only when there is real reasoning. */
+  finalizeThinking() {
+    if (!this.thinking) {
+      this.flushDeferredAssistant();
+      return;
+    }
+    const elapsed = this.stopThinkingTimer();
+    this.stopTypewriter();
+
+    // Prefer real reasoning only — empty body if model never streamed thoughts
+    if (!this.thinkingText.trim() && this.thinkingHasReasoning && this.thinkingTarget.trim()) {
+      this.thinkingText = this.thinkingTarget.trim();
+    }
+
+    this.markThinkingDone(elapsed);
+    this.flushDeferredAssistant();
+  }
+
+  hideThinking() {
+    this.finalizeThinking();
+  }
+
+  /** @deprecated alias — assistant reply text (not model reasoning). */
+  appendReasoningText(text: string) {
+    this.appendAssistantText(text);
+  }
+
+  appendAssistantText(text: string) {
+    // Cursor/Grok often dumps the full thought right before the reply — let it type out first
+    if (this.shouldDeferAssistantForThought()) {
+      this.deferredAssistantChunks.push(text);
+      this.thoughtRevealUrgent = true;
+      if (this.typewriterId == null) this.startTypewriter();
+      return;
+    }
+    // Keep the thought block in history if we had reasoning; otherwise fade out
+    this.finalizeThinking();
+    // Don't seal an active tool batch mid-run — tools still need the "Running N" header
+    if (this.pendingTools.size === 0) {
+      this.sealToolBatch();
+    }
+    // Provider prose can arrive immediately before a long tool call. Keep the
+    // wave alive until the run actually ends; setRunning(false) owns freezing.
+    if (!this.running || this.stopping || this.userCancelled) {
+      this.freezeAllWorkingDots();
+    }
+    this.clearRunningIndicator();
+    if (!this.pendingAssistant) {
+      const msg = div("msg assistant msg-enter");
+      const body = el("div", { class: "msg-body md" });
+      msg.appendChild(body);
+      this.decorateAssistantMsg(msg);
+      // Hide date/time until the agent finishes this reply
+      const meta = this.messageMeta(() => (body as any).__raw || "", this.now(), { showTime: false });
+      msg.appendChild(meta);
+      this.node.appendChild(msg);
+      this.pendingAssistant = body;
+      this.pendingAssistantMsg = msg;
+      (body as any).__raw = "";
+      (msg as any).__timeEl = meta.querySelector(".msg-time");
+    }
+    const raw = ((this.pendingAssistant as any).__raw || "") + text;
+    (this.pendingAssistant as any).__raw = raw;
+    this.scheduleAssistantPaint(this.pendingAssistant);
+    // After prose, the model may pause before tools / next thought — don't leave a blank gap
+    if (this.running && !this.stopping && !this.userCancelled) {
+      this.scheduleIdleActivity();
+    }
+  }
+
+  /** Render at most once per display frame even when the provider emits many tiny chunks. */
+  private scheduleAssistantPaint(body: HTMLElement) {
+    this.assistantPaintTargets.add(body);
+    if (this.assistantPaintFrame !== null) return;
+    this.assistantPaintFrame = requestAnimationFrame(() => this.paintAssistantTargets());
+  }
+
+  private paintAssistantTargets() {
+    this.assistantPaintFrame = null;
+    const targets = [...this.assistantPaintTargets];
+    this.assistantPaintTargets.clear();
+    let painted = false;
+    for (const body of targets) {
+      if (!body.isConnected) continue;
+      body.innerHTML = renderMarkdown((body as any).__raw || "");
+      painted = true;
+    }
+    if (painted) this.scrollToBottom();
+  }
+
+  private flushAssistantPaints() {
+    if (this.assistantPaintFrame !== null) {
+      cancelAnimationFrame(this.assistantPaintFrame);
+      this.assistantPaintFrame = null;
+    }
+    if (this.assistantPaintTargets.size > 0) this.paintAssistantTargets();
+  }
+
+  private cancelAssistantPaints() {
+    if (this.assistantPaintFrame !== null) {
+      cancelAnimationFrame(this.assistantPaintFrame);
+      this.assistantPaintFrame = null;
+    }
+    this.assistantPaintTargets.clear();
+  }
+
+  private clearToolStreams() {
+    for (const stream of this.toolStreams.values()) {
+      if (stream.paintFrame !== null) cancelAnimationFrame(stream.paintFrame);
+    }
+    this.toolStreams.clear();
+  }
+
+  private disposeToolStream(id: string) {
+    const stream = this.toolStreams.get(id);
+    if (stream?.paintFrame !== null && stream?.paintFrame !== undefined) {
+      cancelAnimationFrame(stream.paintFrame);
+    }
+    this.toolStreams.delete(id);
+  }
+
+  private scheduleToolStreamPaint(id: string) {
+    const stream = this.toolStreams.get(id);
+    if (!stream || stream.paintFrame !== null) return;
+    stream.paintFrame = requestAnimationFrame(() => this.paintToolStream(id));
+  }
+
+  private streamedFileField(name: string): ToolArgField | null {
+    if (name === "write_file") return "content";
+    if (name === "edit_file") return "new_string";
+    return null;
+  }
+
+  private paintToolStream(id: string) {
+    const stream = this.toolStreams.get(id);
+    if (!stream) return;
+    stream.paintFrame = null;
+    const tc = this.toolCards.get(id);
+    if (!tc) return;
+
+    const name = stream.name;
+    const rawPath = stream.decoder.value("path");
+    if (rawPath !== undefined) {
+      const path = rawPath.replace(/[\u202a-\u202e\u2066-\u2069]/gi, "");
+      const nameEl = tc.head.querySelector(".tool-name") as HTMLElement | null;
+      if (nameEl) setShimmerText(nameEl, this.toolRunningLabel(name, { path }), true);
+      const argsEl = tc.body.querySelector(".args");
+      if (argsEl) argsEl.textContent = this.toolArgsHeader(name, { path: path || "…" });
+    }
+
+    const field = this.streamedFileField(name);
+    if (!field || !stream.decoder.has(field)) return;
+    const result = tc.body.querySelector(".pending-result") as HTMLElement | null;
+    if (!result) return;
+
+    tc.card.classList.add("streaming");
+    // Keep individual tool body closed unless user opened it
+    // Respect collapsed tool batch — don't force-show while streaming
+    const wrap = tc.card.closest(".tool-card-wrap") as HTMLElement | null;
+    if (wrap && this.isToolBatchCollapsed()) wrap.hidden = true;
+    result.classList.add("live-write-preview");
+    result.setAttribute("aria-live", "off");
+    let meta = result.querySelector(".live-write-meta") as HTMLElement | null;
+    let contentEl = result.querySelector(".live-write-content") as HTMLElement | null;
+    if (!meta || !contentEl) {
+      result.textContent = "";
+      meta = div("live-write-meta");
+      contentEl = el("pre", {
+        class: "live-write-content",
+        "aria-label": name === "write_file"
+          ? "File content being written"
+          : "Replacement content being written",
+      });
+      result.append(meta, contentEl);
+      stream.renderedField = null;
+      stream.renderedContent = "";
+    }
+
+    const content = stream.decoder.value(field) ?? "";
+    const truncated = stream.decoder.isTruncated(field);
+    const prefix = truncated ? "… older preview hidden …\n" : "";
+    if (
+      !truncated &&
+      stream.renderedField === field &&
+      content.startsWith(stream.renderedContent)
+    ) {
+      const addition = content.slice(stream.renderedContent.length);
+      if (addition) contentEl.appendChild(document.createTextNode(addition));
+    } else {
+      contentEl.textContent = prefix + content;
+    }
+    stream.renderedField = field;
+    stream.renderedContent = content;
+
+    const verb = name === "write_file" ? "Writing now" : "Editing now";
+    meta.textContent = `${verb} · ${stream.decoder.total(field).toLocaleString()} characters`;
+
+    const body = tc.body as HTMLElement & { __livePin?: boolean };
+    if (tc.card.classList.contains("open") && body.__livePin !== false) {
+      requestAnimationFrame(() => {
+        if (body.__livePin !== false) body.scrollTop = body.scrollHeight;
+      });
+    }
+    // Live write reflows can stall CSS animations in WebView — keep wave alive
+    const wave = tc.head.querySelector(".tool-wave-dots");
+    if (wave) this.kickThinkingDots(wave);
+    if (this.runningIndicator) this.kickThinkingDots(this.runningIndicator);
+    this.scrollToBottom();
+  }
+
+  private showTruncatedToolArgs(id: string, preview: string) {
+    const tc = this.toolCards.get(id);
+    if (!tc) return;
+    const name = this.friendlyToolName(
+      tc.head.querySelector(".tool-name")?.getAttribute("data-tool") || "tool",
+    );
+    const argsEl = tc.body.querySelector(".args");
+    if (argsEl) argsEl.textContent = `· ${name}\n${preview}\n… preview truncated`;
+  }
+
+  /** Show a tool as soon as its name appears in the provider's token stream. */
+  private previewTool(id: string, name: string, argumentsDelta = "") {
+    if (!id || (!name && !argumentsDelta)) return;
+    this.clearIdleActivityTimer();
+    let stream = this.toolStreams.get(id);
+    if (!stream) {
+      stream = {
+        name,
+        decoder: new ToolArgsStreamDecoder(),
+        paintFrame: null,
+        renderedField: null,
+        renderedContent: "",
+      };
+      this.toolStreams.set(id, stream);
+    }
+    if (name) stream.name = name;
+    if (argumentsDelta) stream.decoder.append(argumentsDelta);
+    const resolvedName = stream.name;
+    if (!resolvedName) return;
+
+    this.hasUsedTools = true;
+    this.pendingAssistant = null;
+    this.pendingAssistantMsg = null;
+    this.sealThoughtBeforeTools();
+    // Status lives on the tool card — no floating "Running · …" row
+    this.clearRunningIndicator();
+
+    const existing = this.toolCards.get(id);
+    if (existing) {
+      const nameEl = existing.head.querySelector(".tool-name") as HTMLElement | null;
+      if (nameEl) setShimmerText(nameEl, this.toolRunningLabel(resolvedName, {}), true);
+      this.scheduleToolStreamPaint(id);
+      return;
+    }
+    this.buildPendingToolCard(id, resolvedName, {});
+    this.scheduleToolStreamPaint(id);
+  }
+
+  /** Adopt the provider-stream preview card once the complete tool call arrives. */
+  private promoteToolPreview(previewId: string | undefined, id: string, name: string, args: any) {
+    if (!previewId || previewId === id) return;
+    const preview = this.toolCards.get(previewId);
+    if (!preview) return;
+
+    this.toolCards.delete(previewId);
+    this.toolCards.set(id, preview);
+    const stream = this.toolStreams.get(previewId);
+    if (stream) {
+      if (stream.paintFrame !== null) cancelAnimationFrame(stream.paintFrame);
+      stream.paintFrame = null;
+      this.toolStreams.delete(previewId);
+      this.toolStreams.set(id, stream);
+    }
+    const badge = preview.head.querySelector(".badge");
+    if (badge) badge.textContent = name;
+    const nameEl = preview.head.querySelector(".tool-name") as HTMLElement | null;
+    if (nameEl) setShimmerText(nameEl, this.toolRunningLabel(name, args), true);
+    const argsEl = preview.body.querySelector(".args");
+    if (argsEl) {
+      argsEl.textContent = this.toolArgsHeader(name, args);
+    }
+    if (stream) this.scheduleToolStreamPaint(id);
+  }
+
+  /** Remember a complete tool call, then execute/update its live preview card. */
+  queueTool(id: string, name: string, args: any, previewId?: string) {
+    this.clearIdleActivityTimer();
+    this.hasUsedTools = true;
+    this.pendingAssistant = null;
+    this.pendingAssistantMsg = null;
+    // Thought process first — seal it before tools spawn
+    this.sealThoughtBeforeTools();
+    this.promoteToolPreview(previewId, id, name, args);
+    this.pendingTools.set(id, { id, name, arguments: args });
+    // Show the tool card immediately while it runs (result fills in later)
+    if (!this.toolCards.has(id)) {
+      this.buildPendingToolCard(id, name, args);
+    } else {
+      const tc = this.toolCards.get(id)!;
+      const nameEl = tc.head.querySelector(".tool-name") as HTMLElement | null;
+      if (nameEl) setShimmerText(nameEl, this.toolRunningLabel(name, args), true);
+      const argsEl = tc.body.querySelector(".args");
+      if (argsEl) {
+        argsEl.textContent = this.toolArgsHeader(name, args);
+      }
+    }
+    // Status lives on the Cursor-style tool row — no floating wave indicator
+    this.clearRunningIndicator();
+  }
+
+  /** Live tool card shown as soon as the model requests the tool. */
+  private buildPendingToolCard(id: string, name: string, args: any) {
+    this.ensureToolBatch();
+    const wrap = div("tool-card-wrap tool-spawn");
+    // Batch stays collapsed by default — cards hidden until user expands
+    wrap.hidden = this.isToolBatchCollapsed();
+    const card = div("tool-card pending");
+    const bodyId = `tool-result-${id.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+    const head = el("button", {
+      class: "tool-card-head",
+      type: "button",
+      "aria-expanded": "false",
+      "aria-controls": bodyId,
+    });
+    head.appendChild(el("span", { class: "tool-name" }, []));
+    const nameEl = head.querySelector(".tool-name") as HTMLElement;
+    nameEl.setAttribute("data-tool", name);
+    setShimmerText(nameEl, this.toolRunningLabel(name, args), true);
+    head.appendChild(el("span", { class: "chev", html: icon("chevronDown", 12) }));
+
+    const body = el("div", { class: "tool-card-body", id: bodyId });
+    const liveBody = body as HTMLElement & { __livePin?: boolean };
+    liveBody.__livePin = true;
+    body.addEventListener("scroll", () => {
+      const remaining = body.scrollHeight - body.scrollTop - body.clientHeight;
+      liveBody.__livePin = remaining < 40;
+    }, { passive: true });
+    body.appendChild(div("args", this.toolArgsHeader(name, args)));
+    body.appendChild(div("result pending-result", "Working…"));
+
+    head.addEventListener("click", () => {
+      card.classList.toggle("open");
+      head.setAttribute("aria-expanded", String(card.classList.contains("open")));
+      if (card.classList.contains("open")) {
+        liveBody.__livePin = true;
+        requestAnimationFrame(() => {
+          body.scrollTop = body.scrollHeight;
+        });
+      }
+    });
+
+    card.appendChild(head);
+    card.appendChild(body);
+    wrap.appendChild(card);
+    this.node.appendChild(wrap);
+    this.toolCards.set(id, { head, body, card });
+    this.scrollToBottom();
+  }
+
+  /** Build a finished tool card (only when no pending card exists yet). */
+  private buildFinishedToolCard(id: string, name: string, args: any, ok: boolean, content: string, at?: number) {
+    this.ensureToolBatch();
+    const wrap = div("tool-card-wrap tool-spawn");
+    wrap.hidden = this.isToolBatchCollapsed();
+    const card = div("tool-card" + (ok ? " ok" : " err"));
+    const bodyId = `tool-result-${id.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+    const head = el("button", {
+      class: "tool-card-head",
+      type: "button",
+      "aria-expanded": "false",
+      "aria-controls": bodyId,
+    });
+    head.appendChild(el("span", { class: "tool-name" }, [this.toolRanLabel(name, args, ok, content)]));
+    const finishedName = head.querySelector(".tool-name") as HTMLElement | null;
+    finishedName?.setAttribute("data-tool", name);
+    head.appendChild(el("span", { class: "chev", html: icon("chevronDown", 12) }));
+
+    const body = el("div", { class: "tool-card-body", id: bodyId });
+    body.appendChild(div("args", this.toolArgsHeader(name, args)));
+    body.appendChild(div("result", escapeHtml(content)));
+
+    head.addEventListener("click", () => {
+      card.classList.toggle("open");
+      head.setAttribute("aria-expanded", String(card.classList.contains("open")));
+    });
+
+    card.appendChild(head);
+    card.appendChild(body);
+    wrap.appendChild(card);
+    void at;
+    this.node.appendChild(wrap);
+    this.toolCards.set(id, { head, body, card });
+    this.scrollToBottom();
+  }
+
+  private toolOneLiner(name: string, args: any, ok: boolean, content: string): string {
+    const path = args?.path || args?.src || args?.command;
+    if (typeof path === "string" && path.length > 0) {
+      const trimmed = path.length > 64 ? path.slice(0, 61) + "…" : path;
+      return ok ? trimmed : `failed · ${trimmed}`;
+    }
+    if (!ok) {
+      const first = (content || "failed").split("\n")[0];
+      return first.length > 64 ? first.slice(0, 61) + "…" : first;
+    }
+    return "done";
+  }
+
+  appendToolResult(id: string, name: string, ok: boolean, content: string, at?: number) {
+    const pending = this.pendingTools.get(id);
+    this.pendingTools.delete(id);
+    this.disposeToolStream(id);
+    const stamp = at ?? this.now();
+    const toolName = name || pending?.name || "tool";
+    const toolArgs = pending?.arguments ?? {};
+
+    // Keep the wave row while more tools are still running; only clear when idle
+    if (this.pendingTools.size === 0) {
+      this.clearRunningIndicator();
+      this.toolBatchOpen = false;
+      this.paintToolBatchLabel();
+      if (this.running && !this.stopping && !this.userCancelled && !this.sealingTools) {
+        this.scheduleIdleActivity();
+      } else if (this.thinking) {
+        this.setThinkingLabel(this.liveThinkingLabel());
+        if (this.thinkingHasReasoning && this.thinkingText) {
+          this.setThinkingDetail(this.thinkingText, true, true);
+        } else {
+          this.paintThinkingBody();
+        }
+      }
+    }
+
+    // Update the live card (or create one if we somehow missed tool_call)
+    if (this.toolCards.has(id)) {
+      const tc = this.toolCards.get(id)!;
+      tc.card.classList.remove("pending", "streaming", "cancelled");
+      tc.card.classList.add(ok ? "ok" : "err");
+      const nameEl = tc.head.querySelector(".tool-name") as HTMLElement | null;
+      if (nameEl) {
+        setShimmerText(nameEl, this.toolRanLabel(toolName, toolArgs, ok, content), false);
+      }
+      tc.head.querySelectorAll(".tool-wave-dots, .status-ico, .badge").forEach((n) => n.remove());
+      const pendingResult = tc.body.querySelector(".pending-result");
+      if (pendingResult) {
+        pendingResult.classList.remove("pending-result", "live-write-preview");
+        pendingResult.textContent = content;
+      } else {
+        const resultDiv = div("result", escapeHtml(content));
+        tc.body.appendChild(resultDiv);
+      }
+    } else {
+      this.buildFinishedToolCard(id, toolName, toolArgs, ok, content, stamp);
+    }
+    this.scrollToBottom();
+  }
+
+  /**
+   * In-chat auth: paste a token / API key for GitHub, Supabase, Vercel, …
+   * Saved to the OS keyring only — never into the transcript.
+   */
+  async showIntegrationAuth(service: string, _secureEntry = true) {
+    if (this.replaying) return;
+    this.sealThoughtBeforeTools();
+    this.clearRunningIndicator();
+    this.node.querySelectorAll(".integration-auth-wrap").forEach((n) => n.remove());
+
+    let svc;
+    try {
+      const list = await api.listIntegrations();
+      svc = list.find((s) => s.id === service) || null;
+    } catch {
+      svc = null;
+    }
+    const label = svc?.label || service;
+    const tokenLabel = svc?.tokenLabel || "API token / key";
+    const docsUrl = svc?.docsUrl || "";
+    const connected = !!svc?.connected;
+
+    const wrap = div("integration-auth-wrap tool-spawn");
+    const card = div("integration-auth-card");
+    card.setAttribute("role", "dialog");
+    card.setAttribute("aria-labelledby", `auth-title-${service}`);
+    card.setAttribute("data-integration-id", service);
+
+    const title = el("div", { class: "integration-auth-title", id: `auth-title-${service}` }, [
+      connected ? `Update ${label} key` : `Add ${label} API key`,
+    ]);
+    const hint = el("div", { class: "integration-auth-hint" }, [
+      `Paste your ${tokenLabel.toLowerCase()} below to authenticate. Saved to the OS keyring only — never stored in this chat.`,
+    ]);
+
+    const tokenInput = el("input", {
+      class: "field integration-auth-input",
+      type: "password",
+      placeholder: connected ? "••••••••  (paste new key to replace)" : tokenLabel,
+      value: "",
+      autocomplete: "off",
+      "data-integration-secret": "true",
+      "aria-label": `${label} API key or token`,
+    }) as HTMLInputElement;
+
+    const statusEl = el("div", { class: "integration-auth-status" }, [
+      connected ? `${label} is connected. Paste a new key only if you want to replace it.` : "Paste token or API key, then Save.",
+    ]);
+    if (connected) statusEl.classList.add("ok");
+
+    const actions = el("div", { class: "integration-auth-actions" });
+    const saveBtn = el("button", { class: "btn sm primary", type: "button" }, ["Save"]) as HTMLButtonElement;
+    const dismissBtn = el("button", { class: "btn sm", type: "button" }, ["Dismiss"]) as HTMLButtonElement;
+
+    const markDone = (ok: boolean, message: string) => {
+      statusEl.textContent = message;
+      statusEl.classList.toggle("ok", ok);
+      statusEl.classList.toggle("err", !ok);
+      if (ok) {
+        card.classList.add("ok", "integration-auth-done");
+        wrap.classList.add("integration-auth-done");
+        tokenInput.value = "";
+        tokenInput.disabled = true;
+        saveBtn.disabled = true;
+      }
+    };
+
+    saveBtn.addEventListener("click", async () => {
+      const v = tokenInput.value.trim();
+      if (!v) {
+        statusEl.classList.add("err");
+        statusEl.textContent = "Paste a token or API key first.";
+        tokenInput.focus();
+        return;
+      }
+      saveBtn.disabled = true;
+      statusEl.classList.remove("ok", "err");
+      statusEl.textContent = "Saving…";
+      try {
+        await api.setIntegrationToken(service, v);
+        tokenInput.value = "";
+        statusEl.textContent = "Saved. Verifying…";
+        const check = await api.testIntegration(service);
+        markDone(
+          check.ok,
+          check.ok
+            ? `${label} authenticated — ${check.message}`
+            : `Saved, but verify failed: ${check.message}${check.detail ? ` — ${check.detail}` : ""}`,
+        );
+        if (!check.ok) saveBtn.disabled = false;
+      } catch (e) {
+        statusEl.classList.add("err");
+        statusEl.textContent = String(e);
+        saveBtn.disabled = false;
+      }
+    });
+
+    dismissBtn.addEventListener("click", () => wrap.remove());
+    tokenInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        saveBtn.click();
+      }
+    });
+
+    actions.appendChild(saveBtn);
+    if (service === "github") {
+      const browserBtn = el("button", { class: "btn sm", type: "button" }, ["Browser login"]) as HTMLButtonElement;
+      browserBtn.addEventListener("click", async () => {
+        browserBtn.disabled = true;
+        browserBtn.textContent = "Opening…";
+        try {
+          const r = await api.startIntegrationBrowserAuth(service);
+          statusEl.classList.toggle("ok", r.ok);
+          statusEl.classList.toggle("err", !r.ok);
+          statusEl.textContent = r.message + (r.detail ? ` — ${r.detail}` : "");
+          if (r.ok) {
+            const list = await api.listIntegrations();
+            if (list.find((x) => x.id === service)?.connected) markDone(true, `${label} authenticated.`);
+          }
+        } catch (e) {
+          statusEl.classList.add("err");
+          statusEl.textContent = String(e);
+        } finally {
+          browserBtn.disabled = false;
+          browserBtn.textContent = "Browser login";
+        }
+      });
+      actions.appendChild(browserBtn);
+    }
+    if (docsUrl) {
+      actions.appendChild(
+        el("a", {
+          class: "btn sm",
+          href: docsUrl,
+          target: "_blank",
+          rel: "noopener noreferrer",
+        }, ["Get key"]),
+      );
+    }
+    actions.appendChild(dismissBtn);
+
+    card.appendChild(title);
+    card.appendChild(hint);
+    card.appendChild(tokenInput);
+    card.appendChild(statusEl);
+    card.appendChild(actions);
+    wrap.appendChild(card);
+    this.node.appendChild(wrap);
+    requestAnimationFrame(() => {
+      tokenInput.focus({ preventScroll: true });
+    });
+    this.scrollToBottom();
+  }
+
+  showToolConfirm(id: string, name: string, summary: string) {
+    // Keep thought history; surface approval on the running row
+    if (!this.replaying) {
+      this.sealThoughtBeforeTools();
+      const detail = summary || this.describeToolAction(name, {});
+      this.clearRunningIndicator();
+      const row = div("thinking-running");
+      row.innerHTML =
+        `<span class="dots" aria-hidden="true"><span></span><span></span><span></span></span>` +
+        `<span class="thinking-simple-label"></span>`;
+      const lab = row.querySelector(".thinking-simple-label") as HTMLElement;
+      setShimmerText(lab, `Waiting for approval · ${detail}`, true);
+      this.node.appendChild(row);
+      this.runningIndicator = row;
+      this.kickThinkingDots(row);
+    }
+    // Remove any prior confirm UI (keep thinking pill)
+    this.node.querySelectorAll(".tool-confirm-wrap, .tool-confirm").forEach((n) => n.remove());
+
+    const wrap = div("tool-confirm-wrap");
+    const card = div("tool-confirm");
+    card.setAttribute("data-confirm-id", id);
+    card.setAttribute("role", "alertdialog");
+    card.setAttribute("aria-labelledby", `confirm-title-${id}`);
+    card.setAttribute("aria-describedby", `confirm-summary-${id}`);
+
+    const title = el("div", { class: "tool-confirm-title", id: `confirm-title-${id}` }, ["Approval required"]);
+    const summaryEl = el("div", { class: "tool-confirm-summary", id: `confirm-summary-${id}` }, [summary]);
+    const meta = el("div", { class: "tool-confirm-meta" }, [name]);
+
+    const actions = el("div", { class: "tool-confirm-actions" });
+    const deny = el("button", { class: "btn sm tool-confirm-deny", type: "button" }, ["Deny"]) as HTMLButtonElement;
+    const approve = el("button", { class: "btn sm primary tool-confirm-approve", type: "button" }, ["Approve"]) as HTMLButtonElement;
+
+    const finish = async (approved: boolean) => {
+      deny.disabled = true;
+      approve.disabled = true;
+      card.classList.add(approved ? "ok" : "err");
+      try {
+        const sid = this.getSessionId();
+        if (!sid) throw new Error("No active session");
+        await api.respondToConfirm(approved, sid);
+      } catch (e) {
+        console.error("respondToConfirm failed", e);
+      }
+      card.classList.add("tool-confirm-done");
+      wrap.classList.add("tool-confirm-done");
+    };
+    deny.addEventListener("click", () => finish(false));
+    approve.addEventListener("click", () => finish(true));
+    actions.appendChild(deny);
+    actions.appendChild(approve);
+
+    card.appendChild(title);
+    card.appendChild(summaryEl);
+    card.appendChild(meta);
+    card.appendChild(actions);
+    wrap.appendChild(card);
+
+    wrap.style.opacity = "0";
+    this.node.appendChild(wrap);
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        wrap.classList.add("tool-spawn");
+        wrap.style.opacity = "";
+        approve.focus();
+      });
+    });
+    this.scrollToBottom();
+  }
+
+  appendDone(data: {
+    summary: string;
+    title: string;
+    description: string;
+    files: string[];
+    tech: string[];
+    features: string[];
+    at?: number;
+    workMs?: number;
+  }) {
+    this.finalizeThinking();
+    this.sealPendingTools("done");
+    this.pendingAssistant = null;
+    this.pendingAssistantMsg = null;
+    const at = data.at ?? this.now();
+
+    const card = div("done-card summary-card");
+
+    const title = this.cleanSentence(data.title) || "Done";
+    let bodyText = this.buildSummaryProse(data);
+    // Don't echo the assistant reply again under Done (Cursor / chat turns)
+    const lastAssistant = [...this.messages].reverse().find((m) => m.type === "assistant") as
+      | { text?: string }
+      | undefined;
+    if (bodyText && lastAssistant?.text) {
+      const norm = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
+      if (norm(bodyText) === norm(lastAssistant.text) || norm(lastAssistant.text).includes(norm(bodyText))) {
+        bodyText = "";
+      }
+    }
+
+    const header = el("div", { class: "summary-header" });
+    header.appendChild(el("div", { class: "summary-title" }, [title]));
+    card.appendChild(header);
+
+    if (bodyText) {
+      card.appendChild(el("div", { class: "summary-desc" }, [bodyText]));
+    }
+
+    // Compact meta line: tech · key files
+    const metaBits: string[] = [];
+    if (data.tech?.length) metaBits.push(data.tech.slice(0, 6).join(", "));
+    if (data.files?.length) {
+      const n = data.files.length;
+      metaBits.push(n === 1 ? "1 file" : `${n} files`);
+    }
+    if (metaBits.length) {
+      card.appendChild(el("div", { class: "summary-meta" }, [metaBits.join(" · ")]));
+    }
+
+    const packBtn = el("button", {
+      class: "btn sm summary-export-btn",
+      type: "button",
+      title: "Zip project for client handoff",
+    }, ["Export Client Pack"]) as HTMLButtonElement;
+    packBtn.addEventListener("click", async () => {
+      packBtn.disabled = true;
+      packBtn.textContent = "Packing…";
+      try {
+        const summary =
+          this.cleanSentence(data.summary) ||
+          this.cleanSentence(data.description) ||
+          title;
+        const result = await api.exportClientPack(undefined, summary);
+        packBtn.textContent = "Pack ready";
+        const note = el("div", { class: "summary-meta" }, [
+          `Saved ${result.zipPath} (${result.filesCount} files)`,
+        ]);
+        card.appendChild(note);
+      } catch (e) {
+        packBtn.textContent = "Export failed";
+        console.error(e);
+        alert("Could not export client pack: " + String(e));
+      } finally {
+        setTimeout(() => {
+          packBtn.disabled = false;
+          packBtn.textContent = "Export Client Pack";
+        }, 1600);
+      }
+    });
+    card.appendChild(packBtn);
+
+    // Optional short feature list (plain sentences, max 5)
+    const features = (data.features || [])
+      .map((f) => this.cleanSentence(f))
+      .filter(Boolean)
+      .slice(0, 5);
+    if (features.length) {
+      const list = el("ul", { class: "summary-features" });
+      for (const f of features) list.appendChild(el("li", {}, [f]));
+      card.appendChild(list);
+    }
+
+    card.style.opacity = "0";
+    this.node.appendChild(card);
+    // Date/time + work duration on this final AI summary once the run is complete
+    this.sealAiTimestamp(at, data.workMs ?? this.currentWorkMs(at) ?? undefined);
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        card.classList.add("tool-spawn");
+        card.style.opacity = "";
+      });
+    });
+    this.scrollToBottom();
+  }
+
+  /** Turn agent fields into a short plain paragraph. */
+  private buildSummaryProse(data: {
+    summary: string;
+    title: string;
+    description: string;
+    files: string[];
+    tech: string[];
+    features: string[];
+  }): string {
+    const desc = this.cleanSentence(data.description);
+    const summary = this.cleanSentence(data.summary);
+    if (desc && summary && desc !== summary) {
+      // Prefer description; append summary only if it adds something short
+      if (summary.length < 120 && !desc.toLowerCase().includes(summary.toLowerCase().slice(0, 24))) {
+        return `${desc} ${summary}`;
+      }
+      return desc;
+    }
+    return desc || summary || "";
+  }
+
+  /** Normalize agent text into a simple readable sentence. */
+  private cleanSentence(raw: string | undefined | null): string {
+    if (!raw) return "";
+    let s = String(raw).replace(/\s+/g, " ").trim();
+    if (!s) return "";
+    // Strip wrapping quotes / markdown noise
+    s = s.replace(/^["'`]+|["'`]+$/g, "");
+    s = s.replace(/^\*\*|\*\*$/g, "");
+    // Capitalize first letter
+    s = s.charAt(0).toUpperCase() + s.slice(1);
+    // Ensure terminal punctuation for full sentences (not titles ending mid-phrase)
+    if (s.length > 28 && !/[.!?]$/.test(s)) s += ".";
+    return s;
+  }
+
+  appendEnd(reason: string, at?: number, workMs?: number) {
+    this.finalizeThinking();
+    this.sealPendingTools("done");
+    if (reason === "max_iterations") {
+      this.appendSystemNote("Stopped — hit the iteration limit. Try a shorter request.", at);
+    }
+    // Stamp the last AI chat once the agent is done replying
+    this.sealAiTimestamp(at, workMs ?? this.currentWorkMs(at) ?? undefined);
+    this.pendingAssistant = null;
+    this.pendingAssistantMsg = null;
+    this.scrollToBottom();
+  }
+
+  showQuestion(id: string, question: string, options: string[], allowOther: boolean, savedAnswer: string | null = null, at?: number) {
+    this.finalizeThinking();
+    this.pendingAssistant = null;
+    this.pendingAssistantMsg = null;
+
+    // Remove any prior live question for this id (avoid duplicates on re-show)
+    this.node.querySelectorAll(".question-card").forEach((n) => {
+      if ((n as HTMLElement).getAttribute("data-qid") === id) n.remove();
+    });
+
+    const card = div("question-card");
+    card.setAttribute("data-qid", id);
+    card.setAttribute("role", "group");
+    card.setAttribute("aria-label", "Choose an option");
+
+    card.appendChild(el("div", { class: "question-label" }, ["Choose an option"]));
+    const qText = el("div", { class: "question-text" }, [question || "Which direction should we take?"]);
+    card.appendChild(qText);
+
+    // Normalize options — models sometimes send junk/empty arrays
+    let opts = (options || [])
+      .map((o) => String(o ?? "").trim())
+      .filter((o) => o.length > 0);
+    // Try to scrape "1. Foo" / "- Bar" lines from the question if the model forgot options
+    if (opts.length === 0 && question) {
+      const scraped: string[] = [];
+      for (const line of question.split(/\r?\n/)) {
+        const m = line.match(/^\s*(?:\d+[\.\)]\s+|[-*•]\s+)(.+)$/);
+        if (m && m[1].trim()) scraped.push(m[1].trim());
+      }
+      if (scraped.length >= 2) opts = scraped.slice(0, 8);
+    }
+    if (opts.length === 0) {
+      opts = [
+        "Continue with your recommended plan",
+        "Simpler / minimal version",
+        "More complete / polished version",
+      ];
+    }
+    // Always offer freeform so Plan mode never dead-ends
+    const showOther = allowOther || opts.length < 2;
+
+    const choices = el("div", { class: "question-choices" });
+    for (const opt of opts) {
+      const btn = el("button", { class: "question-choice" + (savedAnswer === opt ? " selected" : ""), type: "button" }, [opt]);
+      if (savedAnswer !== null) btn.setAttribute("disabled", "disabled");
+      btn.addEventListener("click", async () => {
+        if (btn.classList.contains("selected")) return;
+        choices.querySelectorAll("button").forEach((b) => {
+          (b as HTMLButtonElement).setAttribute("disabled", "disabled");
+          b.classList.remove("selected");
+        });
+        btn.classList.add("selected");
+        if (this.replaying) return;
+        try {
+          const sid = this.getSessionId();
+          if (!sid) throw new Error("No active session");
+          await api.respondToQuestion(opt, sid);
+        } catch (e) {
+          console.error("Failed to send answer:", e);
+        }
+      });
+      choices.appendChild(btn);
+    }
+
+    if (showOther) {
+      const otherRow = el("div", { class: "question-other-row" });
+      const input = el("input", {
+        class: "question-other-input field",
+        type: "text",
+        placeholder: "Or type your own answer…",
+      }) as HTMLInputElement;
+      if (savedAnswer !== null) input.setAttribute("disabled", "disabled");
+      const submitBtn = el("button", { class: "btn sm primary", type: "button" }, ["Send"]) as HTMLButtonElement;
+      if (savedAnswer !== null) submitBtn.setAttribute("disabled", "disabled");
+      const sendOther = async () => {
+        const val = input.value.trim();
+        if (!val) return;
+        choices.querySelectorAll("button").forEach((b) => {
+          (b as HTMLButtonElement).setAttribute("disabled", "disabled");
+          b.classList.remove("selected");
+        });
+        input.setAttribute("disabled", "disabled");
+        submitBtn.setAttribute("disabled", "disabled");
+        if (this.replaying) return;
+        try {
+          const sid = this.getSessionId();
+          if (!sid) throw new Error("No active session");
+          await api.respondToQuestion(val, sid);
+        } catch (e) {
+          console.error("Failed to send answer:", e);
+        }
+      };
+      submitBtn.addEventListener("click", () => { void sendOther(); });
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); void sendOther(); }
+      });
+      otherRow.appendChild(input);
+      otherRow.appendChild(submitBtn);
+      choices.appendChild(otherRow);
+    }
+
+    card.appendChild(choices);
+
+    if (savedAnswer !== null) {
+      const answerNote = el("div", { class: "question-answer" }, ["You chose: " + savedAnswer]);
+      card.appendChild(answerNote);
+    }
+
+    void at;
+    this.node.appendChild(card);
+    // Keep the chooser in view under the assistant message
+    requestAnimationFrame(() => {
+      card.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    });
+    this.scrollToBottom();
+  }
+
+  handleEvent(e: AgentEvent) {
+    // After Stop, ignore late work events so the transcript doesn't keep
+    // growing with tools/thinking from a run that's already cancelled.
+    if ((this.userCancelled || this.stopping) && !this.replaying) {
+      const allowed =
+        e.kind === "cancelled" ||
+        e.kind === "tool_result" ||
+        e.kind === "end" ||
+        e.kind === "done" ||
+        e.kind === "usage" ||
+        e.kind === "console_chunk";
+      if (!allowed) return;
+    }
+    if (!this.replaying) this.recordEvent(e);
+    this.renderEvent(e);
+  }
+
+  private recordEvent(e: AgentEvent) {
+    const at = this.now();
+    switch (e.kind) {
+      case "thinking": this.messages.push({ type: "thinking", iteration: e.payload.iteration, text: "", at }); break;
+      case "reasoning": {
+        const last = this.messages[this.messages.length - 1];
+        if (last && last.type === "thinking") {
+          last.text = last.text ? last.text + e.payload.text : e.payload.text;
+        } else {
+          this.messages.push({ type: "thinking", iteration: e.payload.iteration ?? 0, text: e.payload.text, at });
+        }
+        break;
+      }
+      case "text": {
+        const last = this.messages[this.messages.length - 1];
+        if (last && last.type === "assistant") {
+          last.text += e.payload.text;
+          last.at = at;
+        } else {
+          this.messages.push({ type: "assistant", text: e.payload.text, at });
+        }
+        break;
+      }
+      case "tool_call": this.messages.push({ type: "tool_call", id: e.payload.id, name: e.payload.name, arguments: e.payload.arguments, at }); break;
+      case "tool_result": {
+        const qIdx = this.messages.findIndex((m) => m.type === "question" && m.id === e.payload.id);
+        if (qIdx >= 0) {
+          (this.messages[qIdx] as any).answer = e.payload.content;
+        }
+        this.messages.push({ type: "tool_result", id: e.payload.id, name: e.payload.name, ok: e.payload.ok, content: e.payload.content, at });
+        break;
+      }
+      case "done":
+        this.messages.push({
+          type: "done",
+          summary: e.payload.summary,
+          title: e.payload.title,
+          description: e.payload.description,
+          files: e.payload.files,
+          tech: e.payload.tech,
+          features: e.payload.features,
+          at,
+          workMs: this.currentWorkMs(at) ?? undefined,
+        });
+        break;
+      case "end":
+        this.messages.push({
+          type: "end",
+          reason: e.payload.reason,
+          at,
+          workMs: this.currentWorkMs(at) ?? undefined,
+        });
+        break;
+      case "cancelled":
+        this.messages.push({
+          type: "cancelled",
+          at,
+          workMs: this.currentWorkMs(at) ?? undefined,
+        });
+        break;
+      case "question": this.messages.push({ type: "question", id: e.payload.id, question: e.payload.question, options: e.payload.options, allow_other: e.payload.allow_other, answer: null, at }); break;
+    }
+  }
+
+  private renderEvent(e: AgentEvent) {
+    switch (e.kind) {
+      case "thinking": this.showThinking(e.payload.iteration); break;
+      case "reasoning":
+        this.clearIdleActivityTimer();
+        this.appendThinkingText(e.payload.text);
+        break;
+      case "text": this.appendAssistantText(e.payload.text); break;
+      case "tool_preview":
+        this.previewTool(
+          e.payload.id,
+          e.payload.name,
+          e.payload.arguments_delta ?? "",
+        );
+        break;
+      case "tool_call":
+        this.queueTool(
+          e.payload.id,
+          e.payload.name,
+          e.payload.arguments,
+          e.payload.preview_id,
+        );
+        break;
+      case "tool_args_truncated":
+        this.showTruncatedToolArgs(e.payload.id, e.payload.preview);
+        break;
+      case "tool_result": this.appendToolResult(e.payload.id, e.payload.name, e.payload.ok, e.payload.content); break;
+      case "tool_confirm": this.showToolConfirm(e.payload.id, e.payload.name, e.payload.summary); break;
+      case "done":
+        this.clearIdleActivityTimer();
+        this.appendDone(e.payload);
+        break;
+      case "end":
+        this.clearIdleActivityTimer();
+        this.appendEnd(e.payload.reason);
+        break;
+      case "question": this.showQuestion(e.payload.id, e.payload.question, e.payload.options, e.payload.allow_other); break;
+      case "cancelled":
+        this.clearIdleActivityTimer();
+        // UI cleanup only — do NOT setRunning(false) here.
+        // sendPrompt's finally owns setRunning + queue drain after agent_run returns.
+        // Calling setRunning(false) here races the next queued run and causes
+        // "session already running" / stuck stop button / tools after cancel.
+        this.userCancelled = true;
+        this.stopping = true;
+        this.stopDotsPulse();
+        this.finalizeThinking();
+        this.sealPendingTools("cancelled");
+        this.freezeAllWorkingDots();
+        this.clearRunningIndicator();
+        this.sealAiTimestamp();
+        this.pendingAssistant = null;
+        this.pendingAssistantMsg = null;
+        // Cancel = full stop of this turn; drop queued follow-ups so they don't auto-fire
+        this.clearPendingQueue();
+        this.appendSystemNote("Run cancelled.");
+        if (this.stopBtn) {
+          this.stopBtn.classList.add("stopping");
+          this.stopBtn.disabled = true;
+          this.stopBtn.setAttribute("aria-label", "Stopping run");
+          this.stopBtn.title = "Stopping…";
+        }
+        if (this.input) this.input.placeholder = "Stopping…";
+        break;
+    }
+  }
+
+  /** Whether the chat viewport is near the bottom (within threshold px). */
+  private isNearBottom(threshold = 120): boolean {
+    const el = this.node;
+    return el.scrollHeight - el.scrollTop - el.clientHeight <= threshold;
+  }
+
+  /**
+   * Scroll to the latest content.
+   * @param force always scroll (user sent a message / load session).
+   * Otherwise only scroll if the user is already following the bottom —
+   * so they can freely scroll up while the AI is working.
+   */
+  scrollToBottom(force = false) {
+    requestAnimationFrame(() => {
+      if (!force && !this.pinToBottom) return;
+      this.node.scrollTop = this.node.scrollHeight;
+      this.pinToBottom = true;
+    });
+  }
+}

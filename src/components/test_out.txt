@@ -1,0 +1,3 @@
+line1
+line2 with ${test}
+line3 with => arrow

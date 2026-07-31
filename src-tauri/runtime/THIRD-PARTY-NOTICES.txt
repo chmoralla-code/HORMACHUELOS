@@ -1,0 +1,6 @@
+Hormachuelos bundled Cursor runtime
+
+Node.js 24.14.1 and npm dependencies are redistributed under the license declared by each package.
+Package license files and metadata are retained inside runtime/node_modules.
+Node.js license and notices: https://github.com/nodejs/node/blob/v24.14.1/LICENSE
+Cursor SDK package metadata: runtime/node_modules/@cursor/sdk/package.json

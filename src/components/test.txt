@@ -1,0 +1,2 @@
+line1
+line2 with ${test} and => arrow and | pipe and < tag >

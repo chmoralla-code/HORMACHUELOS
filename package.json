@@ -1,0 +1,33 @@
+{
+  "name": "ai-forge",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "npm run check && vite build",
+    "preview": "vite preview",
+    "check": "tsc --noEmit",
+    "stage:cursor-runtime": "node scripts/stage-cursor-runtime.mjs",
+    "test": "npm run check && cargo test --locked --manifest-path src-tauri/Cargo.toml",
+    "verify": "npm run build && cargo fmt --manifest-path src-tauri/Cargo.toml -- --check && cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings && cargo test --locked --manifest-path src-tauri/Cargo.toml",
+    "tauri": "cargo tauri",
+    "desktop:dev": "cargo tauri dev",
+    "desktop:build": "cargo tauri build",
+    "desktop:debug": "npm run build && cargo tauri build --debug",
+    "installer:art": "powershell -ExecutionPolicy Bypass -File scripts/generate-installer-art.ps1"
+  },
+  "devDependencies": {
+    "@tauri-apps/api": "^2.1.0",
+    "@tauri-apps/plugin-dialog": "^2.0.0",
+    "node": "24.14.1",
+    "typescript": "^5.6.0",
+    "vite": "^6.0.0"
+  },
+  "dependencies": {
+    "@cursor/sdk": "^1.0.23"
+  },
+  "overrides": {
+    "undici": "^6.27.0"
+  }
+}

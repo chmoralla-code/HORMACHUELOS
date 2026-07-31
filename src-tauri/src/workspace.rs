@@ -1,0 +1,523 @@
+use anyhow::{anyhow, bail, Context, Result};
+use serde::Serialize;
+use std::path::{Component, Path, PathBuf};
+use std::time::UNIX_EPOCH;
+
+const MAX_DEPTH: u32 = 10;
+const MAX_CHILDREN: usize = 200;
+const MAX_NODES: usize = 5_000;
+const MAX_PREVIEW_BYTES: u64 = 1_048_576;
+const IGNORED_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    ".next",
+    ".cache",
+    "__pycache__",
+];
+const SECRET_DIRS: &[&str] = &[".ssh", ".gnupg", ".aws"];
+const SECRET_FILE_NAMES: &[&str] = &[
+    ".npmrc",
+    ".pypirc",
+    ".netrc",
+    "_netrc",
+    ".dockercfg",
+    ".git-credentials",
+    "credentials",
+    "credentials.json",
+    "application_default_credentials.json",
+    "service-account.json",
+    "service_account.json",
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+];
+const SECRET_FILE_EXTENSIONS: &[&str] =
+    &["pem", "key", "p8", "p12", "pfx", "jks", "keystore", "kdbx"];
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectNode {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    pub size: u64,
+    pub modified_ms: u64,
+    pub children: Vec<ProjectNode>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectTree {
+    pub nodes: Vec<ProjectNode>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilePreview {
+    pub path: String,
+    pub content: String,
+    pub size: u64,
+    pub language: String,
+}
+
+pub fn canonical_project_root(path: &Path) -> Result<PathBuf> {
+    let root = path
+        .canonicalize()
+        .with_context(|| format!("Could not open project: {}", path.display()))?;
+    if !root.is_dir() {
+        bail!("Project path must be a directory.");
+    }
+    Ok(root)
+}
+
+fn validate_relative_path(relative: &str) -> Result<PathBuf> {
+    if relative.chars().any(char::is_control) {
+        bail!("Project path contains invalid characters.");
+    }
+    let path = Path::new(relative);
+    if path.is_absolute() {
+        bail!("Project paths must be relative.");
+    }
+    let mut safe = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(value) => {
+                let segment = value.to_string_lossy();
+                if segment.contains(':') {
+                    bail!("Project path contains an invalid segment.");
+                }
+                safe.push(value);
+            }
+            Component::CurDir if safe.as_os_str().is_empty() => {}
+            _ => bail!("Project path traversal is not allowed."),
+        }
+    }
+    Ok(safe)
+}
+
+pub fn resolve_project_path(root: &Path, relative: &str) -> Result<PathBuf> {
+    let root = canonical_project_root(root)?;
+    let safe = validate_relative_path(relative)?;
+    let target = root.join(safe);
+    let metadata = std::fs::symlink_metadata(&target)
+        .with_context(|| format!("Project item not found: {relative}"))?;
+    if metadata.file_type().is_symlink() {
+        bail!("Symbolic links are not available in the workspace viewer.");
+    }
+    let canonical = target
+        .canonicalize()
+        .with_context(|| format!("Could not resolve project item: {relative}"))?;
+    if !canonical.starts_with(&root) {
+        bail!("Project item resolves outside the active project.");
+    }
+    Ok(canonical)
+}
+
+fn relative_display(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn modified_ms(metadata: &std::fs::Metadata) -> u64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn list_directory(
+    directory: &Path,
+    relative: &Path,
+    depth: u32,
+    max_depth: u32,
+    count: &mut usize,
+    tree_truncated: &mut bool,
+) -> Result<Vec<ProjectNode>> {
+    let mut entries = std::fs::read_dir(directory)
+        .with_context(|| format!("Could not read project folder: {}", relative.display()))?
+        .filter_map(std::result::Result::ok)
+        .filter_map(|entry| {
+            let file_type = entry.file_type().ok()?;
+            if file_type.is_symlink() {
+                return None;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if file_type.is_dir() && IGNORED_DIRS.contains(&name.as_str()) {
+                return None;
+            }
+            Some((entry, file_type, name))
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|a, b| {
+        b.1.is_dir()
+            .cmp(&a.1.is_dir())
+            .then_with(|| a.2.to_lowercase().cmp(&b.2.to_lowercase()))
+    });
+    if entries.len() > MAX_CHILDREN {
+        entries.truncate(MAX_CHILDREN);
+        *tree_truncated = true;
+    }
+
+    let mut nodes = Vec::new();
+    for (entry, file_type, name) in entries {
+        if *count >= MAX_NODES {
+            *tree_truncated = true;
+            break;
+        }
+        *count += 1;
+        let child_relative = relative.join(&name);
+        let metadata = entry.metadata().ok();
+        let mut node = ProjectNode {
+            name,
+            path: relative_display(&child_relative),
+            is_dir: file_type.is_dir(),
+            size: if file_type.is_file() {
+                metadata.as_ref().map(std::fs::Metadata::len).unwrap_or(0)
+            } else {
+                0
+            },
+            modified_ms: metadata.as_ref().map(modified_ms).unwrap_or(0),
+            children: Vec::new(),
+            truncated: false,
+        };
+        if file_type.is_dir() {
+            if depth < max_depth {
+                node.children = list_directory(
+                    &entry.path(),
+                    &child_relative,
+                    depth + 1,
+                    max_depth,
+                    count,
+                    tree_truncated,
+                )?;
+            } else {
+                node.truncated = true;
+                *tree_truncated = true;
+            }
+        }
+        nodes.push(node);
+    }
+    Ok(nodes)
+}
+
+pub fn list_project_files(root: &Path, max_depth: u32) -> Result<ProjectTree> {
+    let root = canonical_project_root(root)?;
+    let mut count = 0;
+    let mut truncated = false;
+    let nodes = list_directory(
+        &root,
+        Path::new(""),
+        0,
+        max_depth.clamp(1, MAX_DEPTH),
+        &mut count,
+        &mut truncated,
+    )?;
+    Ok(ProjectTree { nodes, truncated })
+}
+
+fn language_for(path: &Path) -> String {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("text")
+        .to_ascii_lowercase()
+}
+
+pub fn read_project_file(root: &Path, relative: &str) -> Result<FilePreview> {
+    let path = resolve_project_path(root, relative)?;
+    let metadata = path.metadata().context("Could not inspect project file.")?;
+    if !metadata.is_file() {
+        bail!("Only regular project files can be previewed.");
+    }
+    if metadata.len() > MAX_PREVIEW_BYTES {
+        bail!("File is larger than the 1 MiB preview limit.");
+    }
+    let bytes = std::fs::read(&path).context("Could not read project file.")?;
+    let content = String::from_utf8(bytes)
+        .map_err(|_| anyhow!("Binary or non-UTF-8 files cannot be previewed."))?;
+    Ok(FilePreview {
+        path: relative_display(&validate_relative_path(relative)?),
+        content,
+        size: metadata.len(),
+        language: language_for(&path),
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientPackResult {
+    pub zip_path: String,
+    pub files_count: usize,
+    pub handoff_path: String,
+}
+
+fn should_skip_pack_entry(path: &Path) -> bool {
+    for component in path.components() {
+        if let Component::Normal(name) = component {
+            let name = name.to_string_lossy().to_ascii_lowercase();
+            if IGNORED_DIRS
+                .iter()
+                .chain(SECRET_DIRS.iter())
+                .any(|ignored| name == *ignored)
+            {
+                return true;
+            }
+        }
+    }
+    let Some(name) = path.file_name().map(|name| name.to_string_lossy()) else {
+        return false;
+    };
+    let name = name.to_ascii_lowercase();
+    if name == ".env"
+        || (name.starts_with(".env.")
+            && !matches!(
+                name.as_str(),
+                ".env.example" | ".env.sample" | ".env.template"
+            ))
+        || SECRET_FILE_NAMES.contains(&name.as_str())
+        || name.ends_with("-credentials.json")
+        || name.ends_with("_credentials.json")
+    {
+        return true;
+    }
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .is_some_and(|extension| SECRET_FILE_EXTENSIONS.contains(&extension.as_str()))
+}
+
+/// Zip the project for client handoff and write CLIENT_HANDOFF.md inside the archive.
+pub fn export_client_pack(
+    root: &Path,
+    dest_zip: &Path,
+    handoff_summary: Option<&str>,
+) -> Result<ClientPackResult> {
+    let root = canonical_project_root(root)?;
+    if let Some(parent) = dest_zip.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Could not create folder for {}", dest_zip.display()))?;
+    }
+    let handoff_beside = if let Some(stem) = dest_zip.file_stem() {
+        dest_zip
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(format!("{}_CLIENT_HANDOFF.md", stem.to_string_lossy()))
+    } else {
+        dest_zip.with_extension("CLIENT_HANDOFF.md")
+    };
+
+    let project_name = root
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "project".into());
+
+    let summary = handoff_summary
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Project ready for client handoff.");
+
+    let handoff = format!(
+        "# Client handoff — {project_name}\n\n\
+Prepared with Hormachuelos.\n\n\
+## Summary\n\n{summary}\n\n\
+## How to open\n\n\
+1. Unzip this archive.\n\
+2. Open the folder in your editor or browser as needed.\n\
+3. If there is a `package.json`, run `npm install` then `npm run dev` / `npm start`.\n\
+4. If there is a `README.md`, follow it for stack-specific steps.\n\n\
+## Deploy checklist (PH freelancers)\n\n\
+- [ ] Test on phone (Chrome / Facebook in-app browser)\n\
+- [ ] Replace placeholder contact / GCash / FB links\n\
+- [ ] Deploy (Vercel, Netlify, or shared hosting)\n\
+- [ ] Send client the live URL + this zip as backup\n\
+- [ ] Keep a copy of the OR / receipt for your records\n\n\
+## Notes\n\n\
+`node_modules`, `.git`, build folders, environment files, credential files, and private-key material were excluded.\n"
+    );
+
+    let file = std::fs::File::create(dest_zip)
+        .with_context(|| format!("Could not create zip: {}", dest_zip.display()))?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    zip.start_file("CLIENT_HANDOFF.md", options)?;
+    use std::io::Write;
+    zip.write_all(handoff.as_bytes())?;
+    let destination = dest_zip
+        .canonicalize()
+        .unwrap_or_else(|_| dest_zip.to_path_buf());
+    let handoff_destination = handoff_beside
+        .canonicalize()
+        .unwrap_or_else(|_| handoff_beside.clone());
+
+    let mut files_count = 1usize;
+    for entry in walkdir::WalkDir::new(&root)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        let rel = match path.strip_prefix(&root) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        if rel.as_os_str().is_empty() {
+            continue;
+        }
+        let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        if canonical_path == destination
+            || canonical_path == handoff_destination
+            || should_skip_pack_entry(rel)
+        {
+            continue;
+        }
+        let name_in_zip = relative_display(rel);
+        if entry.file_type().is_dir() {
+            let dir_name = if name_in_zip.ends_with('/') {
+                name_in_zip
+            } else {
+                format!("{name_in_zip}/")
+            };
+            let _ = zip.add_directory(dir_name, options);
+            continue;
+        }
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let mut source = match std::fs::File::open(path) {
+            Ok(file) => file,
+            Err(_) => continue,
+        };
+        zip.start_file(&name_in_zip, options)?;
+        std::io::copy(&mut source, &mut zip)?;
+        files_count += 1;
+    }
+
+    zip.finish().context("Could not finish client pack zip.")?;
+
+    // Also leave a copy of the handoff next to the zip for easy reading.
+    let _ = std::fs::write(&handoff_beside, &handoff);
+
+    Ok(ClientPackResult {
+        zip_path: dest_zip.to_string_lossy().to_string(),
+        files_count,
+        handoff_path: handoff_beside.to_string_lossy().to_string(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{export_client_pack, list_project_files, read_project_file, ProjectNode};
+    use std::path::{Path, PathBuf};
+
+    struct TestWorkspace(PathBuf);
+
+    impl TestWorkspace {
+        fn new() -> Self {
+            let path =
+                std::env::temp_dir().join(format!("ai-forge-workspace-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&path).expect("create test workspace");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestWorkspace {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn flatten_paths(nodes: &[ProjectNode], output: &mut Vec<String>) {
+        for node in nodes {
+            output.push(node.path.clone());
+            flatten_paths(&node.children, output);
+        }
+    }
+
+    #[test]
+    fn rejects_parent_traversal_and_absolute_paths() {
+        let workspace = TestWorkspace::new();
+        assert!(read_project_file(workspace.path(), "../outside.txt").is_err());
+        assert!(read_project_file(workspace.path(), "C:\\Windows\\win.ini").is_err());
+    }
+
+    #[test]
+    fn lists_relative_paths_and_ignores_dependency_folders() {
+        let workspace = TestWorkspace::new();
+        std::fs::create_dir_all(workspace.path().join("src")).unwrap();
+        std::fs::create_dir_all(workspace.path().join("node_modules/pkg")).unwrap();
+        std::fs::write(workspace.path().join("src/main.ts"), "export {};").unwrap();
+        std::fs::write(workspace.path().join("node_modules/pkg/index.js"), "hidden").unwrap();
+
+        let tree = list_project_files(workspace.path(), 8).expect("list project");
+        let mut paths = Vec::new();
+        flatten_paths(&tree.nodes, &mut paths);
+
+        assert!(paths.contains(&"src/main.ts".to_string()));
+        assert!(!paths.iter().any(|path| path.contains("node_modules")));
+    }
+
+    #[test]
+    fn rejects_binary_and_oversized_file_previews() {
+        let workspace = TestWorkspace::new();
+        std::fs::write(workspace.path().join("binary.bin"), [0xff, 0xfe, 0xfd]).unwrap();
+        std::fs::write(workspace.path().join("large.txt"), vec![b'a'; 1_048_577]).unwrap();
+
+        assert!(read_project_file(workspace.path(), "binary.bin").is_err());
+        assert!(read_project_file(workspace.path(), "large.txt").is_err());
+    }
+
+    #[test]
+    fn client_pack_excludes_credentials_key_material_and_its_own_outputs() {
+        let workspace = TestWorkspace::new();
+        std::fs::create_dir_all(workspace.path().join("src")).unwrap();
+        std::fs::create_dir_all(workspace.path().join(".ssh")).unwrap();
+        std::fs::write(workspace.path().join("src/main.txt"), "safe").unwrap();
+        std::fs::write(workspace.path().join(".env"), "TOKEN=secret").unwrap();
+        std::fs::write(workspace.path().join(".env.local"), "TOKEN=secret").unwrap();
+        std::fs::write(workspace.path().join(".env.example"), "TOKEN=").unwrap();
+        std::fs::write(
+            workspace.path().join(".npmrc"),
+            "//registry/:_authToken=secret",
+        )
+        .unwrap();
+        std::fs::write(workspace.path().join("server.key"), "private-key").unwrap();
+        std::fs::write(workspace.path().join(".ssh/id_rsa"), "private-key").unwrap();
+        let destination = workspace.path().join("client-pack.zip");
+        let companion = workspace.path().join("client-pack_CLIENT_HANDOFF.md");
+        std::fs::write(&companion, "old handoff").unwrap();
+
+        export_client_pack(workspace.path(), &destination, Some("test pack")).unwrap();
+
+        let file = std::fs::File::open(&destination).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut names = Vec::new();
+        for index in 0..archive.len() {
+            names.push(archive.by_index(index).unwrap().name().to_string());
+        }
+        assert!(names.contains(&"CLIENT_HANDOFF.md".to_string()));
+        assert!(names.contains(&"src/main.txt".to_string()));
+        assert!(names.contains(&".env.example".to_string()));
+        for excluded in [
+            ".env",
+            ".env.local",
+            ".npmrc",
+            "server.key",
+            ".ssh/id_rsa",
+            "client-pack.zip",
+            "client-pack_CLIENT_HANDOFF.md",
+        ] {
+            assert!(!names.contains(&excluded.to_string()), "packed {excluded}");
+        }
+    }
+}
