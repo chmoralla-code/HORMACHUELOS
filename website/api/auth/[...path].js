@@ -11,6 +11,7 @@ import {
   patchAccountProfile,
   pollDeviceLink,
   publicAccount,
+  publicAccountWithUsage,
   recordOrder,
   startDeviceLink,
   startEmailVerification,
@@ -92,7 +93,7 @@ export default async function handler(req, res) {
             ok: true,
             token: session.token,
             expiresAt: session.expiresAt,
-            user: publicAccount(account),
+            user: await publicAccountWithUsage(account),
           },
           req,
         );
@@ -115,7 +116,7 @@ export default async function handler(req, res) {
           ok: true,
           token: session.token,
           expiresAt: session.expiresAt,
-          user: publicAccount(account),
+          user: await publicAccountWithUsage(account),
           message: "Email verified. Welcome to Hormachuelos.",
         },
         req,
@@ -174,7 +175,7 @@ export default async function handler(req, res) {
           ok: true,
           ...result,
           message: "Desktop app linked. Return to Hormachuelos — you are signed in.",
-          user: publicAccount(account),
+          user: await publicAccountWithUsage(account),
         },
         req,
       );
@@ -191,13 +192,16 @@ export default async function handler(req, res) {
       if (!account) return json(res, 401, { error: "Not signed in" }, req);
 
       if (req.method === "GET") {
-        const orders = await ordersFor(account.id);
+        const [orders, user] = await Promise.all([
+          ordersFor(account.id),
+          publicAccountWithUsage(account),
+        ]);
         return json(
           res,
           200,
           {
             ok: true,
-            user: publicAccount(account),
+            user,
             orders: orders.map((o) => ({
               id: o.id,
               email: o.email,
@@ -225,7 +229,7 @@ export default async function handler(req, res) {
           credits: body.credits,
           licenseKey: body.licenseKey,
         });
-        return json(res, 200, { ok: true, user: publicAccount(updated || account) }, req);
+        return json(res, 200, { ok: true, user: await publicAccountWithUsage(updated || account) }, req);
       }
     }
 

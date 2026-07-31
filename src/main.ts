@@ -8,7 +8,7 @@ import { ProjectPicker } from "./components/picker";
 import { WorkspacePanel } from "./components/workspace";
 import { SitePreview, isPreviewableBuild, pickPreviewEntry } from "./components/site-preview";
 import { mountComputerUseHud, updateComputerUseHud, clearComputerUseHud } from "./components/computer-use-hud";
-import { ensureWebsiteSession, showAuthGate } from "./components/auth-gate";
+import { ensureWebsiteSession, fetchWebsiteAccount, showAuthGate, type WebsiteAccount } from "./components/auth-gate";
 import { checkDesktopUpdate, showUpdateGate } from "./components/update-gate";
 import { basename, clear, div, el, speakDoneWorking } from "./components/util";
 import {
@@ -310,22 +310,45 @@ function usageBlockMessage(): string {
   return "You've used up this plan period. Mag-load via GCash or upgrade to continue.";
 }
 
-/** Sync left-drawer usage (plan period % only). */
+/** Sync left-drawer usage from the active hosted plan. */
 function syncUsageBar(_session?: Session | null) {
   const pct = remainingPct(accountTokensUsed, activeTokenBudget);
   sidebar?.setSessionUsage(accountTokensUsed, activeTokenBudget, {
     percent: pct,
     poolLabel: "plan",
     resetsIn: "",
-    blockedBy: usageLimitsDisabled ? "" : usageBlockedBy || (pct <= 0 ? "plan" : ""),
+    blockedBy: usageLimitsDisabled ? "" : usageBlockedBy || (pct <= 0 && planActive ? "plan" : ""),
     planRemaining: pct,
     planExpiresAt,
     planName,
     planActive,
+    tokensUsed: accountTokensUsed,
+    tokenBudget: activeTokenBudget,
   });
   if (chat) {
     chat.setUsageExhausted(isUsageExhausted(), usageBlockMessage());
   }
+}
+
+/** Prefer live website license usage (source of truth for bought plans). */
+function applyWebsitePlanUsage(user: WebsiteAccount) {
+  const plan = String(user.plan || "free");
+  const active = user.licenseActive === true && !["free", "expired", ""].includes(plan.toLowerCase());
+  const budget = Math.max(0, Math.floor(Number(user.tokenBudget) || 0));
+  const used = Math.max(0, Math.floor(Number(user.tokensUsed) || 0));
+  planName = plan || "free";
+  planActive = active;
+  planExpiresAt = String(user.expiresAt || "");
+  if (active && budget > 0) {
+    activeTokenBudget = budget;
+    accountTokensUsed = used;
+    usageBlockedBy = used >= budget ? "plan" : "";
+  } else if (!active) {
+    activeTokenBudget = SESSION_TOKEN_BUDGET;
+    accountTokensUsed = 0;
+    usageBlockedBy = plan.toLowerCase() === "expired" ? "plan" : "";
+  }
+  syncUsageBar();
 }
 
 /** Stop every in-flight run + clear queues the moment usage hits 0%. */
@@ -1127,6 +1150,106 @@ async function init() {
     onOpenSettings: openSettings,
   });
   chat.setProjectReady(false);
+  const HOSTED_SITE = "https://hormachuelos.vercel.app";
+  let websiteUser: WebsiteAccount | null = null;
+
+  async function syncHostedPlan(user: WebsiteAccount | null) {
+    if (!user) return;
+    applyWebsitePlanUsage(user);
+    if (user.licenseKey) {
+      try {
+        const lic = await api.applyLicenseKey(user.licenseKey);
+        applyLicenseSnapshot(lic);
+        // Keep website counters if activate returned older/empty numbers.
+        if (
+          user.licenseActive &&
+          Number(user.tokenBudget) > 0 &&
+          (Number(lic.tokenBudget) || 0) > 0
+        ) {
+          applyWebsitePlanUsage({
+            ...user,
+            tokenBudget: Number(lic.tokenBudget) || user.tokenBudget,
+            tokensUsed: Math.max(Number(lic.tokensUsed) || 0, Number(user.tokensUsed) || 0),
+            plan: lic.plan || user.plan,
+            licenseActive: lic.active,
+            expiresAt: lic.expiresAt || user.expiresAt,
+          });
+        } else {
+          syncUsageBar();
+        }
+      } catch (e) {
+        console.warn("license sync from website account failed", e);
+        syncUsageBar();
+      }
+    } else {
+      syncUsageBar();
+    }
+  }
+
+  async function refreshWebsiteAccountStatus(opts: { quiet?: boolean } = {}) {
+    if (!opts.quiet) sidebar.setAccountStatus({ state: "checking" });
+    const token = await api.getWebsiteSession().catch(() => null);
+    if (!token) {
+      websiteUser = null;
+      sidebar.setAccountStatus({
+        state: "signed_out",
+        detail: "Sign in on hormachuelos.vercel.app",
+      });
+      return null;
+    }
+    try {
+      const user = await fetchWebsiteAccount(token);
+      websiteUser = user;
+      sidebar.setAccountStatus({
+        state: "synced",
+        email: user.email,
+        name: user.name,
+        plan: user.plan,
+      });
+      await syncHostedPlan(user);
+      return user;
+    } catch (e) {
+      const msg = String((e as Error)?.message || e);
+      const expired = /session|expired|unauthorized|401/i.test(msg);
+      if (expired) {
+        await api.clearWebsiteSession().catch(() => {});
+        websiteUser = null;
+        sidebar.setAccountStatus({
+          state: "signed_out",
+          detail: "Session expired — sign in again",
+        });
+        return null;
+      }
+      sidebar.setAccountStatus({
+        state: "offline",
+        detail: "Can't reach website — click to open",
+      });
+      return null;
+    }
+  }
+
+  async function manageWebsiteAccount() {
+    const current = await refreshWebsiteAccountStatus({ quiet: true });
+    if (current) {
+      void api.openExternalUrl(`${HOSTED_SITE}/#/`).catch(() => window.open(`${HOSTED_SITE}/#/`, "_blank"));
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      const gate = showAuthGate((user) => {
+        websiteUser = user;
+        sidebar.setAccountStatus({
+          state: "synced",
+          email: user.email,
+          name: user.name,
+          plan: user.plan,
+        });
+        resolve();
+      });
+      document.body.appendChild(gate);
+    });
+    await syncHostedPlan(websiteUser);
+  }
+
   sidebar = new Sidebar({
     onNewProject: openNewProjectPicker,
     onOpenProject: openOpenProjectPicker,
@@ -1138,6 +1261,8 @@ async function init() {
     onRenameSession: renameSession,
     onExportClientPack: () => void exportClientPack(),
     onTopUp: () => void openGCashTopUp(),
+    onManageAccount: () => void manageWebsiteAccount(),
+    onRefreshAccount: () => void refreshWebsiteAccountStatus(),
   });
   await sidebar.render().catch((e) => console.error("sidebar render failed", e));
   await refreshHeader().catch((e) => console.error("refreshHeader failed", e));
@@ -1154,8 +1279,12 @@ async function init() {
   }
 
   // Website account required — desktop signs in automatically after browser login/signup.
-  let websiteUser = await ensureWebsiteSession().catch(() => null);
+  websiteUser = await ensureWebsiteSession().catch(() => null);
   if (!websiteUser) {
+    sidebar.setAccountStatus({
+      state: "signed_out",
+      detail: "Sign in on hormachuelos.vercel.app",
+    });
     await new Promise<void>((resolve) => {
       const gate = showAuthGate((user) => {
         websiteUser = user;
@@ -1164,14 +1293,16 @@ async function init() {
       document.body.appendChild(gate);
     });
   }
-  if (websiteUser?.licenseKey) {
-    try {
-      await api.applyLicenseKey(websiteUser.licenseKey);
-      window.dispatchEvent(new CustomEvent("horma:license-updated"));
-    } catch (e) {
-      console.warn("license sync from website account failed", e);
-    }
+  if (websiteUser) {
+    sidebar.setAccountStatus({
+      state: "synced",
+      email: websiteUser.email,
+      name: websiteUser.name,
+      plan: websiteUser.plan,
+    });
+    applyWebsitePlanUsage(websiteUser);
   }
+  await refreshWebsiteAccountStatus({ quiet: true }).catch(() => {});
 
   // OpenCode-style chips inside the composer card
   modelBar = new ModelBar(() => {
@@ -1182,8 +1313,11 @@ async function init() {
   });
   await modelBar.load().catch((e) => console.error("modelbar load failed", e));
   await refreshProviderReadiness().catch(() => false);
-  await refreshLicenseBudget().catch(() => {});
-  syncUsageBar();
+  // Prefer website plan usage; fall back to local license.json if website had none.
+  if (!planActive) {
+    await refreshLicenseBudget().catch(() => {});
+    syncUsageBar();
+  }
   chat.attachComposerSide(modelBar.providerRail);
   if (modelBar.settings) {
     chat.setReplyProfile({
@@ -1228,6 +1362,16 @@ async function init() {
   window.setInterval(() => {
     void enqueueLicenseSync({ haltIfExhausted: true });
   }, 60_000);
+
+  // Re-verify website account sync periodically.
+  window.setInterval(() => {
+    void refreshWebsiteAccountStatus({ quiet: true });
+  }, 90_000);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      void refreshWebsiteAccountStatus({ quiet: true });
+    }
+  });
 
   onAgentEvent(handleAgentEvent).catch((error) => console.warn("agent event bridge unavailable", error));
 

@@ -7,6 +7,8 @@ import {
   getDeviceLinkByDeviceCode,
   getDeviceLinkByUserCode,
   getLatestEmailVerification,
+  getLicenseByEmail,
+  getLicenseByKey,
   getSessionByTokenHash,
   insertAccount,
   insertDeviceLink,
@@ -17,6 +19,7 @@ import {
   updateAccount,
   updateDeviceLink,
 } from "./supabase.js";
+import { planBudget } from "./plans.js";
 import { sendVerificationEmail } from "./resend.js";
 
 const SITE_URL = () => process.env.PUBLIC_SITE_URL || "https://hormachuelos.vercel.app";
@@ -58,6 +61,43 @@ export function publicAccount(row) {
     licenseKey: row.license_key || null,
     emailVerified: Boolean(row.email_verified),
     createdAt: row.created_at ? new Date(row.created_at).getTime() : Date.now(),
+  };
+}
+
+/** Account + live hosted plan usage (from linked license row). */
+export async function publicAccountWithUsage(row) {
+  const base = publicAccount(row);
+  if (!base) return null;
+  let license = null;
+  if (base.licenseKey) license = await getLicenseByKey(base.licenseKey);
+  if (!license) license = await getLicenseByEmail(base.email);
+  if (!license) {
+    return {
+      ...base,
+      plan: base.plan || "free",
+      tokenBudget: 0,
+      tokensUsed: 0,
+      licenseActive: false,
+      expiresAt: "",
+      planRemainingPct: 100,
+    };
+  }
+  const expired = new Date(license.expires_at).getTime() < Date.now();
+  const active = Boolean(license.active) && !expired;
+  const budget = Number(license.token_budget) || planBudget(license.plan);
+  const used = Number(license.tokens_used) || 0;
+  const remaining = Math.max(0, budget - used);
+  const planRemainingPct =
+    budget > 0 ? Math.max(0, Math.min(100, Math.round((remaining / budget) * 100))) : 0;
+  return {
+    ...base,
+    plan: expired ? "expired" : license.plan || base.plan || "free",
+    licenseKey: license.key || base.licenseKey,
+    tokenBudget: budget,
+    tokensUsed: used,
+    licenseActive: active,
+    expiresAt: String(license.expires_at || "").slice(0, 10),
+    planRemainingPct,
   };
 }
 
@@ -307,7 +347,7 @@ export async function pollDeviceLink(deviceCode) {
     return {
       status: "complete",
       token,
-      user: publicAccount(account),
+      user: await publicAccountWithUsage(account),
     };
   }
   if (link.status === "claimed") {

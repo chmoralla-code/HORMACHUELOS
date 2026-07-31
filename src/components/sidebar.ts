@@ -13,7 +13,15 @@ export type UsageDisplayMeta = {
   planExpiresAt?: string;
   planName?: string;
   planActive?: boolean;
+  tokensUsed?: number;
+  tokenBudget?: number;
 };
+
+export type AccountStatusState =
+  | { state: "checking" }
+  | { state: "synced"; email: string; name?: string; plan?: string | null }
+  | { state: "offline"; email?: string; detail?: string }
+  | { state: "signed_out"; detail?: string };
 
 export class Sidebar {
   node: HTMLElement;
@@ -29,10 +37,16 @@ export class Sidebar {
   onExportClientPack: () => void;
   /** Open GCash top-up / pricing. */
   onTopUp: () => void;
+  /** Open website account / re-link desktop login. */
+  onManageAccount: () => void;
+  /** Refresh website sync status. */
+  onRefreshAccount: () => void;
   /** Current project path (composer chip shows it; left drawer does not). */
   private projectPath: string | null = null;
   private usageMeta: UsageDisplayMeta = {};
   private usageRoot: HTMLElement | null = null;
+  private accountRoot: HTMLElement | null = null;
+  private accountStatus: AccountStatusState = { state: "checking" };
 
   constructor(handlers: {
     onNewProject: () => void;
@@ -45,6 +59,8 @@ export class Sidebar {
     onRenameSession: (id: string, title: string) => void;
     onExportClientPack: () => void;
     onTopUp: () => void;
+    onManageAccount: () => void;
+    onRefreshAccount: () => void;
   }) {
     this.onNewProject = handlers.onNewProject;
     this.onOpenProject = handlers.onOpenProject;
@@ -56,6 +72,8 @@ export class Sidebar {
     this.onRenameSession = handlers.onRenameSession;
     this.onExportClientPack = handlers.onExportClientPack;
     this.onTopUp = handlers.onTopUp;
+    this.onManageAccount = handlers.onManageAccount;
+    this.onRefreshAccount = handlers.onRefreshAccount;
     this.node = document.getElementById("sidebar")!;
     this.render();
   }
@@ -170,11 +188,20 @@ export class Sidebar {
     // Usage limit — below sessions in the left sandwich drawer
     this.node.appendChild(this.buildUsageSection());
 
+    // Website account sync status (hormachuelos.vercel.app)
+    this.node.appendChild(this.buildAccountSection());
+
     const footer = el("div", { class: "sb-footer" });
     footer.appendChild(el("div", { class: "sb-status", id: "status-indicator", role: "status", "aria-live": "polite", html: `<span class="pulse"></span><span id="status-text">Ready</span>` }));
     this.node.appendChild(footer);
 
     this.paintUsage();
+    this.paintAccount();
+  }
+
+  setAccountStatus(status: AccountStatusState) {
+    this.accountStatus = status;
+    this.paintAccount();
   }
 
   /** Keep project path in sync (UI lives on the composer chip, not the left drawer). */
@@ -193,6 +220,87 @@ export class Sidebar {
   ) {
     this.usageMeta = meta || {};
     this.paintUsage();
+  }
+
+  private buildAccountSection(): HTMLElement {
+    const section = el("div", { class: "sb-section sb-account-section" });
+    const labelRow = el("div", { class: "sb-usage-label-row" });
+    labelRow.appendChild(el("div", { class: "sb-section-label", style: "margin:0" }, ["Account"]));
+    const refreshBtn = el("button", {
+      class: "sb-account-refresh",
+      type: "button",
+      title: "Refresh website sync",
+      "aria-label": "Refresh website sync",
+    }, ["↻"]) as HTMLButtonElement;
+    refreshBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.onRefreshAccount();
+    });
+    labelRow.appendChild(refreshBtn);
+    section.appendChild(labelRow);
+
+    this.accountRoot = el("div", {
+      class: "sb-account",
+      role: "status",
+      "aria-live": "polite",
+      "aria-label": "Website account status",
+    });
+    this.accountRoot.addEventListener("click", () => this.onManageAccount());
+    section.appendChild(this.accountRoot);
+    return section;
+  }
+
+  private paintAccount() {
+    if (!this.accountRoot) return;
+    const s = this.accountStatus;
+    clear(this.accountRoot);
+    this.accountRoot.classList.remove("is-synced", "is-offline", "is-signed-out", "is-checking");
+
+    const row = (title: string, subtitle: string) => {
+      const wrap = el("div", { class: "sb-account-row" });
+      wrap.appendChild(el("span", { class: "sb-account-dot" }));
+      const copy = el("div", { class: "sb-account-copy" });
+      copy.appendChild(el("strong", {}, [title]));
+      const sub = el("span", {}, [subtitle]);
+      sub.title = subtitle;
+      copy.appendChild(sub);
+      wrap.appendChild(copy);
+      return wrap;
+    };
+
+    if (s.state === "checking") {
+      this.accountRoot.classList.add("is-checking");
+      this.accountRoot.appendChild(row("Checking sync…", "hormachuelos.vercel.app"));
+      return;
+    }
+
+    if (s.state === "synced") {
+      const who = s.name?.trim() || s.email;
+      this.accountRoot.classList.add("is-synced");
+      this.accountRoot.appendChild(row("Synced · signed in", who));
+      this.accountRoot.appendChild(el("div", { class: "sb-account-meta" }, ["Website account linked"]));
+      return;
+    }
+
+    if (s.state === "offline") {
+      this.accountRoot.classList.add("is-offline");
+      this.accountRoot.appendChild(
+        row("Can't verify sync", s.email || "Saved session · website unreachable"),
+      );
+      this.accountRoot.appendChild(
+        el("div", { class: "sb-account-meta" }, [s.detail || "Click to open website"]),
+      );
+      return;
+    }
+
+    this.accountRoot.classList.add("is-signed-out");
+    this.accountRoot.appendChild(
+      row("Not signed in", s.detail || "Sign in on hormachuelos.vercel.app"),
+    );
+    this.accountRoot.appendChild(
+      el("div", { class: "sb-account-meta" }, ["Click to link website account"]),
+    );
   }
 
   private buildUsageSection(): HTMLElement {
@@ -274,15 +382,11 @@ export class Sidebar {
     }
   }
 
-  private planTierBlurb(planId: string): string {
-    const p = (planId || "").toLowerCase();
-    if (p === "proplus" || p === "pro+" || p === "pro_plus") return "~2.5× usage vs Pro";
-    if (p === "max20") return "20× usage vs Pro";
-    if (p === "max10") return "10× usage vs Pro";
-    if (p === "max5" || p === "max" || p === "ultra" || p === "agency") return "5× usage vs Pro";
-    if (p === "pro" || p === "starter" || p === "fifteen") return "Generous monthly usage";
-    if (p === "free") return "BYOK · no hosted pool";
-    return "Monthly subscription";
+  private formatTokens(n: number): string {
+    const v = Math.max(0, Math.floor(Number(n) || 0));
+    if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(v >= 10_000_000 ? 0 : 1)}M`;
+    if (v >= 1_000) return `${(v / 1_000).toFixed(v >= 100_000 ? 0 : 1)}k`;
+    return String(v);
   }
 
   private paintUsage() {
@@ -296,8 +400,10 @@ export class Sidebar {
     const blocked = m.blockedBy || "";
     const planId = m.planName || "free";
     const name = displayPlanLabel(planId);
-    const active = m.planActive !== false && planId.toLowerCase() !== "free";
+    const active = m.planActive === true && !["free", "expired", ""].includes(planId.toLowerCase());
     const clampedPct = Math.max(0, Math.min(100, planPct));
+    const used = Math.max(0, Math.floor(Number(m.tokensUsed) || 0));
+    const budget = Math.max(0, Math.floor(Number(m.tokenBudget) || 0));
 
     this.usageRoot.classList.toggle("usage-low", active && planPct <= 20 && planPct > 5);
     this.usageRoot.classList.toggle("usage-critical", active && planPct <= 5 && planPct > 0);
@@ -311,25 +417,30 @@ export class Sidebar {
     const rowLabel = this.usageRoot.querySelector('[data-row-label="plan"]');
     const meter = this.usageRoot.querySelector(".sb-usage-meter");
     if (fill) fill.style.width = active ? `${clampedPct}%` : "0%";
-    if (pctEl) pctEl.textContent = active ? `${clampedPct}%` : "BYOK";
-    if (rowLabel) rowLabel.textContent = active ? "Period" : "Hosted";
+    if (pctEl) pctEl.textContent = active ? `${clampedPct}% left` : "—";
+    if (rowLabel) rowLabel.textContent = active ? "Usage left" : "Plan";
     if (meter) {
       meter.setAttribute("aria-valuenow", active ? String(clampedPct) : "0");
       meter.setAttribute(
         "aria-valuetext",
-        active ? `${clampedPct}% remaining` : "No hosted credits; using your provider key",
+        active
+          ? `${clampedPct}% remaining (${this.formatTokens(used)} / ${this.formatTokens(budget)} used)`
+          : "No active plan",
       );
     }
     if (hint) {
       const exp = this.formatPlanExpiry(m.planExpiresAt || "");
       if (!active) {
-        hint.textContent = "Uses your provider key · no hosted credits";
+        hint.textContent =
+          planId.toLowerCase() === "expired"
+            ? "Plan expired · Mag-load to renew"
+            : "No plan yet · Mag-load via GCash";
       } else if (planPct <= 0) {
-        hint.textContent = "Period used up · Mag-load to continue";
+        hint.textContent = `Used ${this.formatTokens(used)} / ${this.formatTokens(budget)} · Mag-load`;
       } else if (exp) {
-        hint.textContent = `${planPct}% left · expires ${exp}`;
+        hint.textContent = `${this.formatTokens(used)} / ${this.formatTokens(budget)} used · ends ${exp}`;
       } else {
-        hint.textContent = `${planPct}% of period left`;
+        hint.textContent = `${this.formatTokens(used)} / ${this.formatTokens(budget)} used`;
       }
     }
     row?.classList.toggle("is-byok", !active);
@@ -339,30 +450,36 @@ export class Sidebar {
     const nameEl = this.usageRoot.querySelector("[data-sub-name]");
     const badgeEl = this.usageRoot.querySelector("[data-sub-badge]");
     const metaEl = this.usageRoot.querySelector("[data-sub-meta]");
-    if (nameEl) nameEl.textContent = name;
+    if (nameEl) nameEl.textContent = active ? name : planId.toLowerCase() === "expired" ? "Expired" : "No plan";
     if (badgeEl) {
-      badgeEl.textContent = active ? "Monthly" : "Free";
+      badgeEl.textContent = active ? "Active" : planId.toLowerCase() === "expired" ? "Expired" : "None";
       badgeEl.classList.toggle("is-free", !active);
     }
     if (metaEl) {
-      const blurb = this.planTierBlurb(planId);
-      metaEl.textContent = active
-        ? blurb
-        : "Bring your own provider key · Mag-load for hosted usage";
+      if (!active) {
+        metaEl.textContent = "Buy or renew a plan to unlock hosted usage";
+      } else {
+        metaEl.textContent = `${clampedPct}% remaining this period`;
+      }
     }
 
     const status = this.usageRoot.querySelector("[data-status]");
     if (status) {
       if (blocked === "plan" || (active && planPct <= 0)) {
-        status.textContent = "Paused · plan period used up · Mag-load to continue";
+        status.textContent = "Paused · plan usage used up · Mag-load to continue";
       } else {
         status.textContent = "";
       }
     }
 
+    const topUp = this.usageRoot.querySelector(".sb-usage-topup") as HTMLButtonElement | null;
+    if (topUp) {
+      topUp.textContent = active ? "Mag-load / upgrade" : "Mag-load via GCash";
+    }
+
     this.usageRoot.title = active
-      ? `${name} subscription · Period ${planPct}%`
-      : "Free / BYOK — Mag-load via GCash for a subscription";
+      ? `${name} · ${clampedPct}% left · ${this.formatTokens(used)}/${this.formatTokens(budget)}`
+      : "No active plan — Mag-load via GCash";
   }
   private actionBtn(
     iconName: "new" | "open" | "settings" | "export",

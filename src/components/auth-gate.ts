@@ -31,6 +31,11 @@ export type WebsiteAccount = {
   licenseKey?: string | null;
   credits?: number;
   emailVerified?: boolean;
+  tokenBudget?: number;
+  tokensUsed?: number;
+  licenseActive?: boolean;
+  expiresAt?: string;
+  planRemainingPct?: number;
 };
 
 async function hostedFetch(path: string, init: RequestInit = {}) {

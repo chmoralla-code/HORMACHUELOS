@@ -47,6 +47,14 @@ export async function getLicenseByKey(licenseKey) {
   return Array.isArray(rows) && rows.length ? rows[0] : null;
 }
 
+export async function getLicenseByEmail(email) {
+  const normalized = String(email || "").trim().toLowerCase();
+  if (!normalized) return null;
+  const q = `licenses?email=eq.${encodeURIComponent(normalized)}&select=*&order=created_at.desc&limit=1`;
+  const rows = await sb(q);
+  return Array.isArray(rows) && rows.length ? rows[0] : null;
+}
+
 export async function updateLicense(id, patch) {
   const rows = await sb(`licenses?id=eq.${encodeURIComponent(id)}`, {
     method: "PATCH",

@@ -2012,6 +2012,109 @@
   color: #fff;
 }
 
+.sb-account-section {
+  margin-top: 0;
+  padding: 0 12px 10px;
+  flex-shrink: 0;
+}
+.sb-account-refresh {
+  margin-left: auto;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.sb-account-refresh:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
+}
+.sb-account {
+  padding: 10px 11px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.sb-account:hover {
+  border-color: rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.05);
+}
+.sb-account-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  min-width: 0;
+}
+.sb-account-dot {
+  width: 8px;
+  height: 8px;
+  margin-top: 5px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--text-faint);
+}
+.sb-account-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.sb-account-copy strong {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: 0.01em;
+}
+.sb-account-copy span {
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sb-account-meta {
+  margin-top: 6px;
+  padding-left: 17px;
+  font-size: 10px;
+  color: var(--text-faint);
+}
+.sb-account.is-synced {
+  border-color: rgba(110, 180, 120, 0.35);
+  background: rgba(60, 120, 70, 0.12);
+}
+.sb-account.is-synced .sb-account-dot {
+  background: #6fbf7a;
+  box-shadow: 0 0 0 3px rgba(111, 191, 122, 0.18);
+}
+.sb-account.is-checking .sb-account-dot {
+  background: var(--text-muted);
+  animation: sb-account-pulse 1.1s ease-in-out infinite;
+}
+.sb-account.is-offline {
+  border-color: rgba(210, 160, 80, 0.4);
+  background: rgba(120, 90, 40, 0.14);
+}
+.sb-account.is-offline .sb-account-dot {
+  background: #d4a34a;
+}
+.sb-account.is-signed-out {
+  border-color: rgba(200, 120, 110, 0.35);
+  background: rgba(100, 50, 45, 0.14);
+}
+.sb-account.is-signed-out .sb-account-dot {
+  background: #d07a70;
+}
+@keyframes sb-account-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+
 @media (max-height: 680px) {
   .sb-brand { padding: 9px 12px; }
   .sb-actions {
@@ -2036,6 +2139,8 @@
   .sb-usage { gap: 8px; padding: 8px 10px; }
   .sb-usage-sub { padding-bottom: 7px; }
   .sb-usage-topup { margin-top: 3px; padding-block: 6px; }
+  .sb-account-section { padding: 0 10px 8px; }
+  .sb-account { padding: 8px 10px; }
   .sb-footer { padding: 7px 10px; }
 }
 .template-grid {
