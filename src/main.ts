@@ -8,7 +8,13 @@ import { ProjectPicker } from "./components/picker";
 import { WorkspacePanel } from "./components/workspace";
 import { SitePreview, isPreviewableBuild, pickPreviewEntry } from "./components/site-preview";
 import { mountComputerUseHud, updateComputerUseHud, clearComputerUseHud } from "./components/computer-use-hud";
-import { ensureWebsiteSession, fetchWebsiteAccount, showAuthGate, type WebsiteAccount } from "./components/auth-gate";
+import {
+  ensureWebsiteSession,
+  fetchWebsiteAccount,
+  isWebsiteSessionRejected,
+  showAuthGate,
+  type WebsiteAccount,
+} from "./components/auth-gate";
 import { checkDesktopUpdate, showUpdateGate } from "./components/update-gate";
 import { basename, clear, div, el, speakDoneWorking } from "./components/util";
 import {
@@ -1209,9 +1215,7 @@ async function init() {
       await syncHostedPlan(user);
       return user;
     } catch (e) {
-      const msg = String((e as Error)?.message || e);
-      const expired = /session|expired|unauthorized|401/i.test(msg);
-      if (expired) {
+      if (isWebsiteSessionRejected(e)) {
         await api.clearWebsiteSession().catch(() => {});
         websiteUser = null;
         sidebar.setAccountStatus({

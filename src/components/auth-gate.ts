@@ -34,6 +34,23 @@ export type WebsiteAccount = {
   planRemainingPct?: number;
 };
 
+export class WebsiteAccountRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "WebsiteAccountRequestError";
+  }
+}
+
+export function isWebsiteSessionRejected(error: unknown): boolean {
+  return (
+    error instanceof WebsiteAccountRequestError &&
+    (error.status === 401 || error.status === 403)
+  );
+}
+
 async function hostedFetch(path: string, init: RequestInit = {}) {
   const res = await fetch(`${HOSTED_API}${path}`, {
     ...init,
@@ -50,15 +67,30 @@ async function hostedFetch(path: string, init: RequestInit = {}) {
   return data;
 }
 
+function readableNetworkError(error: unknown): string {
+  const message = String((error as Error)?.message || error || "");
+  if (/failed to fetch|networkerror|load failed|connection/i.test(message)) {
+    return "Can't reach the Hormachuelos sign-in service yet. Retrying automatically…";
+  }
+  return message || "Sign-in service unavailable. Retrying automatically…";
+}
+
 export async function fetchWebsiteAccount(token: string): Promise<WebsiteAccount> {
   const res = await fetch(`${HOSTED_API}/api/auth/me`, {
     headers: { Accept: "application/json", Authorization: `Bearer ${token}` },
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error((data as { error?: string }).error || "Session expired");
+    throw new WebsiteAccountRequestError(
+      (data as { error?: string }).error || "Session expired",
+      res.status,
+    );
   }
-  return (data as { user: WebsiteAccount }).user;
+  const user = (data as { user?: WebsiteAccount }).user;
+  if (!user || typeof user.email !== "string" || !user.email.trim()) {
+    throw new WebsiteAccountRequestError("Invalid account response", 502);
+  }
+  return user;
 }
 
 export async function ensureWebsiteSession(): Promise<WebsiteAccount | null> {
@@ -66,8 +98,12 @@ export async function ensureWebsiteSession(): Promise<WebsiteAccount | null> {
   if (!token) return null;
   try {
     return await fetchWebsiteAccount(token);
-  } catch {
-    await api.clearWebsiteSession().catch(() => {});
+  } catch (error) {
+    // A CSP/network/service outage is not a logout. Preserve the encrypted
+    // session so it can be verified again when connectivity recovers.
+    if (isWebsiteSessionRejected(error)) {
+      await api.clearWebsiteSession().catch(() => {});
+    }
     return null;
   }
 }
@@ -108,6 +144,8 @@ export function showAuthGate(onSignedIn: (user: WebsiteAccount) => void): HTMLEl
   let deviceCode = "";
   let verifyUrl = "";
   let timer: number | null = null;
+  let retryTimer: number | null = null;
+  let retryDelayMs = 1_500;
   let stopped = false;
   let finishing = false;
   let startedAt = 0;
@@ -115,7 +153,9 @@ export function showAuthGate(onSignedIn: (user: WebsiteAccount) => void): HTMLEl
   const stop = () => {
     stopped = true;
     if (timer != null) window.clearInterval(timer);
+    if (retryTimer != null) window.clearTimeout(retryTimer);
     timer = null;
+    retryTimer = null;
   };
 
   const finish = async (token: string, user: WebsiteAccount) => {
@@ -204,7 +244,7 @@ export function showAuthGate(onSignedIn: (user: WebsiteAccount) => void): HTMLEl
         await finish(data.token, user);
       }
     } catch (e) {
-      status.textContent = String((e as Error).message || e);
+      status.textContent = readableNetworkError(e);
     }
   };
 
@@ -222,6 +262,7 @@ export function showAuthGate(onSignedIn: (user: WebsiteAccount) => void): HTMLEl
       deviceCode = data.deviceCode;
       verifyUrl = data.verifyUrl;
       startedAt = Date.now();
+      retryDelayMs = 1_500;
       codeEl.hidden = false;
       codeEl.textContent = data.userCode;
       status.textContent = "Browser will open — if you're already signed in, it links automatically.";
@@ -238,8 +279,14 @@ export function showAuthGate(onSignedIn: (user: WebsiteAccount) => void): HTMLEl
       }, interval);
       void poll();
     } catch (e) {
-      status.textContent = String((e as Error).message || e);
+      status.textContent = readableNetworkError(e);
       openBtn.disabled = false;
+      const delay = retryDelayMs;
+      retryDelayMs = Math.min(retryDelayMs * 2, 10_000);
+      retryTimer = window.setTimeout(() => {
+        retryTimer = null;
+        if (!finishing) void begin();
+      }, delay);
     }
   };
 

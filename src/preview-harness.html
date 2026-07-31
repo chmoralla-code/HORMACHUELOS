@@ -25,7 +25,7 @@
     <script type="module">
       import { api } from "./ipc.ts";
       import { SitePreview } from "./components/site-preview.ts";
-      import { visibleProviders } from "./components/settings.ts";
+      import { getProviderMeta, visibleProviders } from "./components/settings.ts";
 
       api.readProjectFile = async (relativePath) => ({
         path: relativePath,
@@ -48,6 +48,7 @@
       const preview = new SitePreview(document.getElementById("preview-test-host"));
       window.__preview = preview;
       document.body.dataset.providers = visibleProviders().map((provider) => provider.id).join(",");
+      document.body.dataset.cursorModels = getProviderMeta("cursor")?.models.join(",") || "";
       await preview.open({
         projectRoot: "C:\\preview-fixture",
         entryPath: "index.html",

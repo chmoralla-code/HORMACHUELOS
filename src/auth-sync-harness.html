@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Authentication sync test harness</title>
+    <link rel="stylesheet" href="/theme/tokens.css" />
+    <link rel="stylesheet" href="/theme/globals.css" />
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <script type="module">
+      import { api } from "./ipc.ts";
+      import { ensureWebsiteSession, showAuthGate } from "./components/auth-gate.ts";
+
+      api.getWebsiteSession = async () => "existing-session-token-1234";
+      api.clearWebsiteSession = async () => {
+        document.body.dataset.sessionCleared = "true";
+      };
+      api.openExternalUrl = async (url) => {
+        document.body.dataset.openedUrl = url;
+      };
+      api.setWebsiteSession = async (token) => {
+        document.body.dataset.savedToken = token;
+      };
+      api.applyLicenseKey = async () => ({
+        plan: "pro",
+        active: true,
+        expiresAt: "2026-08-31",
+        email: "signed-in@example.com",
+        tokenBudget: 100,
+        tokensUsed: 0,
+        topUpUrl: "",
+        message: "",
+      });
+
+      const existing = await ensureWebsiteSession();
+      document.body.dataset.networkSessionPreserved = String(
+        existing === null && document.body.dataset.sessionCleared !== "true",
+      );
+
+      const gate = showAuthGate((user) => {
+        document.body.dataset.signedIn = user.email;
+      });
+      document.body.appendChild(gate);
+    </script>
+  </body>
+</html>

@@ -132,9 +132,9 @@ export class ModelBar {
     if (this.discoveredModels[providerId]?.length) return;
     const meta = getProviderMeta(providerId);
     if (!meta) return;
+    if (isCursorSdkProvider(providerId)) return;
     try {
       // Keyless providers always; others need a saved key (backend enforces).
-      // Cursor/OpenAI also refreshes the live catalog so the installer ships every model.
       const models = await api.listProviderModels(
         providerId,
         this.settings.provider === providerId

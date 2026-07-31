@@ -780,3 +780,27 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running Hormachuelos");
 }
+
+#[cfg(test)]
+mod desktop_config_tests {
+    #[test]
+    fn packaged_csp_allows_the_hosted_account_api() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("valid Tauri config");
+        let csp = config
+            .pointer("/app/security/csp")
+            .and_then(serde_json::Value::as_str)
+            .expect("string CSP");
+        let connect_src = csp
+            .split(';')
+            .find(|directive| directive.trim_start().starts_with("connect-src "))
+            .expect("connect-src directive");
+
+        assert!(
+            connect_src
+                .split_ascii_whitespace()
+                .any(|source| source == "https://hormachuelos.vercel.app"),
+            "the packaged webview must be allowed to start and poll browser sign-in"
+        );
+    }
+}

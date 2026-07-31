@@ -16,19 +16,16 @@ def main() -> None:
         preview = page.locator(".site-preview")
         preview.wait_for(state="visible")
         assert "is-open" in (preview.get_attribute("class") or "")
-        providers = (page.locator("body").get_attribute("data-providers") or "").split(",")
-        for provider in (
+        body = page.locator("body")
+        providers = (body.get_attribute("data-providers") or "").split(",")
+        assert providers == [
             "cursor",
-            "openai",
-            "anthropic",
-            "gemini",
             "ollama",
             "deepseek",
             "openrouter",
-            "pollinations",
             "glm",
-        ):
-            assert provider in providers, f"{provider} is missing from the installed catalog"
+        ], f"unexpected visible provider catalog: {providers}"
+        assert body.get_attribute("data-cursor-models") == "grok-4.5"
 
         android = page.get_by_role("button", name="Toggle Android device preview")
         software = page.get_by_role("button", name="Toggle software window preview")

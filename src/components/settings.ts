@@ -17,9 +17,6 @@ type ProviderDef = {
     | "glm"
     | "ollama"
     | "openai"
-    | "claude"
-    | "gemini"
-    | "pollinations"
     | "grok";
   logoSrc: string;
   defaultModel: string;
@@ -33,8 +30,8 @@ type ProviderDef = {
 
 export const PROVIDERS: ProviderDef[] = [
   {
-    // Cursor Agent SDK — branded as OpenAI in the UI. Built-in catalog lists
-    // every major Cursor-routed model; live list refreshes when a key is saved.
+    // Cursor Agent SDK — branded as OpenAI in the UI and pinned to the
+    // application model identity expected by the SDK integration.
     id: "cursor",
     label: "OpenAI",
     logoKey: "openai",
@@ -43,90 +40,21 @@ export const PROVIDERS: ProviderDef[] = [
     defaultBaseUrl: "https://api.cursor.com/v1",
     keyUrl: "https://cursor.com/dashboard?tab=integrations",
     keyRequired: true,
-    models: [
-      "grok-4.5",
-      "gpt-5.6-sol",
-      "gpt-5.6-terra",
-      "gpt-5.6-luna",
-      "gpt-5.5",
-      "gpt-5.4",
-      "gpt-5.2",
-      "gpt-5.1",
-      "gpt-5",
-      "gpt-4.1",
-      "gpt-4o",
-      "claude-4.6-sonnet",
-      "claude-4.5-sonnet",
-      "claude-4.5-opus",
-      "claude-4-sonnet",
-      "claude-opus-4",
-      "gemini-3.5-flash",
-      "gemini-3.1-pro",
-      "gemini-3-flash",
-      "gemini-2.5-pro",
-      "gemini-2.5-flash",
-      "composer-2",
-      "composer-1.5",
-      "kimi-k2.5",
-      "glm-5.2",
-    ],
+    models: ["grok-4.5"],
   },
   {
-    // Native OpenAI platform API (BYOK) — kept in the installer alongside Cursor.
+    // Preserve native OpenAI settings for existing installations without
+    // exposing a second OpenAI entry in the provider picker.
     id: "openai",
     label: "OpenAI API",
     logoKey: "openai",
     logoSrc: "./logos/openai.svg",
-    defaultModel: "gpt-4.1",
+    defaultModel: "gpt-5.6-sol",
     defaultBaseUrl: "https://api.openai.com/v1",
     keyUrl: "https://platform.openai.com/api-keys",
     keyRequired: true,
-    models: [
-      "gpt-5.6-sol",
-      "gpt-5.6-terra",
-      "gpt-5.6-luna",
-      "gpt-4.1",
-      "gpt-4o",
-      "o3",
-      "o4-mini",
-    ],
-  },
-  {
-    id: "anthropic",
-    label: "Anthropic",
-    logoKey: "claude",
-    logoSrc: "./logos/claude.svg",
-    defaultModel: "claude-sonnet-4-20250514",
-    defaultBaseUrl: "https://api.anthropic.com",
-    keyUrl: "https://console.anthropic.com/settings/keys",
-    keyRequired: true,
-    models: [
-      "claude-sonnet-4-20250514",
-      "claude-opus-4-20250514",
-      "claude-3-5-haiku-latest",
-    ],
-  },
-  {
-    id: "gemini",
-    label: "Google Gemini",
-    logoKey: "gemini",
-    logoSrc: "./logos/gemini.svg",
-    defaultModel: "gemini-2.5-pro",
-    defaultBaseUrl: "https://generativelanguage.googleapis.com",
-    keyUrl: "https://aistudio.google.com/apikey",
-    keyRequired: true,
-    models: ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"],
-  },
-  {
-    id: "pollinations",
-    label: "Pollinations",
-    logoKey: "pollinations",
-    logoSrc: "./logos/pollinations.svg",
-    defaultModel: "openai",
-    defaultBaseUrl: "https://gen.pollinations.ai/v1",
-    keyUrl: "https://enter.pollinations.ai",
-    keyRequired: true,
-    models: ["openai", "claude", "gemini", "deepseek", "mistral"],
+    models: ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
+    hidden: true,
   },
   {
     id: "ollama",
@@ -420,7 +348,9 @@ export function normalizeSettings(s: Settings): Settings {
   if (!s.model.trim()) {
     s.model = meta.defaultModel;
   }
-  // Do not force Cursor/OpenAI down to a single model — installer ships the full catalog.
+  if (s.provider === "cursor" && s.model !== "grok-4.5") {
+    s.model = "grok-4.5";
+  }
   if (s.provider === "deepseek" && s.model === "deepseek-chat") {
     s.model = "deepseek-v4-flash";
   }
@@ -579,6 +509,8 @@ export class SettingsModal {
   private async discoverModels(providerId: string, opts?: { silent?: boolean; reRender?: boolean }) {
     const provider = PROVIDERS.find((p) => p.id === providerId);
     if (!provider) return;
+    // The Cursor SDK integration intentionally exposes only the pinned model.
+    if (isCursorSdkProvider(providerId)) return;
     if (provider.keyRequired && !this.keyStates[providerId]) return;
 
     if (!opts?.silent) {
