@@ -15,7 +15,7 @@ import {
   showAuthGate,
   type WebsiteAccount,
 } from "./components/auth-gate";
-import { checkDesktopUpdate, showUpdateGate } from "./components/update-gate";
+import { checkDesktopUpdate, showUpdateDialog, showUpdateGate } from "./components/update-gate";
 import { basename, clear, div, el, speakDoneWorking } from "./components/util";
 import {
   loadSessions, saveSession, scheduleSessionSave, flushSessionSaves,
@@ -1258,6 +1258,7 @@ async function init() {
     onNewProject: openNewProjectPicker,
     onOpenProject: openOpenProjectPicker,
     onOpenSettings: openSettings,
+    onCheckForUpdates: () => document.body.appendChild(showUpdateDialog()),
     onNewSession: createNewSession,
     onSelectSession: switchSession,
     onDeleteSession: removeSession,

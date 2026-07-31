@@ -24,7 +24,7 @@ export async function checkDesktopUpdate(): Promise<UpdateCheck> {
   const currentVersion = await api.appVersion().catch(() => "0.0.0");
   const res = await fetch(
     `${HOSTED_API}/api/update?current=${encodeURIComponent(currentVersion)}`,
-    { headers: { Accept: "application/json" } },
+    { headers: { Accept: "application/json" }, cache: "no-store" },
   );
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -36,6 +36,119 @@ export async function checkDesktopUpdate(): Promise<UpdateCheck> {
     latest: (data as UpdateCheck).latest || null,
     currentVersion: String((data as UpdateCheck).currentVersion || currentVersion),
   };
+}
+
+function openUpdateUrl(url: string) {
+  void api.openExternalUrl(url).catch(() => window.open(url, "_blank"));
+}
+
+/** Dismissible manual update checker opened from the desktop sidebar. */
+export function showUpdateDialog(): HTMLElement {
+  document.querySelector(".update-dialog-overlay")?.remove();
+  const previousFocus = document.activeElement instanceof HTMLElement
+    ? document.activeElement
+    : null;
+
+  const overlay = el("div", {
+    class: "auth-gate-overlay update-dialog-overlay",
+    role: "dialog",
+    "aria-modal": "true",
+    "aria-labelledby": "update-dialog-title",
+  });
+  const card = el("div", { class: "auth-gate-card update-dialog-card" });
+  const top = el("div", { class: "update-dialog-top" });
+  top.appendChild(el("div", { class: "auth-gate-brand" }, ["HORMACHUELOS"]));
+  const closeBtn = el("button", {
+    class: "update-dialog-close",
+    type: "button",
+    title: "Close",
+    "aria-label": "Close update checker",
+  }, ["×"]) as HTMLButtonElement;
+  top.appendChild(closeBtn);
+  card.appendChild(top);
+  const content = el("div", { class: "update-dialog-content", "aria-live": "polite" });
+  card.appendChild(content);
+  overlay.appendChild(card);
+
+  const close = () => {
+    overlay.remove();
+    window.requestAnimationFrame(() => previousFocus?.focus({ preventScroll: true }));
+  };
+  closeBtn.addEventListener("click", close);
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) close();
+  });
+  overlay.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      close();
+    }
+  });
+
+  const addTitle = (title: string) => {
+    content.appendChild(el("h1", { class: "auth-gate-title", id: "update-dialog-title" }, [title]));
+  };
+  const addSub = (message: string) => {
+    content.appendChild(el("p", { class: "auth-gate-sub" }, [message]));
+  };
+  const addWebButton = (label = "Open update page") => {
+    const button = el("button", { class: "btn", type: "button" }, [label]) as HTMLButtonElement;
+    button.addEventListener("click", () => openUpdateUrl(`${HOSTED_API}/#/update`));
+    content.appendChild(button);
+  };
+
+  const renderCheck = (check: UpdateCheck) => {
+    content.replaceChildren();
+    const latest = check.latest;
+    if (check.updateAvailable && latest) {
+      addTitle("Update available");
+      addSub(`You're on v${check.currentVersion}. Hormachuelos v${latest.version} is ready.`);
+      const notes = el("div", { class: "update-notes auth-gate-sub" });
+      notes.style.whiteSpace = "pre-wrap";
+      notes.textContent = latest.whatsNew || latest.title || "Bug fixes and improvements.";
+      content.appendChild(notes);
+
+      const primaryUrl = latest.msiUrl || latest.exeUrl || `${HOSTED_API}/#/update`;
+      const downloadBtn = el("button", { class: "btn primary", type: "button" }, [
+        `Download v${latest.version}`,
+      ]) as HTMLButtonElement;
+      downloadBtn.addEventListener("click", () => openUpdateUrl(primaryUrl));
+      content.appendChild(downloadBtn);
+      addWebButton();
+      const laterBtn = el("button", { class: "btn", type: "button" }, ["Not now"]);
+      laterBtn.addEventListener("click", close);
+      content.appendChild(laterBtn);
+      return;
+    }
+
+    addTitle("You're up to date");
+    addSub(`Hormachuelos v${check.currentVersion} is the latest version.`);
+    addWebButton("View release history");
+    const doneBtn = el("button", { class: "btn primary", type: "button" }, ["Done"]);
+    doneBtn.addEventListener("click", close);
+    content.appendChild(doneBtn);
+  };
+
+  const runCheck = async () => {
+    content.replaceChildren();
+    addTitle("Checking for updates…");
+    addSub("Looking for the latest Hormachuelos release.");
+    try {
+      renderCheck(await checkDesktopUpdate());
+    } catch {
+      content.replaceChildren();
+      addTitle("Couldn't check for updates");
+      addSub("Check your internet connection, then try again.");
+      const retryBtn = el("button", { class: "btn primary", type: "button" }, ["Try again"]);
+      retryBtn.addEventListener("click", () => void runCheck());
+      content.appendChild(retryBtn);
+      addWebButton();
+    }
+  };
+
+  void runCheck();
+  window.requestAnimationFrame(() => closeBtn.focus({ preventScroll: true }));
+  return overlay;
 }
 
 /** Non-dismissible gate when a forced update is published. */
@@ -62,12 +175,12 @@ export function showUpdateGate(check: UpdateCheck): HTMLElement {
     `Update to v${latest.version}`,
   ]) as HTMLButtonElement;
   updateBtn.addEventListener("click", () => {
-    void api.openExternalUrl(primaryUrl).catch(() => window.open(primaryUrl, "_blank"));
+    openUpdateUrl(primaryUrl);
   });
   const webBtn = el("button", { class: "btn", type: "button" }, ["Open update page"]) as HTMLButtonElement;
   webBtn.addEventListener("click", () => {
     const url = `${HOSTED_API}/#/update`;
-    void api.openExternalUrl(url).catch(() => window.open(url, "_blank"));
+    openUpdateUrl(url);
   });
   actions.appendChild(updateBtn);
   actions.appendChild(webBtn);

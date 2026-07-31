@@ -28,6 +28,8 @@ export class Sidebar {
   onNewProject: () => void;
   onOpenProject: () => void;
   onOpenSettings: () => void;
+  /** Check the hosted release feed and offer the latest installer. */
+  onCheckForUpdates: () => void;
   onNewSession: () => void;
   onSelectSession: (id: string) => void;
   onDeleteAllSessions: () => void;
@@ -52,6 +54,7 @@ export class Sidebar {
     onNewProject: () => void;
     onOpenProject: () => void;
     onOpenSettings: () => void;
+    onCheckForUpdates: () => void;
     onNewSession: () => void;
     onSelectSession: (id: string) => void;
     onDeleteAllSessions: () => void;
@@ -65,6 +68,7 @@ export class Sidebar {
     this.onNewProject = handlers.onNewProject;
     this.onOpenProject = handlers.onOpenProject;
     this.onOpenSettings = handlers.onOpenSettings;
+    this.onCheckForUpdates = handlers.onCheckForUpdates;
     this.onNewSession = handlers.onNewSession;
     this.onSelectSession = handlers.onSelectSession;
     this.onDeleteAllSessions = handlers.onDeleteAllSessions;
@@ -93,6 +97,9 @@ export class Sidebar {
     actions.appendChild(this.actionBtn("open", "Open Project", this.onOpenProject));
     actions.appendChild(this.actionBtn("export", "Client Pack", this.onExportClientPack));
     actions.appendChild(this.actionBtn("settings", "Settings", this.onOpenSettings));
+    const updateBtn = this.actionBtn("refresh", "Update", this.onCheckForUpdates);
+    updateBtn.classList.add("sb-update-action");
+    actions.appendChild(updateBtn);
     this.node.appendChild(actions);
 
     // Sessions section
@@ -482,11 +489,15 @@ export class Sidebar {
       : "No active plan — Mag-load via GCash";
   }
   private actionBtn(
-    iconName: "new" | "open" | "settings" | "export",
+    iconName: "new" | "open" | "settings" | "export" | "refresh",
     label: string,
     onClick: () => void,
   ): HTMLElement {
-    const btn = el("button", { class: "sb-action", html: icon(iconName) + `<span>${label}</span>` });
+    const btn = el("button", {
+      class: "sb-action",
+      type: "button",
+      html: icon(iconName) + `<span>${label}</span>`,
+    });
     btn.addEventListener("click", onClick);
     return btn;
   }
