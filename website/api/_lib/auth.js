@@ -306,9 +306,8 @@ export async function completeDeviceLink(userCode, account) {
       status: 410,
     });
   }
-  if (link.status === "complete") {
-    return { ok: true, alreadyComplete: true };
-  }
+  // Always mint a fresh desktop session token — even if previously complete/claimed —
+  // so an already-signed-in browser can re-link if the app missed the first poll.
   const session = await createSession(account.id);
   await updateDeviceLink(link.id, {
     status: "complete",
@@ -317,7 +316,7 @@ export async function completeDeviceLink(userCode, account) {
     session_token_hash: hashToken(session.token),
     completed_at: new Date().toISOString(),
   });
-  return { ok: true, userCode: code };
+  return { ok: true, userCode: code, reissued: link.status !== "pending" };
 }
 
 /** Desktop polls until the website login finishes, then receives a one-time session token. */
@@ -326,7 +325,11 @@ export async function pollDeviceLink(deviceCode) {
   if (!link) {
     throw Object.assign(new Error("Unknown device code."), { status: 404 });
   }
-  if (new Date(link.expires_at).getTime() < Date.now() && link.status !== "complete") {
+  if (
+    new Date(link.expires_at).getTime() < Date.now() &&
+    link.status !== "complete" &&
+    link.status !== "claimed"
+  ) {
     await updateDeviceLink(link.id, { status: "expired" });
     return { status: "expired" };
   }
@@ -337,7 +340,11 @@ export async function pollDeviceLink(deviceCode) {
     return { status: "expired" };
   }
   if (link.status === "complete") {
-    const token = link.session_token || "";
+    const token = String(link.session_token || "");
+    // Wait for website to (re)issue a token instead of handing back an empty claim.
+    if (!token) {
+      return { status: "pending" };
+    }
     // One-time retrieve — clear plaintext token from DB.
     await updateDeviceLink(link.id, { session_token: null, status: "claimed" });
     let account = null;
@@ -351,7 +358,8 @@ export async function pollDeviceLink(deviceCode) {
     };
   }
   if (link.status === "claimed") {
-    return { status: "claimed" };
+    // App missed the token — keep waiting so a website re-link can set status=complete again.
+    return { status: "pending", waitingForRelink: true };
   }
   return { status: link.status || "pending" };
 }

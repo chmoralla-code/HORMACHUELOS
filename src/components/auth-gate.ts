@@ -15,12 +15,8 @@ type DevicePoll = {
   ok: boolean;
   status: "pending" | "complete" | "expired" | "claimed" | string;
   token?: string;
-  user?: {
-    email?: string;
-    name?: string;
-    licenseKey?: string | null;
-    plan?: string | null;
-  };
+  waitingForRelink?: boolean;
+  user?: WebsiteAccount;
 };
 
 export type WebsiteAccount = {
@@ -87,7 +83,7 @@ export function showAuthGate(onSignedIn: (user: WebsiteAccount) => void): HTMLEl
   card.appendChild(el("h1", { class: "auth-gate-title" }, ["Sign in to continue"]));
   card.appendChild(
     el("p", { class: "auth-gate-sub" }, [
-      "After you download the app, log in or create an account on the website. This window signs in automatically.",
+      "If you're already signed in on the website, the browser will link this app automatically. Keep this window open.",
     ]),
   );
 
@@ -100,7 +96,7 @@ export function showAuthGate(onSignedIn: (user: WebsiteAccount) => void): HTMLEl
   ]) as HTMLButtonElement;
   openBtn.disabled = true;
   const hint = el("p", { class: "auth-gate-hint" }, [
-    "Keep this window open while you finish in the browser.",
+    "Already logged in on hormachuelos.vercel.app? Use the same browser window that opens — click “Link desktop now” if it doesn’t finish automatically.",
   ]);
 
   card.appendChild(status);
@@ -113,6 +109,8 @@ export function showAuthGate(onSignedIn: (user: WebsiteAccount) => void): HTMLEl
   let verifyUrl = "";
   let timer: number | null = null;
   let stopped = false;
+  let finishing = false;
+  let startedAt = 0;
 
   const stop = () => {
     stopped = true;
@@ -121,45 +119,87 @@ export function showAuthGate(onSignedIn: (user: WebsiteAccount) => void): HTMLEl
   };
 
   const finish = async (token: string, user: WebsiteAccount) => {
+    if (finishing) return;
+    finishing = true;
     stop();
-    await api.setWebsiteSession(token);
-    if (user.licenseKey) {
-      try {
-        await api.applyLicenseKey(user.licenseKey);
-        window.dispatchEvent(new CustomEvent("horma:license-updated"));
-      } catch (e) {
-        console.warn("auto license apply failed", e);
+    status.textContent = "Saving sign-in…";
+    try {
+      await api.setWebsiteSession(token);
+      // Confirm the website session actually works before unlocking the app.
+      const verified = await fetchWebsiteAccount(token);
+      if (verified.licenseKey) {
+        try {
+          await api.applyLicenseKey(verified.licenseKey);
+          window.dispatchEvent(new CustomEvent("horma:license-updated"));
+        } catch (e) {
+          console.warn("auto license apply failed", e);
+        }
       }
+      status.textContent = `Signed in as ${verified.email}`;
+      onSignedIn(verified);
+      overlay.remove();
+    } catch (e) {
+      finishing = false;
+      status.textContent = `Could not save session: ${String((e as Error).message || e)}. Retrying…`;
+      openBtn.disabled = false;
+      // Restart pairing so website can mint a fresh token.
+      window.setTimeout(() => {
+        void begin();
+      }, 1200);
     }
-    status.textContent = `Signed in as ${user.email}`;
-    onSignedIn(user);
-    overlay.remove();
   };
 
   const poll = async () => {
-    if (stopped || !deviceCode) return;
+    if (stopped || !deviceCode || finishing) return;
     try {
       const data = (await hostedFetch("/api/auth/device-poll", {
         method: "POST",
         body: JSON.stringify({ deviceCode }),
       })) as DevicePoll;
+
       if (data.status === "pending") {
-        status.textContent = "Waiting for website login…";
+        status.textContent = data.waitingForRelink
+          ? "Website linked — waiting for sign-in token… click “Link desktop now” in the browser if needed."
+          : "Waiting for website login…";
+        // Soft timeout: restart pairing after 12 minutes so codes stay fresh.
+        if (startedAt && Date.now() - startedAt > 12 * 60 * 1000) {
+          status.textContent = "Login timed out. Starting a fresh link…";
+          void begin();
+        }
         return;
       }
-      if (data.status === "expired" || data.status === "claimed") {
-        status.textContent = "Login expired. Click the button to try again.";
-        openBtn.disabled = false;
-        stop();
+
+      if (data.status === "expired") {
+        status.textContent = "Login code expired. Starting a fresh link…";
+        void begin();
         return;
       }
-      if (data.status === "complete" && data.token) {
+
+      // Older servers returned "claimed" as a dead-end; treat as wait/retry.
+      if (data.status === "claimed") {
+        status.textContent =
+          "Browser linked — waiting for token. Click “Link desktop now” or “Send link again” on the website.";
+        return;
+      }
+
+      if (data.status === "complete") {
+        if (!data.token) {
+          status.textContent = "Almost there — waiting for website to send the session…";
+          return;
+        }
         status.textContent = "Linking desktop…";
         const user: WebsiteAccount = {
           email: data.user?.email || "account",
           name: data.user?.name,
           licenseKey: data.user?.licenseKey ?? null,
           plan: data.user?.plan ?? null,
+          tokenBudget: data.user?.tokenBudget,
+          tokensUsed: data.user?.tokensUsed,
+          licenseActive: data.user?.licenseActive,
+          expiresAt: data.user?.expiresAt,
+          planRemainingPct: data.user?.planRemainingPct,
+          credits: data.user?.credits,
+          emailVerified: data.user?.emailVerified,
         };
         await finish(data.token, user);
       }
@@ -171,6 +211,7 @@ export function showAuthGate(onSignedIn: (user: WebsiteAccount) => void): HTMLEl
   const begin = async () => {
     stop();
     stopped = false;
+    finishing = false;
     openBtn.disabled = true;
     status.textContent = "Starting secure login…";
     try {
@@ -180,10 +221,12 @@ export function showAuthGate(onSignedIn: (user: WebsiteAccount) => void): HTMLEl
       })) as DeviceStart;
       deviceCode = data.deviceCode;
       verifyUrl = data.verifyUrl;
+      startedAt = Date.now();
       codeEl.hidden = false;
       codeEl.textContent = data.userCode;
-      status.textContent = "Browser will open — log in or sign up there.";
+      status.textContent = "Browser will open — if you're already signed in, it links automatically.";
       openBtn.disabled = false;
+      openBtn.textContent = "Open website to finish sign-in";
       try {
         await api.openExternalUrl(verifyUrl);
       } catch {
@@ -203,6 +246,7 @@ export function showAuthGate(onSignedIn: (user: WebsiteAccount) => void): HTMLEl
   openBtn.addEventListener("click", () => {
     if (verifyUrl) {
       void api.openExternalUrl(verifyUrl).catch(() => window.open(verifyUrl, "_blank"));
+      status.textContent = "Browser opened — finish linking there, then return here.";
       return;
     }
     void begin();

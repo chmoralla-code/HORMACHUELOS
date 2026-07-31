@@ -7,6 +7,8 @@ const STORAGE_USER = "horma:user";
 const STORAGE_TOKEN = "horma:token";
 const STORAGE_ADMIN = "horma:admin";
 const STORAGE_ORDERS = "horma:orders";
+const STORAGE_DESKTOP_CODE = "horma:desktop_code";
+const STORAGE_DESKTOP_FLOW = "horma:desktop_flow";
 
 /** Public assets hosted on Supabase Storage (keeps Vercel deploy under size limits). */
 const ASSET_BASE =
@@ -14,17 +16,17 @@ const ASSET_BASE =
 
 /** Desktop installer files (uploaded to Supabase after `npm run desktop:build`). */
 const DESKTOP_DOWNLOADS = {
-  version: "0.1.1",
+  version: "0.1.2",
   windows: {
     msi: {
       label: "Windows installer (MSI)",
-      href: `${ASSET_BASE}/downloads/Hormachuelos_0.1.1_x64_en-US.msi`,
-      file: "Hormachuelos_0.1.1_x64_en-US.msi",
+      href: `${ASSET_BASE}/downloads/Hormachuelos_0.1.2_x64_en-US.msi`,
+      file: "Hormachuelos_0.1.2_x64_en-US.msi",
     },
     setup: {
       label: "Windows setup (EXE)",
-      href: `${ASSET_BASE}/downloads/Hormachuelos_0.1.1_x64-setup.exe`,
-      file: "Hormachuelos_0.1.1_x64-setup.exe",
+      href: `${ASSET_BASE}/downloads/Hormachuelos_0.1.2_x64-setup.exe`,
+      file: "Hormachuelos_0.1.2_x64-setup.exe",
     },
   },
 };
@@ -252,12 +254,55 @@ function desktopCodeFromQuery() {
   return "";
 }
 
+function rememberDesktopLinkFromUrl() {
+  const code = desktopCodeFromQuery();
+  if (code) {
+    try {
+      sessionStorage.setItem(STORAGE_DESKTOP_CODE, code);
+      sessionStorage.setItem(STORAGE_DESKTOP_FLOW, "1");
+    } catch {
+      /* private mode */
+    }
+  } else if (queryOf().get("desktop") === "1") {
+    try {
+      sessionStorage.setItem(STORAGE_DESKTOP_FLOW, "1");
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+function pendingDesktopCode() {
+  const fromUrl = desktopCodeFromQuery();
+  if (fromUrl) return fromUrl;
+  try {
+    return String(sessionStorage.getItem(STORAGE_DESKTOP_CODE) || "").trim().toUpperCase();
+  } catch {
+    return "";
+  }
+}
+
+function clearPendingDesktopLink() {
+  try {
+    sessionStorage.removeItem(STORAGE_DESKTOP_CODE);
+    sessionStorage.removeItem(STORAGE_DESKTOP_FLOW);
+  } catch {
+    /* ignore */
+  }
+}
+
 function isDesktopLinkFlow() {
-  return queryOf().get("desktop") === "1" || Boolean(desktopCodeFromQuery());
+  rememberDesktopLinkFromUrl();
+  if (queryOf().get("desktop") === "1" || Boolean(desktopCodeFromQuery())) return true;
+  try {
+    return sessionStorage.getItem(STORAGE_DESKTOP_FLOW) === "1" || Boolean(pendingDesktopCode());
+  } catch {
+    return false;
+  }
 }
 
 function withDesktopParams(path) {
-  const code = desktopCodeFromQuery();
+  const code = pendingDesktopCode();
   if (!isDesktopLinkFlow()) return path;
   const base = path.startsWith("/") ? path : `/${path}`;
   const join = base.includes("?") ? "&" : "?";
@@ -265,13 +310,15 @@ function withDesktopParams(path) {
 }
 
 async function finishDesktopLinkIfNeeded() {
-  const code = desktopCodeFromQuery();
+  rememberDesktopLinkFromUrl();
+  const code = pendingDesktopCode();
   if (!code || !getSessionToken()) return false;
   try {
     const data = await apiAuth("/api/auth/device-complete", {
       method: "POST",
       body: { code },
     });
+    // Keep pairing code so "Send link again" can re-issue a desktop token.
     toast(data.message || "Desktop app linked");
     navigate("/desktop-linked");
     return true;
@@ -702,7 +749,60 @@ function renderPricing() {
 
 function renderLogin() {
   const next = queryOf().get("next") || (isDesktopLinkFlow() ? "/desktop-linked" : "/dashboard");
-  const deskCode = desktopCodeFromQuery();
+  const deskCode = pendingDesktopCode();
+  const alreadyIn = Boolean(getSessionToken() && getSessionUser());
+
+  // Already signed in + desktop pairing → show link UI (not the password form).
+  if (isDesktopLinkFlow() && alreadyIn) {
+    const user = getSessionUser();
+    const wrap = page(`
+      <div class="auth-wrap container">
+        <div class="auth-card">
+          <h1>Link desktop app</h1>
+          <p class="sub">You're signed in as <strong>${escapeHtml(user.email || "account")}</strong>${
+            deskCode ? ` · code <strong class="mono">${escapeHtml(deskCode)}</strong>` : ""
+          }.</p>
+          <p class="muted small" id="desk-link-status" style="margin:0 0 16px">Connecting Hormachuelos desktop…</p>
+          <div class="field-error" id="desk-link-error" hidden></div>
+          <button class="btn btn-primary btn-block" type="button" id="desk-link-btn">Link desktop now</button>
+          <p class="auth-foot" style="margin-top:16px">Wrong account? <a href="#" id="desk-link-logout">Log out</a> then sign in again.</p>
+        </div>
+      </div>
+    `);
+    const statusEl = wrap.querySelector("#desk-link-status");
+    const errEl = wrap.querySelector("#desk-link-error");
+    const btn = wrap.querySelector("#desk-link-btn");
+    const runLink = async () => {
+      errEl.hidden = true;
+      btn.disabled = true;
+      btn.textContent = "Linking…";
+      statusEl.textContent = "Sending sign-in to the desktop app…";
+      const ok = await finishDesktopLinkIfNeeded();
+      if (!ok) {
+        errEl.hidden = false;
+        errEl.textContent =
+          "Could not link yet. Keep the Hormachuelos app open, then click Link desktop now again.";
+        btn.disabled = false;
+        btn.textContent = "Link desktop now";
+        statusEl.textContent = "Waiting for another try…";
+      }
+    };
+    btn.addEventListener("click", () => void runLink());
+    wrap.querySelector("#desk-link-logout").addEventListener("click", async (e) => {
+      e.preventDefault();
+      try {
+        await apiAuth("/api/auth/logout", { method: "POST" });
+      } catch {
+        /* ignore */
+      }
+      setSessionUser(null);
+      navigate(withDesktopParams("/login"));
+      render();
+    });
+    queueMicrotask(() => void runLink());
+    return wrap;
+  }
+
   const wrap = page(`
     <div class="auth-wrap container">
       <div class="auth-card">
@@ -729,13 +829,6 @@ function renderLogin() {
       </div>
     </div>
   `);
-
-  // Already signed in from a previous tab — finish desktop link immediately.
-  if (isDesktopLinkFlow() && getSessionToken()) {
-    queueMicrotask(() => {
-      void finishDesktopLinkIfNeeded();
-    });
-  }
 
   wrap.querySelector("#login-form").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -855,17 +948,48 @@ function renderSignup() {
 }
 
 function renderDesktopLinked() {
-  return page(`
+  const wrap = page(`
     <div class="container" style="padding:64px 0;max-width:560px;margin:0 auto;text-align:center">
       <div class="eyebrow" style="margin-bottom:16px"><span class="dot"></span> Desktop linked</div>
       <h1 style="margin:0 0 12px;font-size:2rem;letter-spacing:-0.03em">You're signed in</h1>
       <p class="muted" style="margin:0 0 20px">
-        Return to the Hormachuelos app — it will sign you in automatically.
-        You can close this browser tab.
+        Return to the Hormachuelos app — it should sign in within a few seconds.
+        If the app still says waiting, click below to send the link again.
       </p>
-      <a class="btn btn-primary" href="#/dashboard">Open web dashboard</a>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;justify-content:center">
+        <button type="button" class="btn btn-primary" id="desk-relink-btn">Send link to app again</button>
+        <a class="btn" href="#/dashboard">Open web dashboard</a>
+      </div>
+      <p class="muted small" id="desk-relink-status" style="margin-top:14px"></p>
     </div>
   `);
+  wrap.querySelector("#desk-relink-btn")?.addEventListener("click", async () => {
+    const status = wrap.querySelector("#desk-relink-status");
+    const btn = wrap.querySelector("#desk-relink-btn");
+    if (!getSessionToken()) {
+      navigate(withDesktopParams("/login"));
+      return;
+    }
+    // Restore last code if user still has the app waiting on the same pairing.
+    if (!pendingDesktopCode()) {
+      status.textContent = "Open the link from the desktop app again (it includes a fresh code).";
+      return;
+    }
+    btn.disabled = true;
+    status.textContent = "Re-sending…";
+    // Re-enable flow flag and complete again (mints a fresh desktop token).
+    try {
+      sessionStorage.setItem(STORAGE_DESKTOP_FLOW, "1");
+    } catch {
+      /* ignore */
+    }
+    const ok = await finishDesktopLinkIfNeeded();
+    status.textContent = ok
+      ? "Sent. Check the Hormachuelos app window."
+      : "Still waiting — keep the app open and try once more.";
+    btn.disabled = false;
+  });
+  return wrap;
 }
 
 function renderVerify() {
@@ -2104,8 +2228,17 @@ async function boot() {
   });
 
   window.addEventListener("hashchange", render);
+  rememberDesktopLinkFromUrl();
   if (getSessionToken()) {
     await refreshSessionUser();
+  }
+  // Already signed in + desktop pairing code in URL/session → jump straight to link flow.
+  if (getSessionToken() && pendingDesktopCode() && pathOf() !== "/desktop-linked") {
+    const target = `#/login?desktop=1&dcode=${encodeURIComponent(pendingDesktopCode())}`;
+    if (location.hash !== target) {
+      location.hash = target;
+      return; // hashchange → render
+    }
   }
   if (!location.hash) location.hash = "#/";
   else render();
