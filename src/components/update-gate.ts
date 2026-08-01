@@ -97,7 +97,37 @@ function progressMessage(event: AppUpdateProgress): string {
     : null;
   const fallback = `${event.phase[0].toUpperCase()}${event.phase.slice(1)}`;
   const message = String(event.message || fallback).replace(/…$/, "");
-  return `${message}${percent === null ? "" : ` ${percent}%`}…`;
+  const showPercent = percent !== null && !(event.phase === "preparing" && percent === 0);
+  return `${message}${showPercent ? ` ${percent}%` : ""}…`;
+}
+
+function buildVersionSummary(currentVersion: string, latestVersion: string): HTMLElement {
+  const summary = el("div", {
+    class: "update-version-summary",
+    "aria-label": `Installed version ${currentVersion}; update version ${latestVersion}`,
+  });
+  summary.append(
+    el("div", { class: "update-version-cell" }, [
+      el("span", { class: "update-version-label" }, ["Installed"]),
+      el("strong", { class: "update-version-value" }, [`v${currentVersion}`]),
+    ]),
+    el("span", { class: "update-version-arrow", "aria-hidden": "true" }, ["→"]),
+    el("div", { class: "update-version-cell is-ready" }, [
+      el("span", { class: "update-version-label" }, ["Ready to install"]),
+      el("strong", { class: "update-version-value" }, [`v${latestVersion}`]),
+    ]),
+  );
+  return summary;
+}
+
+function buildReleaseNotes(release: AppRelease): HTMLElement {
+  const group = el("section", { class: "update-notes-group", "aria-label": "What's new" });
+  group.appendChild(el("p", { class: "update-section-label" }, ["What's new"]));
+  const notes = el("div", { class: "update-notes auth-gate-sub" });
+  notes.style.whiteSpace = "pre-wrap";
+  notes.textContent = release.whatsNew || release.title || "Bug fixes and improvements.";
+  group.appendChild(notes);
+  return group;
 }
 
 async function installInsideApp(
@@ -123,7 +153,10 @@ async function installInsideApp(
   try {
     onProgress("Downloading the update inside Hormachuelos…");
     await api.installAppUpdate(installer.url, release.version, installer.sha256);
-    onProgress("Update prepared. Hormachuelos is restarting…");
+    onProgress("Installer is ready. Hormachuelos will restart automatically…", {
+      phase: "restarting",
+      message: "Installer is ready. Hormachuelos will restart automatically",
+    });
   } finally {
     unlisten?.();
   }
@@ -233,11 +266,8 @@ export function showUpdateDialog(options: UpdateInstallOptions = {}): HTMLElemen
     const latest = check.latest;
     if (check.updateAvailable && latest) {
       addTitle("Update available");
-      addSub(`You're on v${check.currentVersion}. Hormachuelos v${latest.version} is ready.`);
-      const notes = el("div", { class: "update-notes auth-gate-sub" });
-      notes.style.whiteSpace = "pre-wrap";
-      notes.textContent = latest.whatsNew || latest.title || "Bug fixes and improvements.";
-      content.appendChild(notes);
+      content.appendChild(buildVersionSummary(check.currentVersion, latest.version));
+      content.appendChild(buildReleaseNotes(latest));
 
       const dataHint = el("p", { class: "auth-gate-hint update-data-hint" }, [
         "Sessions, projects, settings, and account data stay on this device.",
@@ -334,16 +364,8 @@ export function showUpdateGate(
   const card = el("div", { class: "auth-gate-card" });
   card.appendChild(el("div", { class: "auth-gate-brand" }, ["HORMACHUELOS"]));
   card.appendChild(el("h1", { class: "auth-gate-title", id: "required-update-title" }, ["Update required"]));
-  card.appendChild(
-    el("p", { class: "auth-gate-sub" }, [
-      `You're on v${check.currentVersion}. Install v${latest.version} before using the app.`,
-    ]),
-  );
-  card.appendChild(el("h2", { style: "margin:8px 0 6px;font-size:1.05rem" }, ["What's new"]));
-  const notes = el("div", { class: "update-notes auth-gate-sub" });
-  notes.style.whiteSpace = "pre-wrap";
-  notes.textContent = latest.whatsNew || latest.title || "Bug fixes and improvements.";
-  card.appendChild(notes);
+  card.appendChild(buildVersionSummary(check.currentVersion, latest.version));
+  card.appendChild(buildReleaseNotes(latest));
   card.appendChild(
     el("p", { class: "auth-gate-hint update-data-hint" }, [
       "Sessions, projects, settings, and account data stay on this device.",

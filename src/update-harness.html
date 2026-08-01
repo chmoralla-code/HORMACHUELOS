@@ -64,6 +64,8 @@
       const sidebar = new Sidebar({
         onNewProject: noop,
         onOpenProject: noop,
+        onSelectProject: noop,
+        onAddAnotherProject: noop,
         onOpenSettings: noop,
         onCheckForUpdates: () => document.body.appendChild(showUpdateDialog()),
         onNewSession: noop,
@@ -76,7 +78,23 @@
         onManageAccount: noop,
         onRefreshAccount: noop,
       });
-      await sidebar.render();
+      sidebar.setProjectWorkspaces([
+        { path: "C:\\Projects\\Atlas", name: "Atlas", addedAt: 1, lastOpenedAt: 3 },
+        { path: "C:\\Projects\\Beacon", name: "Beacon", addedAt: 1, lastOpenedAt: 2 },
+        { path: "C:\\Projects\\Cinder", name: "Cinder", addedAt: 1, lastOpenedAt: 1 },
+      ], "C:\\Projects\\Atlas");
+      await sidebar.render([
+        { id: "session-atlas", title: "Build the client portal", projectId: "Atlas", messages: [], createdAt: 3 },
+        { id: "session-beacon", title: "Review the launch checklist", projectId: "Atlas", messages: [], createdAt: 2 },
+        { id: "session-cinder", title: "Refine the installation flow", projectId: "Atlas", messages: [], createdAt: 1 },
+      ], "session-atlas");
+      sidebar.setSessionUsage(0, 0, {
+        planName: "pro",
+        planActive: true,
+        planRemaining: 93,
+        planExpiresAt: "2026-08-30",
+      });
+      sidebar.setAccountStatus({ state: "synced", email: "hello@example.com", name: "Cyrhiel" });
       const update = await checkDesktopUpdate();
       sidebar.setUpdateNotification(
         update.updateAvailable || update.forceUpdate,

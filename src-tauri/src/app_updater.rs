@@ -201,6 +201,7 @@ async fn download_installer(
         .timeout(std::time::Duration::from_secs(20 * 60))
         .build()
         .map_err(|error| format!("Could not initialize the update download: {error}"))?;
+    emit_progress(app, "downloading", None, "Downloading the update…");
     let mut response = client
         .get(url)
         .header(reqwest::header::ACCEPT, "application/octet-stream")
@@ -285,33 +286,61 @@ async fn download_installer(
 }
 
 #[cfg(windows)]
-fn launch_install_helper(installer: &Path, current_exe: &Path) -> Result<(), String> {
-    use std::os::windows::process::CommandExt;
-
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let parent_id = std::process::id().to_string();
-    let script = r#"
+fn install_helper_script() -> &'static str {
+    r#"
 $ErrorActionPreference = 'Stop'
 $parentProcessId = [int]$args[0]
 $installerPath = $args[1]
 $appPath = $args[2]
 try { Wait-Process -Id $parentProcessId -Timeout 120 -ErrorAction SilentlyContinue } catch {}
+
+function Resolve-InstalledHormachuelosPath {
+  $installDirs = @(
+    (Get-ItemProperty -Path 'HKCU:\Software\Hormachuelos\Hormachuelos' -ErrorAction SilentlyContinue).InstallDir,
+    (Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Hormachuelos' -ErrorAction SilentlyContinue).InstallLocation,
+    (Get-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Hormachuelos' -ErrorAction SilentlyContinue).InstallLocation,
+    (Split-Path -Parent $appPath)
+  )
+  foreach ($installDir in $installDirs) {
+    if ([string]::IsNullOrWhiteSpace($installDir)) { continue }
+    $candidate = Join-Path -Path $installDir.Trim('"') -ChildPath 'ai-forge.exe'
+    if (Test-Path -LiteralPath $candidate) { return $candidate }
+  }
+  return $appPath
+}
+
 $exitCode = 1
 try {
   if ([IO.Path]::GetExtension($installerPath).ToLowerInvariant() -eq '.msi') {
     $quotedInstaller = '"' + $installerPath + '"'
-    $result = Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/i', $quotedInstaller, '/passive', '/norestart', 'AUTOLAUNCHAPP=True', 'LAUNCHAPPARGS=""') -Wait -PassThru
+    $result = Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/i', $quotedInstaller, '/passive', '/norestart') -Wait -PassThru
   } else {
-    $result = Start-Process -FilePath $installerPath -ArgumentList @('/P', '/UPDATE', '/R') -Wait -PassThru
+    $result = Start-Process -FilePath $installerPath -ArgumentList @('/P', '/UPDATE') -Wait -PassThru
   }
   $exitCode = $result.ExitCode
 } catch {}
 if ($exitCode -eq 0 -or $exitCode -eq 3010) {
   Remove-Item -LiteralPath $installerPath -Force -ErrorAction SilentlyContinue
+  Start-Sleep -Milliseconds 350
+  $launchPath = Resolve-InstalledHormachuelosPath
+  try { Start-Process -FilePath $launchPath } catch {
+    if ($launchPath -ne $appPath) {
+      try { Start-Process -FilePath $appPath } catch {}
+    }
+  }
 } else {
   try { Start-Process -FilePath $appPath } catch {}
 }
-"#;
+"#
+}
+
+#[cfg(windows)]
+fn launch_install_helper(installer: &Path, current_exe: &Path) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let parent_id = std::process::id().to_string();
+    let script = install_helper_script();
 
     std::process::Command::new("powershell.exe")
         .args([
@@ -356,25 +385,25 @@ async fn install_app_update_inner(
         return Err("Local data must be backed up before installing an update.".into());
     }
     let (url, extension) = validate_download_url(&download_url, &version)?;
-    emit_progress(app, "preparing", Some(0), "Preparing the internal update…");
+    emit_progress(app, "preparing", Some(0), "Preparing the secure update…");
     let installer = download_installer(app, url, extension, &version, &sha256).await?;
     emit_progress(
         app,
         "verifying",
-        Some(100),
-        "Verifying the Windows installer…",
+        None,
+        "Verifying the downloaded installer…",
     );
     let current_exe = std::env::current_exe()
         .map_err(|error| format!("Could not locate the running Hormachuelos app: {error}"))?;
     state.stop_all_runs();
+    emit_progress(app, "installing", None, "Starting the internal installer…");
+    launch_install_helper(&installer, &current_exe)?;
     emit_progress(
         app,
-        "installing",
-        Some(100),
-        "Starting the internal installer…",
+        "restarting",
+        None,
+        "Opening the updated Hormachuelos app…",
     );
-    launch_install_helper(&installer, &current_exe)?;
-    emit_progress(app, "restarting", Some(100), "Restarting Hormachuelos…");
     tokio::time::sleep(std::time::Duration::from_millis(350)).await;
     app.exit(0);
     Ok(())
@@ -449,5 +478,15 @@ mod tests {
             "0.1.9"
         )
         .is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn update_helper_starts_the_installed_app_after_a_successful_install() {
+        let script = super::install_helper_script();
+        assert!(script.contains("Resolve-InstalledHormachuelosPath"));
+        assert!(script.contains("@('/P', '/UPDATE')"));
+        assert!(!script.contains("@('/P', '/UPDATE', '/R')"));
+        assert!(script.contains("Start-Process -FilePath $launchPath"));
     }
 }

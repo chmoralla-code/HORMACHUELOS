@@ -106,9 +106,18 @@
 .sb-project-section,
 .sb-project { display: none !important; }
 #header-project[hidden] { display: none !important; }
-/* Sessions list scrolls; usage block stays under it in the left drawer */
-.sidebar > .sb-section:has(.sb-recent) {
-  flex: 1 1 120px;
+/* The project and session lists share the flexible sidebar region. Their
+   headings remain visible while each individual list scrolls. */
+.sb-workspace-sections {
+  display: flex;
+  flex: 1 1 172px;
+  flex-direction: column;
+  min-height: 132px;
+  overflow: hidden;
+}
+.sb-workspace-sections > .sb-section { min-width: 0; }
+.sb-sessions-section {
+  flex: 1 1 92px;
   min-height: 72px;
   display: flex;
   flex-direction: column;
@@ -123,7 +132,23 @@
   margin-bottom: 6px;
 }
 
-.sb-actions { padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; }
+.sb-actions {
+  position: relative;
+  z-index: 10;
+  display: grid;
+  flex: 0 0 auto;
+  gap: 4px;
+  padding: 8px 10px;
+}
+#sidebar .sb-actions {
+  gap: 4px;
+  padding: 8px 10px;
+}
+#sidebar .sb-actions > .sb-action-menu > .sb-actions-toggle,
+#sidebar .sb-actions > .sb-update-action {
+  min-height: 35px;
+  padding: 7px 9px;
+}
 .sb-action {
   display: flex;
   align-items: center;
@@ -146,6 +171,72 @@
   white-space: nowrap;
 }
 .sb-action.active { background: var(--bg-3); color: var(--fg-0); }
+.sb-action-menu {
+  position: relative;
+  min-width: 0;
+}
+.sb-actions-toggle {
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.sb-actions-toggle::-webkit-details-marker { display: none; }
+.sb-actions-toggle::marker { content: ""; }
+.sb-action-menu-chevron {
+  display: inline-flex;
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--fg-4);
+  transition: transform var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.sb-action-menu[open] .sb-action-menu-chevron {
+  color: #aee3ff;
+  transform: rotate(180deg);
+}
+.sb-action-menu[open] .sb-actions-toggle {
+  color: #e9f8ff;
+  background: rgba(77, 164, 220, 0.12);
+  border-color: rgba(104, 192, 255, 0.24);
+}
+.sb-action-menu-panel {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 6px);
+  right: 0;
+  left: 0;
+  display: none;
+  gap: 2px;
+  padding: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: calc(var(--radius-sm) + 2px);
+  background: rgba(31, 31, 31, 0.98);
+  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.36);
+}
+.sb-action-menu[open] .sb-action-menu-panel { display: grid; }
+.sb-action-menu-panel .sb-action {
+  min-height: 34px;
+  padding: 7px 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--fg-1);
+}
+/* Override the existing first-action accent within the flyout only. */
+#sidebar .sb-action-menu-panel .sb-action:first-child {
+  border-color: transparent;
+  background: transparent;
+  color: var(--fg-1);
+}
+.sb-action-menu-panel .sb-action:hover,
+#sidebar .sb-action-menu-panel .sb-action:first-child:hover {
+  border-color: rgba(255, 255, 255, 0.11);
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--fg-0);
+}
+.sb-actions-toggle:focus-visible,
+.sb-action-menu-panel .sb-action:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
 .sb-update-action:hover svg {
   color: #72c8ff;
   opacity: 1;
@@ -195,9 +286,13 @@
 
 /* Persistent multi-project switcher — folders stay local and runs may continue in another project. */
 .sb-projects-section {
+  display: flex;
+  flex: 0 1 154px;
+  flex-direction: column;
+  min-height: 52px;
+  overflow: hidden;
   padding-top: 2px;
   padding-bottom: 4px;
-  flex: 0 0 auto;
 }
 .sb-projects-head { margin: 0 8px 6px 0; }
 .sb-add-project {
@@ -222,7 +317,9 @@
 }
 .sb-projects-list {
   display: grid;
+  flex: 1 1 auto;
   gap: 4px;
+  min-height: 0;
   max-height: 142px;
   overflow-y: auto;
   padding: 0 8px 4px 0;
@@ -343,6 +440,55 @@
   flex-direction: column;
   gap: 12px;
 }
+.update-version-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(114, 200, 255, 0.26);
+  border-radius: var(--radius-sm);
+  background: linear-gradient(90deg, rgba(49, 143, 214, 0.15), rgba(49, 143, 214, 0.04));
+}
+.update-version-cell {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+.update-version-cell.is-ready { text-align: right; }
+.update-version-label {
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.update-version-value {
+  overflow: hidden;
+  color: #e8f7ff;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  letter-spacing: 0.02em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.update-version-arrow {
+  color: #86d2ff;
+  font-family: var(--font-mono);
+  font-size: 16px;
+  line-height: 1;
+}
+.update-notes-group { display: grid; gap: 6px; }
+.update-section-label {
+  margin: 0;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
 .update-dialog-content .update-notes {
   max-height: min(28vh, 180px);
   overflow-y: auto;
@@ -383,8 +529,13 @@
   border-color: rgba(255, 106, 106, 0.34);
   background: rgba(180, 52, 52, 0.12);
 }
+@media (max-width: 460px) {
+  .update-version-summary { gap: 7px; padding: 9px 10px; }
+  .update-version-label { font-size: 8px; }
+  .update-version-value { font-size: 12px; }
+}
 
-.sb-recent { flex: 1; overflow-y: auto; padding: 0 8px 12px; }
+.sb-recent { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 0 8px 12px; }
 .sb-recent-item {
   padding: 6px 10px;
   border-radius: var(--radius-sm);
@@ -2227,11 +2378,11 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 .sb-usage-section {
-  margin-top: 4px;
-  padding: 0 12px 12px;
+  margin-top: 2px;
+  padding: 0 12px 8px;
   flex: 0 1 auto;
   min-height: 0;
   overflow-y: auto;
@@ -2244,8 +2395,8 @@
 .sb-usage {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 10px 12px;
+  gap: 8px;
+  padding: 9px 10px;
   border-radius: 10px;
   border: 1px solid rgba(255, 255, 255, 0.14);
   background: rgba(255, 255, 255, 0.05);
@@ -2255,7 +2406,7 @@
 .sb-usage-row {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 4px;
 }
 .sb-usage-row-head {
   display: flex;
@@ -2302,9 +2453,9 @@
 .sb-usage-sub {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding-bottom: 10px;
-  margin-bottom: 2px;
+  gap: 3px;
+  padding-bottom: 7px;
+  margin-bottom: 0;
   border-bottom: 1px solid rgba(255, 255, 255, 0.12);
 }
 .sb-usage-sub-top {
@@ -2385,9 +2536,9 @@
   background: rgba(120, 60, 60, 0.16);
 }
 .sb-usage-topup {
-  margin-top: 8px;
+  margin-top: 3px;
   width: 100%;
-  padding: 7px 8px;
+  padding: 6px 8px;
   border-radius: 8px;
   border: 1px solid rgba(255, 255, 255, 0.18);
   background: rgba(255, 255, 255, 0.08);
@@ -2509,16 +2660,27 @@
 }
 
 @media (max-height: 680px) {
-  .sb-brand { padding: 9px 12px; }
+  #sidebar .sb-brand { min-height: 50px; padding: 8px 12px; }
   .sb-actions {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
     gap: 3px;
     padding: 6px 8px;
   }
   .sb-action { padding: 6px 8px; }
-  .sidebar > .sb-section:has(.sb-recent) {
-    min-height: 86px;
+  .sb-workspace-sections { min-height: 110px; }
+  .sb-projects-section {
+    flex: 0 0 80px;
+    min-height: 56px;
+    padding-top: 0;
+  }
+  .sb-projects-list {
+    max-height: 104px;
+    gap: 3px;
+  }
+  .sb-project-workspace { padding: 5px 7px; }
+  .sb-sessions-section {
+    min-height: 64px;
     padding-top: 8px;
     padding-bottom: 4px;
   }
@@ -2532,9 +2694,13 @@
   .sb-usage { gap: 8px; padding: 8px 10px; }
   .sb-usage-sub { padding-bottom: 7px; }
   .sb-usage-topup { margin-top: 3px; padding-block: 6px; }
-  .sb-account-section { padding: 0 10px 8px; }
-  .sb-account { padding: 8px 10px; }
-  .sb-footer { padding: 7px 10px; }
+  .sb-account-section { padding: 0 10px 5px; }
+  .sb-account { padding: 7px 9px; }
+  .sb-account-row { gap: 7px; }
+  /* Keep the signed-in state available in short windows without letting its
+     optional explanatory line squeeze the session list out of view. */
+  .sb-account-meta { display: none; }
+  #sidebar .sb-footer { min-height: 36px; padding: 7px 10px; }
 }
 .template-grid {
   display: grid;

@@ -24,11 +24,11 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.10";
-const BUILTIN_MSI_SHA256 = "198cc74e4d180632b01122b7c588e7ed6ccc33ed3eb9b4dc99a22d804ecc9b59";
-const BUILTIN_EXE_SHA256 = "eced293e2826686f4d70ba317d8b3b559a35dbb227b56ec2c0007a50e0f9b724";
+const BUILTIN_RELEASE_VERSION = "0.1.11";
+const BUILTIN_MSI_SHA256 = "834e2a11509eead4117247735a11fd2999bd9c622c15ecfe554a070aeed0427a";
+const BUILTIN_EXE_SHA256 = "c92177a6de6f544d55d8bc145e3cb0b36398412708f30282134e028eef34b728";
 const BUILTIN_RELEASE_NOTES =
-  "Fixes the duplicated Update label and improves narrow-sidebar readability so update status, icons, labels, and version badges remain clear.";
+  "Keeps Projects, Sessions, and Usage readable in compact sidebars; moves setup controls into Workspace actions; and improves the in-app update and restart flow.";
 
 /**
  * A deployment-bundled release keeps the download/update path available even

@@ -6,6 +6,7 @@ from playwright.sync_api import expect, sync_playwright
 
 BASE_URL = "http://127.0.0.1:1420/update-harness.html"
 SCREENSHOT = Path(__file__).resolve().parents[1] / "test-results" / "update-button-available.png"
+DIALOG_SCREENSHOT = Path(__file__).resolve().parents[1] / "test-results" / "update-dialog-available.png"
 
 
 def main() -> None:
@@ -14,13 +15,36 @@ def main() -> None:
         page = browser.new_page(viewport={"width": 1000, "height": 760})
         page.goto(BASE_URL, wait_until="networkidle")
 
+        # Secondary project controls are collapsed so the project, session,
+        # and usage panels have permanent room in the sidebar. The update
+        # action must remain directly visible.
+        workspace_actions = page.locator("summary.sb-actions-toggle")
+        expect(workspace_actions).to_be_visible()
+        assert workspace_actions.inner_text() == "Workspace actions"
+        assert not page.get_by_role("button", name="New Build", exact=True).is_visible()
+        for selector in [
+            ".sb-projects-section .sb-section-label",
+            ".sb-sessions-section .sb-section-label",
+            ".sb-usage-section .sb-section-label",
+        ]:
+            expect(page.locator(selector)).to_be_visible()
+
         update_button = page.get_by_role(
             "button", name="Update available: v0.1.5. Install and restart", exact=True
         )
         update_button.wait_for(state="visible")
+        workspace_actions.click()
+        for name in ["New Build", "Open Project", "Client Pack", "Settings"]:
+            expect(page.get_by_role("button", name=name, exact=True)).to_be_visible()
+        expect(update_button).to_be_visible()
+        assert update_button.evaluate(
+            "button => { const r = button.getBoundingClientRect(); const top = document.elementFromPoint(r.left + 8, r.top + 8); return top === button || button.contains(top); }"
+        )
+        page.get_by_role("button", name="Settings", exact=True).click()
+        assert not page.locator(".sb-action-menu").evaluate("menu => menu.open")
         assert update_button.get_attribute("data-update-available") == "true"
         assert update_button.locator(".sb-action-label").count() == 1
-        assert update_button.locator(".sb-action-label").inner_text() == "Update available"
+        assert update_button.locator(".sb-action-label").inner_text() == "Update"
         assert update_button.locator(".ico svg").count() == 1
         assert update_button.locator(".sb-update-badge").inner_text() == "NEW · v0.1.5"
         SCREENSHOT.parent.mkdir(parents=True, exist_ok=True)
@@ -29,6 +53,7 @@ def main() -> None:
 
         dialog = page.get_by_role("dialog", name="Update available")
         dialog.wait_for(state="visible")
+        dialog.screenshot(path=str(DIALOG_SCREENSHOT))
         app = page.locator("#app")
         close_button = dialog.get_by_role("button", name="Close update checker")
         not_now_button = dialog.get_by_role("button", name="Not now")
@@ -43,6 +68,16 @@ def main() -> None:
         page.locator("#background-action").evaluate("button => button.focus()")
         assert dialog.evaluate("node => node.contains(document.activeElement)")
         assert "Added the in-app Update button." in dialog.inner_text()
+        assert dialog.locator(".update-version-summary").count() == 1
+        assert dialog.locator(".update-version-label").all_text_contents() == [
+            "Installed", "Ready to install"
+        ]
+        assert dialog.locator(".update-version-value").all_text_contents() == [
+            "v0.1.4", "v0.1.5"
+        ]
+        notes_group = dialog.locator(".update-notes-group")
+        assert notes_group.count() == 1
+        assert "Added the in-app Update button." in notes_group.inner_text()
         assert "Sessions, projects, settings, and account data stay" in dialog.inner_text()
         not_now_button.click()
         assert dialog.count() == 0
@@ -90,7 +125,27 @@ def main() -> None:
         assert page.locator("body").get_attribute("data-installed-sha256") == "a" * 64
         backup = json.loads(page.locator("body").get_attribute("data-update-backup"))
         assert backup["entries"]["ai-forge:test-update-state"] == "preserved"
-        expect(install_dialog.locator(".update-install-status")).to_contain_text("restarting")
+        expect(install_dialog.locator(".update-install-status")).to_contain_text("restart automatically")
+
+        # The compact-height layout must retain one readable project and
+        # session row as well as the usage tracker. This mirrors a client
+        # resizing the desktop window without hiding core workspace state.
+        compact_page = browser.new_page(viewport={"width": 1000, "height": 600})
+        compact_page.goto(BASE_URL, wait_until="networkidle")
+        for selector in [
+            ".sb-projects-section",
+            ".sb-sessions-section",
+            ".sb-usage-section",
+            ".sb-update-action",
+        ]:
+            expect(compact_page.locator(selector)).to_be_visible()
+        assert compact_page.locator(".sb-recent").evaluate(
+            "node => node.getBoundingClientRect().height >= 30"
+        )
+        assert compact_page.locator(".sb-projects-list").evaluate(
+            "node => node.getBoundingClientRect().height >= 30"
+        )
+        compact_page.close()
 
         browser.close()
 

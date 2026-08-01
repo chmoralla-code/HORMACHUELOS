@@ -104,21 +104,23 @@ export class Sidebar {
       `<div class="sb-logo">H</div><div class="sb-title">Hormachuelos</div><div class="sb-version">v${version}</div>`));
 
     const actions = el("div", { class: "sb-actions" });
-    actions.appendChild(this.actionBtn("new", "New Build", this.onNewProject));
-    actions.appendChild(this.actionBtn("open", "Open Project", this.onOpenProject));
-    actions.appendChild(this.actionBtn("export", "Client Pack", this.onExportClientPack));
-    actions.appendChild(this.actionBtn("settings", "Settings", this.onOpenSettings));
     const updateBtn = this.actionBtn("refresh", "Update", this.onCheckForUpdates);
     updateBtn.classList.add("sb-update-action");
     this.updateButton = updateBtn;
     this.paintUpdateNotification();
     actions.appendChild(updateBtn);
+    // Keep the workspace list as the primary part of the sidebar. Less
+    // frequent setup actions live in a compact, keyboard-accessible menu so
+    // projects, sessions, and usage do not get pushed below the fold. The
+    // update control remains above it, so it is never hidden by the menu.
+    actions.appendChild(this.buildWorkspaceActionsMenu());
     this.node.appendChild(actions);
 
-    this.node.appendChild(this.buildProjectsSection());
+    const workspaceSections = el("div", { class: "sb-workspace-sections" });
+    workspaceSections.appendChild(this.buildProjectsSection());
 
     // Sessions section
-    const sessionSection = el("div", { class: "sb-section" });
+    const sessionSection = el("div", { class: "sb-section sb-sessions-section" });
     const sessionHeader = el("div", { class: "sb-section-row" });
     sessionHeader.appendChild(el("div", { class: "sb-section-label" }, ["Sessions"]));
     const sessionActions = el("div", { class: "sb-session-actions" });
@@ -205,7 +207,8 @@ export class Sidebar {
       }
     }
     sessionSection.appendChild(sessionList);
-    this.node.appendChild(sessionSection);
+    workspaceSections.appendChild(sessionSection);
+    this.node.appendChild(workspaceSections);
 
     // Usage limit — below sessions in the left sandwich drawer
     this.node.appendChild(this.buildUsageSection());
@@ -253,7 +256,7 @@ export class Sidebar {
     }
 
     const versionLabel = this.updateVersion ? `v${this.updateVersion}` : "New";
-    if (label) label.textContent = "Update available";
+    if (label) label.textContent = "Update";
     button.setAttribute("aria-label", `Update available: ${versionLabel}. Install and restart`);
     button.setAttribute("title", `Install ${versionLabel} inside Hormachuelos and restart`);
     button.appendChild(
@@ -611,6 +614,66 @@ export class Sidebar {
     }) as HTMLButtonElement;
     btn.addEventListener("click", onClick);
     return btn;
+  }
+
+  /**
+   * Collapsible secondary workspace controls.  The update control intentionally
+   * stays outside this menu: it must remain visible whenever a release is ready.
+   */
+  private buildWorkspaceActionsMenu(): HTMLDetailsElement {
+    const menu = el("details", { class: "sb-action-menu" }) as HTMLDetailsElement;
+    const toggle = el("summary", {
+      class: "sb-action sb-actions-toggle",
+      title: "Show workspace actions",
+      "aria-label": "Workspace actions",
+      "aria-expanded": "false",
+      html:
+        icon("menu") +
+        '<span class="sb-action-label">Workspace actions</span>' +
+        `<span class="sb-action-menu-chevron">${icon("chevronDown", 13)}</span>`,
+    });
+    const panel = el("div", {
+      class: "sb-action-menu-panel",
+      role: "group",
+      "aria-label": "Workspace actions",
+    });
+
+    const addAction = (
+      iconName: "new" | "open" | "settings" | "export",
+      label: string,
+      onClick: () => void,
+    ) => {
+      const action = this.actionBtn(iconName, label, () => {
+        // Close before a picker or dialog receives focus, keeping the sidebar
+        // clean when the user returns to their workspace.
+        menu.open = false;
+        onClick();
+      });
+      action.classList.add("sb-menu-action");
+      panel.appendChild(action);
+    };
+
+    addAction("new", "New Build", this.onNewProject);
+    addAction("open", "Open Project", this.onOpenProject);
+    addAction("export", "Client Pack", this.onExportClientPack);
+    addAction("settings", "Settings", this.onOpenSettings);
+
+    const updateToggleState = () => {
+      const open = menu.open;
+      toggle.setAttribute("aria-expanded", String(open));
+      toggle.setAttribute("title", open ? "Hide workspace actions" : "Show workspace actions");
+    };
+    menu.addEventListener("toggle", updateToggleState);
+    menu.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" || !menu.open) return;
+      event.preventDefault();
+      menu.open = false;
+      (toggle as HTMLElement).focus();
+    });
+
+    menu.appendChild(toggle);
+    menu.appendChild(panel);
+    return menu;
   }
 
   /** Inline rename: replace title with an input, commit on Enter/blur. */
