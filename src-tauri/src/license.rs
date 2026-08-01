@@ -263,10 +263,12 @@ pub fn should_use_hosted(status: &LicenseStatus) -> bool {
 }
 
 /// Whether a selected provider should be routed through the hosted proxy.
-/// Ollama must always use its configured local host: that host is also the
-/// authenticated bridge for Ollama Cloud models such as `glm-5.2:cloud`.
+/// Ollama always uses its configured local host. Cursor always uses its local
+/// SDK because Cursor model ids are not OpenAI-compatible proxy model ids.
 pub fn should_use_hosted_for_provider(status: &LicenseStatus, provider: &str) -> bool {
-    !provider.eq_ignore_ascii_case("ollama") && should_use_hosted(status)
+    !provider.eq_ignore_ascii_case("ollama")
+        && !provider.eq_ignore_ascii_case("cursor")
+        && should_use_hosted(status)
 }
 
 impl LicenseStatus {
@@ -748,6 +750,14 @@ mod tests {
         assert!(should_use_hosted(&status));
         assert!(!should_use_hosted_for_provider(&status, "ollama"));
         assert!(!should_use_hosted_for_provider(&status, "OLLAMA"));
+    }
+
+    #[test]
+    fn cursor_always_uses_its_local_sdk() {
+        let status = hosted_pro_status();
+        assert!(should_use_hosted(&status));
+        assert!(!should_use_hosted_for_provider(&status, "cursor"));
+        assert!(!should_use_hosted_for_provider(&status, "CURSOR"));
     }
 
     #[test]

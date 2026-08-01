@@ -241,18 +241,26 @@ export class Sidebar {
     button.querySelector(".sb-update-badge")?.remove();
     button.classList.toggle("has-update", this.updateAvailable);
     button.dataset.updateAvailable = this.updateAvailable ? "true" : "false";
+    const label = button.querySelector<HTMLElement>(":scope > span");
 
     if (!this.updateAvailable) {
+      if (label) label.textContent = "Update";
       button.removeAttribute("aria-label");
       button.setAttribute("title", "Check for updates");
       return;
     }
 
     const versionLabel = this.updateVersion ? `v${this.updateVersion}` : "New";
-    button.setAttribute("aria-label", `Update available: ${versionLabel}. Check for updates`);
-    button.setAttribute("title", `Update available: ${versionLabel}`);
+    if (label) label.textContent = "Update available";
+    button.setAttribute("aria-label", `Update available: ${versionLabel}. Install and restart`);
+    button.setAttribute("title", `Install ${versionLabel} inside Hormachuelos and restart`);
     button.appendChild(
-      el("span", { class: "sb-update-badge", "aria-hidden": "true" }, [versionLabel]),
+      el("span", {
+        class: "sb-update-badge",
+        role: "status",
+        "aria-live": "polite",
+        "aria-label": `New software update ${versionLabel}`,
+      }, [`NEW · ${versionLabel}`]),
     );
   }
 

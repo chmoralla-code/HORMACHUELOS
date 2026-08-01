@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
@@ -14,11 +15,11 @@ def main() -> None:
         page.goto(BASE_URL, wait_until="networkidle")
 
         update_button = page.get_by_role(
-            "button", name="Update available: v0.1.5. Check for updates", exact=True
+            "button", name="Update available: v0.1.5. Install and restart", exact=True
         )
         update_button.wait_for(state="visible")
         assert update_button.get_attribute("data-update-available") == "true"
-        assert update_button.locator(".sb-update-badge").inner_text() == "v0.1.5"
+        assert update_button.locator(".sb-update-badge").inner_text() == "NEW · v0.1.5"
         SCREENSHOT.parent.mkdir(parents=True, exist_ok=True)
         page.screenshot(path=str(SCREENSHOT), full_page=True)
         update_button.click()
@@ -39,10 +40,7 @@ def main() -> None:
         page.locator("#background-action").evaluate("button => button.focus()")
         assert dialog.evaluate("node => node.contains(document.activeElement)")
         assert "Added the in-app Update button." in dialog.inner_text()
-        dialog.get_by_role("button", name="Download v0.1.5").click()
-        assert page.locator("body").get_attribute("data-opened-url") == (
-            "https://downloads.example/Hormachuelos_0.1.5.msi"
-        )
+        assert "Sessions, projects, settings, and account data stay" in dialog.inner_text()
         not_now_button.click()
         assert dialog.count() == 0
         assert not app.evaluate("node => node.inert")
@@ -70,6 +68,26 @@ def main() -> None:
         retried_dialog.get_by_role("button", name="Done").click()
         assert not app.evaluate("node => node.inert")
         expect(update_button).to_be_focused()
+
+        page.evaluate("""
+          window.__updateMode = 'available';
+          localStorage.setItem('ai-forge:test-update-state', 'preserved');
+        """)
+        update_button.click()
+        install_dialog = page.get_by_role("dialog", name="Update available")
+        install_dialog.wait_for(state="visible")
+        install_dialog.get_by_role(
+            "button", name="Install v0.1.5 and restart", exact=True
+        ).click()
+        page.wait_for_function("document.body.dataset.installedVersion === '0.1.5'")
+        assert page.locator("body").get_attribute("data-installed-url") == (
+            "https://hormachuelos.vercel.app/downloads/"
+            "Hormachuelos_0.1.5_x64-setup.exe"
+        )
+        assert page.locator("body").get_attribute("data-installed-sha256") == "a" * 64
+        backup = json.loads(page.locator("body").get_attribute("data-update-backup"))
+        assert backup["entries"]["ai-forge:test-update-state"] == "preserved"
+        expect(install_dialog.locator(".update-install-status")).to_contain_text("restarting")
 
         browser.close()
 

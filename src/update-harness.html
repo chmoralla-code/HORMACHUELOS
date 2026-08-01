@@ -28,6 +28,14 @@
       api.openExternalUrl = async (url) => {
         document.body.dataset.openedUrl = url;
       };
+      api.saveUpdateBackup = async (stateJson) => {
+        document.body.dataset.updateBackup = stateJson;
+      };
+      api.installAppUpdate = async (downloadUrl, version, sha256) => {
+        document.body.dataset.installedUrl = downloadUrl;
+        document.body.dataset.installedVersion = version;
+        document.body.dataset.installedSha256 = sha256;
+      };
       window.fetch = async () => {
         if (window.__updateMode === "error") {
           return new Response(JSON.stringify({ error: "offline" }), {
@@ -44,8 +52,10 @@
             version: "0.1.5",
             title: "Hormachuelos 0.1.5",
             whatsNew: "Added the in-app Update button.",
-            msiUrl: "https://downloads.example/Hormachuelos_0.1.5.msi",
-            exeUrl: "https://downloads.example/Hormachuelos_0.1.5.exe",
+            msiUrl: "https://hormachuelos.vercel.app/downloads/Hormachuelos_0.1.5_x64_en-US.msi",
+            exeUrl: "https://hormachuelos.vercel.app/downloads/Hormachuelos_0.1.5_x64-setup.exe",
+            msiSha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            exeSha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           } : null,
         }), { status: 200, headers: { "Content-Type": "application/json" } });
       };

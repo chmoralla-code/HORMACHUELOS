@@ -412,12 +412,13 @@ pub async fn run_loop(
     }
 
     // Cursor Cloud API has no /chat/completions — use the local Cursor SDK agent.
-    // Hosted plans route through the OpenAI-compatible proxy instead (OpenRouter).
-    let license_preview = crate::license::LicenseStatus::load().unwrap_or_default();
-    if uses_cursor_sdk(&settings.provider) && !crate::license::should_use_hosted(&license_preview) {
+    // Cursor model ids are served only by the local Cursor SDK. They are not
+    // OpenAI-compatible ids and must never be forwarded to the hosted chat
+    // proxy, even when the signed-in account has hosted credits.
+    if uses_cursor_sdk(&settings.provider) {
         let key = crate::config::load_cursor_sdk_api_key(&settings.provider).map_err(|e| {
             anyhow::anyhow!(
-                "No API key for '{}': {}. Save a Cursor API key (crsr_…) in Settings, or activate a hosted plan.",
+                "No API key for '{}': {}. Save a Cursor API key (crsr_…) in Settings.",
                 settings.provider,
                 e
             )

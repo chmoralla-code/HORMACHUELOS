@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod app_updater;
 pub mod computer_fx;
 pub mod computer_use;
 pub mod config;
@@ -203,6 +204,60 @@ async fn test_provider_connection(
     }
 
     let started = std::time::Instant::now();
+    if provider.eq_ignore_ascii_case("cursor") {
+        let key = match config::load_cursor_sdk_api_key("cursor") {
+            Ok(key) => key,
+            Err(_) => {
+                return Ok(ConnectionTestResult {
+                    ok: false,
+                    latency_ms: started.elapsed().as_millis(),
+                    error_code: Some("missing_api_key".into()),
+                    message: "Save a Cursor API key for OpenAI models first.".into(),
+                });
+            }
+        };
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            cursor_bridge::list_cursor_models(&key),
+        )
+        .await;
+        let latency_ms = started.elapsed().as_millis();
+        return match result {
+            Ok(Ok(models)) if models.iter().any(|id| id.eq_ignore_ascii_case(model.trim())) => {
+                Ok(ConnectionTestResult {
+                    ok: true,
+                    latency_ms,
+                    error_code: None,
+                    message: format!(
+                        "Connected to {} through the Cursor SDK in {} ms.",
+                        model.trim(),
+                        latency_ms
+                    ),
+                })
+            }
+            Ok(Ok(_)) => Ok(ConnectionTestResult {
+                ok: false,
+                latency_ms,
+                error_code: Some("model_unavailable".into()),
+                message: format!(
+                    "The Cursor account does not currently provide model '{}'. Refresh models or select another model.",
+                    model.trim()
+                ),
+            }),
+            Ok(Err(error)) => Ok(ConnectionTestResult {
+                ok: false,
+                latency_ms,
+                error_code: Some("provider_error".into()),
+                message: format!("Cursor SDK connection failed: {error}"),
+            }),
+            Err(_) => Ok(ConnectionTestResult {
+                ok: false,
+                latency_ms,
+                error_code: Some("provider_timeout".into()),
+                message: "The Cursor SDK did not respond within 20 seconds.".into(),
+            }),
+        };
+    }
     let is_hormachuelos_free = provider.eq_ignore_ascii_case("hormachuelos_free");
     let effective_base_url = if is_hormachuelos_free {
         Some(license::hosted_chat_base_url())
@@ -315,15 +370,15 @@ async fn list_provider_models(
         }
         return Ok(model_ids);
     }
-    let license = license::LicenseStatus::load().unwrap_or_default();
-    let use_hosted = license::should_use_hosted_for_provider(&license, &provider);
-    if provider.eq_ignore_ascii_case("cursor") && !use_hosted {
+    if provider.eq_ignore_ascii_case("cursor") {
         let key = config::load_cursor_sdk_api_key("cursor")
             .map_err(|_| "Save a Cursor / OpenAI key before refreshing models.".to_string())?;
         return cursor_bridge::list_cursor_models(&key)
             .await
             .map_err(|e| e.to_string());
     }
+    let license = license::LicenseStatus::load().unwrap_or_default();
+    let use_hosted = license::should_use_hosted_for_provider(&license, &provider);
     let (key, base_url) = if use_hosted {
         (license.license_key.clone(), license::hosted_chat_base_url())
     } else {
@@ -786,6 +841,10 @@ pub fn run() {
         .manage(state::AppState::new())
         .invoke_handler(tauri::generate_handler![
             get_project_root,
+            app_updater::save_update_backup,
+            app_updater::load_update_backup,
+            app_updater::clear_update_backup,
+            app_updater::install_app_update,
             set_project_root,
             list_recent_projects,
             get_settings,

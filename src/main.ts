@@ -15,7 +15,12 @@ import {
   showAuthGate,
   type WebsiteAccount,
 } from "./components/auth-gate";
-import { checkDesktopUpdate, showUpdateDialog, showUpdateGate } from "./components/update-gate";
+import {
+  checkDesktopUpdate,
+  restoreUpdateState,
+  showUpdateDialog,
+  showUpdateGate,
+} from "./components/update-gate";
 import { basename, clear, div, el, speakDoneWorking } from "./components/util";
 import {
   activeProjectWorkspacePath,
@@ -24,7 +29,8 @@ import {
   rememberRecentProjectWorkspaces,
 } from "./components/projects";
 import {
-  loadSessions, saveSession, scheduleSessionSave, flushSessionSaves,
+  loadSessions, saveSession, saveSessionForUpdate, scheduleSessionSave,
+  flushSessionSaves, flushSessionSavesForUpdate,
   deleteSession, deleteAllSessions, newSessionId, sessionTitle,
   recordAgentEvent, buildLlmHistory, redactChatCredentials, addSessionTokens, SESSION_TOKEN_BUDGET,
   type Session,
@@ -284,6 +290,21 @@ function persistCurrentSession(deferred = false) {
   s.messages = chat.getMessages();
   if (deferred) scheduleSessionSave(s);
   else saveSession(s);
+}
+
+function prepareForAppUpdate() {
+  if (runningSessions.size > 0) {
+    throw new Error("Stop active AI runs before updating so their latest work can be saved safely.");
+  }
+  if (activeSessionId && currentProjectPath) {
+    const session = sessions.find((candidate) => candidate.id === activeSessionId);
+    if (session) {
+      sessionRegistry.set(session.id, session);
+      session.messages = chat.getMessages();
+      saveSessionForUpdate(session);
+    }
+  }
+  flushSessionSavesForUpdate();
 }
 
 /** Tokens already used across all sessions in this project. */
@@ -1299,6 +1320,15 @@ function handleAgentEvent(e: AgentEvent) {
 }
 
 async function init() {
+  let restoredUpdateKeys = 0;
+  try {
+    restoredUpdateKeys = await restoreUpdateState();
+  } catch (error) {
+    console.warn("Pre-update backup is retained because restoration did not complete.", error);
+  }
+  if (restoredUpdateKeys > 0) {
+    console.info(`Restored ${restoredUpdateKeys} persisted value(s) after the app update.`);
+  }
   // Sandwich buttons are in HTML — bind them and restore open/closed state first
   bindDrawerButtons();
 
@@ -1427,7 +1457,9 @@ async function init() {
     onSelectProject: (path) => void selectProject(path).catch((error) => reportError(String(error))),
     onAddAnotherProject: openNewProjectPicker,
     onOpenSettings: openSettings,
-    onCheckForUpdates: () => document.body.appendChild(showUpdateDialog()),
+    onCheckForUpdates: () => document.body.appendChild(showUpdateDialog({
+      beforeInstall: prepareForAppUpdate,
+    })),
     onNewSession: createNewSession,
     onSelectSession: switchSession,
     onDeleteSession: removeSession,
@@ -1451,7 +1483,9 @@ async function init() {
       sidebar.setUpdateNotification(available, update.latest?.version);
       if (update.forceUpdate && update.latest && !forcedUpdateGateVisible) {
         forcedUpdateGateVisible = true;
-        document.body.appendChild(showUpdateGate(update));
+        document.body.appendChild(showUpdateGate(update, {
+          beforeInstall: prepareForAppUpdate,
+        }));
         return true;
       }
     } catch (e) {
@@ -1464,7 +1498,13 @@ async function init() {
   if (await refreshUpdateNotification()) return;
   window.setInterval(() => {
     void refreshUpdateNotification();
-  }, 30 * 60 * 1000);
+  }, 15 * 60 * 1000);
+  window.addEventListener("online", () => {
+    void refreshUpdateNotification();
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") void refreshUpdateNotification();
+  });
 
   // Website account required — desktop signs in automatically after browser login/signup.
   websiteUser = await ensureWebsiteSession().catch(() => null);

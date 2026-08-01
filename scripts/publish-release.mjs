@@ -19,6 +19,7 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync, copyFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -84,6 +85,15 @@ function setJsonVersion(path, version) {
   console.log(`updated ${path}`);
 }
 
+function setLockfileVersion(path, version) {
+  if (!existsSync(path)) return;
+  const lock = JSON.parse(readFileSync(path, "utf8"));
+  lock.version = version;
+  if (lock.packages?.[""]) lock.packages[""].version = version;
+  writeFileSync(path, `${JSON.stringify(lock, null, 2)}\n`);
+  console.log(`updated ${path}`);
+}
+
 function setCargoVersion(path, version) {
   let text = readFileSync(path, "utf8");
   if (!/^version\s*=\s*"/m.test(text)) die(`No version field in ${path}`);
@@ -94,10 +104,12 @@ function setCargoVersion(path, version) {
 
 function bumpVersions(version) {
   setJsonVersion(join(ROOT, "package.json"), version);
+  setLockfileVersion(join(ROOT, "package-lock.json"), version);
   setJsonVersion(join(ROOT, "src-tauri", "tauri.conf.json"), version);
   setCargoVersion(join(ROOT, "src-tauri", "Cargo.toml"), version);
   const webPkg = join(ROOT, "website", "package.json");
   if (existsSync(webPkg)) setJsonVersion(webPkg, version);
+  setLockfileVersion(join(ROOT, "website", "package-lock.json"), version);
 
   // Fallback download labels on the marketing site (API latest release is preferred).
   const appJs = join(ROOT, "website", "js", "app.js");
@@ -154,17 +166,41 @@ function installerPaths(version) {
   return { msiName, exeName, msi, exe };
 }
 
+function sha256File(path) {
+  if (!existsSync(path)) die(`Missing installer: ${path}`);
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+function updateBundledReleaseHashes(msiSha256, exeSha256) {
+  const releasesJs = join(ROOT, "website", "api", "_lib", "releases.js");
+  if (!existsSync(releasesJs)) return;
+  let src = readFileSync(releasesJs, "utf8");
+  src = src.replace(
+    /const BUILTIN_MSI_SHA256 = "[a-f0-9]{64}";/,
+    `const BUILTIN_MSI_SHA256 = "${msiSha256}";`,
+  );
+  src = src.replace(
+    /const BUILTIN_EXE_SHA256 = "[a-f0-9]{64}";/,
+    `const BUILTIN_EXE_SHA256 = "${exeSha256}";`,
+  );
+  writeFileSync(releasesJs, src);
+  console.log(`updated installer checksums in ${releasesJs}`);
+}
+
 async function resolveServiceKey() {
-  if (process.env.SUPABASE_SERVICE_ROLE_KEY && process.env.SUPABASE_URL) {
+  const configuredUrl = process.env.SUPABASE_URL || process.env.HORMACHUELOS_SUPABASE_URL;
+  const configuredService =
+    process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.HORMACHUELOS_SERVICE_ROLE;
+  if (configuredService && configuredUrl) {
     return {
-      url: process.env.SUPABASE_URL.replace(/\/$/, ""),
-      service: process.env.SUPABASE_SERVICE_ROLE_KEY,
+      url: configuredUrl.replace(/\/$/, ""),
+      service: configuredService,
     };
   }
   const token = process.env.SUPABASE_ACCESS_TOKEN;
   if (!token) {
     die(
-      "Set SUPABASE_ACCESS_TOKEN (or SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY) to upload installers.",
+      "Set SUPABASE_ACCESS_TOKEN or the configured Supabase URL/service-role environment variables to upload installers.",
     );
   }
   const res = await fetch(`https://api.supabase.com/v1/projects/${PROJECT_REF}/api-keys`, {
@@ -199,7 +235,32 @@ async function uploadFile(url, service, localPath, objectPath) {
   console.log(`OK ${ASSET_PUBLIC}/${objectPath}`);
 }
 
-async function publishRelease({ version, title, notes, force, msiUrl, exeUrl }) {
+async function assertChecksumAwareReleaseApi() {
+  const response = await fetch(`${SITE_URL}/api/update?current=0.0.0`, {
+    headers: { Accept: "application/json" },
+  });
+  const body = await response.json().catch(() => ({}));
+  const latest = body?.latest;
+  const hasChecksumFields = latest
+    && Object.prototype.hasOwnProperty.call(latest, "msiSha256")
+    && Object.prototype.hasOwnProperty.call(latest, "exeSha256");
+  if (!response.ok || !hasChecksumFields) {
+    die(
+      "The live website API does not support installer checksums yet. Deploy the checksum-aware API and apply the release checksum migration before publishing.",
+    );
+  }
+}
+
+async function publishRelease({
+  version,
+  title,
+  notes,
+  force,
+  msiUrl,
+  exeUrl,
+  msiSha256,
+  exeSha256,
+}) {
   const username = process.env.ADMIN_USERNAME || "admin";
   const password = process.env.ADMIN_PASSWORD || "admin123";
   const login = await fetch(`${SITE_URL}/api/admin/login`, {
@@ -223,20 +284,29 @@ async function publishRelease({ version, title, notes, force, msiUrl, exeUrl }) 
       whatsNew: notes,
       msiUrl,
       exeUrl,
+      msiSha256,
+      exeSha256,
       forceUpdate: force,
       isLatest: true,
     }),
   });
   const pubBody = await pub.json().catch(() => ({}));
   if (!pub.ok) die(`Publish failed: ${pubBody.error || pub.status}`);
+  const release = pubBody.release || {};
+  if (
+    String(release.msiSha256 || "").toLowerCase() !== msiSha256
+    || String(release.exeSha256 || "").toLowerCase() !== exeSha256
+  ) {
+    die("The release API did not persist the installer checksums. The release is not safe to announce.");
+  }
   console.log(`Published release v${version} (force=${force})`);
   console.log(`Update page: ${SITE_URL}/#/update`);
-  return pubBody.release;
+  return release;
 }
 
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
-  if (!/^\d+\.\d+\.\d+/.test(opts.version)) {
+  if (!/^\d+\.\d+\.\d+$/.test(opts.version)) {
     die('Pass a version like: npm run release -- 0.1.1 --notes "What\'s new"');
   }
   if (opts.notesFile) {
@@ -253,6 +323,8 @@ async function main() {
   console.log(`Force update: ${opts.force}`);
   console.log(`Site: ${SITE_URL}`);
 
+  if (!opts.skipPublish) await assertChecksumAwareReleaseApi();
+
   bumpVersions(opts.version);
 
   if (!opts.skipBuild) {
@@ -262,6 +334,9 @@ async function main() {
   }
 
   const paths = installerPaths(opts.version);
+  const msiSha256 = sha256File(paths.msi);
+  const exeSha256 = sha256File(paths.exe);
+  updateBundledReleaseHashes(msiSha256, exeSha256);
   const downloadsDir = join(ROOT, "website", "downloads");
   mkdirSync(downloadsDir, { recursive: true });
   if (existsSync(paths.msi)) copyFileSync(paths.msi, join(downloadsDir, paths.msiName));
@@ -286,6 +361,8 @@ async function main() {
       force: opts.force,
       msiUrl,
       exeUrl,
+      msiSha256,
+      exeSha256,
     });
   } else {
     console.log("Skipping publish (--skip-publish)");

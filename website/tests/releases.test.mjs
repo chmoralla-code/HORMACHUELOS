@@ -6,7 +6,8 @@ import {
   effectiveLatestRelease,
 } from "../api/_lib/releases.js";
 
-test("bundled v0.1.8 release supersedes an older database release", () => {
+test("bundled release supersedes an older database release", () => {
+  const builtin = builtinLatestRelease();
   const release = effectiveLatestRelease({
     id: "database-v0.1.5",
     version: "0.1.5",
@@ -18,14 +19,17 @@ test("bundled v0.1.8 release supersedes an older database release", () => {
     is_latest: true,
     published_at: "2026-07-31T00:00:00.000Z",
   });
-  assert.equal(release.version, "0.1.8");
-  assert.match(release.msiUrl, /\/downloads\/Hormachuelos_0\.1\.8_x64_en-US\.msi$/);
+  assert.equal(release.version, builtin.version);
+  assert.equal(release.msiUrl, builtin.msiUrl);
+  assert.match(release.msiSha256, /^[a-f0-9]{64}$/);
+  assert.match(release.exeSha256, /^[a-f0-9]{64}$/);
 });
 
 test("database releases remain authoritative at the same or newer version", () => {
+  const builtin = builtinLatestRelease();
   const release = effectiveLatestRelease({
-    id: "database-v0.1.8",
-    version: "0.1.8",
+    id: `database-v${builtin.version}`,
+    version: builtin.version,
     title: "Admin release",
     whats_new: "Admin-managed notes",
     msi_url: "https://example.com/admin.msi",
@@ -34,12 +38,12 @@ test("database releases remain authoritative at the same or newer version", () =
     is_latest: true,
     published_at: "2026-08-01T15:00:00.000Z",
   });
-  assert.equal(release.id, "database-v0.1.8");
+  assert.equal(release.id, `database-v${builtin.version}`);
   assert.equal(release.msiUrl, "https://example.com/admin.msi");
 });
 
 test("bundled release never exposes a credential", () => {
   const release = builtinLatestRelease();
-  assert.equal(release.version, "0.1.8");
+  assert.match(release.version, /^\d+\.\d+\.\d+$/);
   assert.equal(JSON.stringify(release).includes("sk-"), false);
 });

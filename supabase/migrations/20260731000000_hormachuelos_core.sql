@@ -1,4 +1,4 @@
-﻿-- Hormachuelos profiles + orders (applied remotely 2026-07-31)
+-- Hormachuelos profiles + orders (applied remotely 2026-07-31)
 create extension if not exists "pgcrypto";
 
 create table if not exists public.profiles (

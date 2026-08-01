@@ -226,7 +226,7 @@ function safeSessionForStorage(session: Session): Session {
 }
 
 /** Write one or more sessions with a single parse/stringify/localStorage cycle. */
-function writeSessions(nextSessions: Iterable<Session>): void {
+function writeSessions(nextSessions: Iterable<Session>): boolean {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     const all: Session[] = raw ? JSON.parse(raw) : [];
@@ -237,8 +237,9 @@ function writeSessions(nextSessions: Iterable<Session>): void {
       else all.push(safeSession);
     }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(all));
+    return true;
   } catch {
-    // storage full or unavailable — non-fatal
+    return false;
   }
 }
 
@@ -252,7 +253,16 @@ function clearSessionSaveTimerIfIdle(): void {
 export function saveSession(session: Session): void {
   pendingSessionSaves.delete(session.id);
   clearSessionSaveTimerIfIdle();
-  writeSessions([session]);
+  if (!writeSessions([session])) pendingSessionSaves.set(session.id, session);
+}
+
+/** Persist synchronously or block an update rather than claiming data is safe. */
+export function saveSessionForUpdate(session: Session): void {
+  pendingSessionSaves.delete(session.id);
+  clearSessionSaveTimerIfIdle();
+  if (writeSessions([session])) return;
+  pendingSessionSaves.set(session.id, session);
+  throw new Error("Session storage is unavailable or full. Free some disk space, then try updating again.");
 }
 
 /** Debounced persistence for high-frequency streamed text/reasoning events. */
@@ -272,8 +282,22 @@ export function flushSessionSaves(): void {
   }
   if (pendingSessionSaves.size === 0) return;
   const queued = [...pendingSessionSaves.values()];
-  pendingSessionSaves.clear();
-  writeSessions(queued);
+  if (!writeSessions(queued)) return;
+  for (const session of queued) pendingSessionSaves.delete(session.id);
+}
+
+/** Flush every queued session or abort the update with a visible error. */
+export function flushSessionSavesForUpdate(): void {
+  if (sessionSaveTimer !== null) {
+    clearTimeout(sessionSaveTimer);
+    sessionSaveTimer = null;
+  }
+  if (pendingSessionSaves.size === 0) return;
+  const queued = [...pendingSessionSaves.values()];
+  if (!writeSessions(queued)) {
+    throw new Error("Queued session data could not be saved. Free some disk space, then try updating again.");
+  }
+  for (const session of queued) pendingSessionSaves.delete(session.id);
 }
 
 export function deleteSession(id: string): void {

@@ -16,17 +16,17 @@ const ASSET_BASE =
 
 /** Desktop installer files (uploaded to Supabase after `npm run desktop:build`). */
 const DESKTOP_DOWNLOADS = {
-  version: "0.1.8",
+  version: "0.1.9",
   windows: {
     msi: {
       label: "Windows installer (MSI)",
-      href: "/downloads/Hormachuelos_0.1.8_x64_en-US.msi",
-      file: "Hormachuelos_0.1.8_x64_en-US.msi",
+      href: "/downloads/Hormachuelos_0.1.9_x64_en-US.msi",
+      file: "Hormachuelos_0.1.9_x64_en-US.msi",
     },
     setup: {
       label: "Windows setup (EXE)",
-      href: "/downloads/Hormachuelos_0.1.8_x64-setup.exe",
-      file: "Hormachuelos_0.1.8_x64-setup.exe",
+      href: "/downloads/Hormachuelos_0.1.9_x64-setup.exe",
+      file: "Hormachuelos_0.1.9_x64-setup.exe",
     },
   },
 };
@@ -1551,7 +1551,9 @@ function renderAdmin() {
             <div class="field"><label>Title</label><input id="rel-title" class="field" placeholder="Hormachuelos 0.1.1" /></div>
             <div class="field"><label>What's new</label><textarea id="rel-notes" class="field" rows="5" required placeholder="• Bug fixes&#10;• New features"></textarea></div>
             <div class="field"><label>MSI download URL</label><input id="rel-msi" class="field" type="url" placeholder="https://…/Hormachuelos_x_x64_en-US.msi" /></div>
+            <div class="field"><label>MSI SHA-256</label><input id="rel-msi-sha256" class="field mono" maxlength="64" pattern="[a-fA-F0-9]{64}" placeholder="64-character installer checksum" /></div>
             <div class="field"><label>EXE download URL</label><input id="rel-exe" class="field" type="url" placeholder="https://…/Hormachuelos_x_x64-setup.exe" /></div>
+            <div class="field"><label>EXE SHA-256</label><input id="rel-exe-sha256" class="field mono" maxlength="64" pattern="[a-fA-F0-9]{64}" placeholder="64-character installer checksum" /></div>
             <label class="admin-active" style="margin:8px 0 14px;display:inline-flex">
               <input type="checkbox" id="rel-force" checked /> Force update (block old app until installed)
             </label>
@@ -1607,7 +1609,9 @@ function renderAdmin() {
               title: root.querySelector("#rel-title").value.trim(),
               whatsNew: root.querySelector("#rel-notes").value.trim(),
               msiUrl: root.querySelector("#rel-msi").value.trim(),
+              msiSha256: root.querySelector("#rel-msi-sha256").value.trim(),
               exeUrl: root.querySelector("#rel-exe").value.trim(),
+              exeSha256: root.querySelector("#rel-exe-sha256").value.trim(),
               forceUpdate: root.querySelector("#rel-force").checked,
               isLatest: true,
             },

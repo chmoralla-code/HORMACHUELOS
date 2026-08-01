@@ -48,6 +48,12 @@ export type ComputerUseFxEvent = {
   totalChars?: number | null;
 };
 
+export type AppUpdateProgress = {
+  phase: "preparing" | "downloading" | "verifying" | "installing" | "restarting" | "error";
+  percent?: number | null;
+  message?: string | null;
+};
+
 export type ProjectNode = {
   name: string;
   path: string;
@@ -164,6 +170,15 @@ export const api = {
   openProjectInExplorer: (relativePath: string | null = null): Promise<void> =>
     invoke("open_project_in_explorer", { relativePath }),
   appVersion: (): Promise<string> => invoke("app_version"),
+  /** Persist WebView state outside its cache before an installer replaces the app. */
+  saveUpdateBackup: (stateJson: string): Promise<void> =>
+    invoke("save_update_backup", { stateJson }),
+  /** Load the safety snapshot; it remains until restoration is confirmed. */
+  loadUpdateBackup: (): Promise<string | null> => invoke("load_update_backup"),
+  clearUpdateBackup: (): Promise<void> => invoke("clear_update_backup"),
+  /** Download, verify, install, and restart without leaving the desktop app. */
+  installAppUpdate: (downloadUrl: string, version: string, sha256: string): Promise<void> =>
+    invoke("install_app_update", { downloadUrl, version, sha256 }),
   openFolderPicker: async (): Promise<string | null> => {
     const sel = await openDialog({ directory: true, multiple: false, title: "Select folder" });
     if (typeof sel === "string") return sel;
@@ -267,4 +282,10 @@ export function onComputerUseFx(
   cb: (event: ComputerUseFxEvent) => void,
 ): Promise<UnlistenFn> {
   return listen<ComputerUseFxEvent>("computer-use-fx", (ev) => cb(ev.payload));
+}
+
+export function onAppUpdateProgress(
+  cb: (event: AppUpdateProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<AppUpdateProgress>("app-update-progress", (ev) => cb(ev.payload));
 }
