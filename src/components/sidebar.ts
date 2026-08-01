@@ -241,7 +241,9 @@ export class Sidebar {
     button.querySelector(".sb-update-badge")?.remove();
     button.classList.toggle("has-update", this.updateAvailable);
     button.dataset.updateAvailable = this.updateAvailable ? "true" : "false";
-    const label = button.querySelector<HTMLElement>(":scope > span");
+    // `icon()` also returns a span. Target the label explicitly so a status
+    // update never overwrites the icon and leaves two visible Update labels.
+    const label = button.querySelector<HTMLElement>(":scope > .sb-action-label");
 
     if (!this.updateAvailable) {
       if (label) label.textContent = "Update";
@@ -605,7 +607,7 @@ export class Sidebar {
     const btn = el("button", {
       class: "sb-action",
       type: "button",
-      html: icon(iconName) + `<span>${label}</span>`,
+      html: icon(iconName) + `<span class="sb-action-label">${label}</span>`,
     }) as HTMLButtonElement;
     btn.addEventListener("click", onClick);
     return btn;

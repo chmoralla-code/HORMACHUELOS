@@ -24,11 +24,11 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.9";
-const BUILTIN_MSI_SHA256 = "ecc6fa5f5dbb126ef0dab8daf46ebe90538fb1e58021bb1ac56ac9ab59f8254e";
-const BUILTIN_EXE_SHA256 = "3e5faaebd1d90f70c28532faa5d0b2a9ebfe3307eb35afee26d78a97e97b5990";
+const BUILTIN_RELEASE_VERSION = "0.1.10";
+const BUILTIN_MSI_SHA256 = "198cc74e4d180632b01122b7c588e7ed6ccc33ed3eb9b4dc99a22d804ecc9b59";
+const BUILTIN_EXE_SHA256 = "eced293e2826686f4d70ba317d8b3b559a35dbb227b56ec2c0007a50e0f9b724";
 const BUILTIN_RELEASE_NOTES =
-  "Adds a clear in-app update notification, a unified workspace menu, improved provider aliases and visual effects, plus the latest preview, Computer Use, project, sign-in sync, installer, and hosted-model reliability improvements.";
+  "Fixes the duplicated Update label and improves narrow-sidebar readability so update status, icons, labels, and version badges remain clear.";
 
 /**
  * A deployment-bundled release keeps the download/update path available even

@@ -19,6 +19,9 @@ def main() -> None:
         )
         update_button.wait_for(state="visible")
         assert update_button.get_attribute("data-update-available") == "true"
+        assert update_button.locator(".sb-action-label").count() == 1
+        assert update_button.locator(".sb-action-label").inner_text() == "Update available"
+        assert update_button.locator(".ico svg").count() == 1
         assert update_button.locator(".sb-update-badge").inner_text() == "NEW · v0.1.5"
         SCREENSHOT.parent.mkdir(parents=True, exist_ok=True)
         page.screenshot(path=str(SCREENSHOT), full_page=True)

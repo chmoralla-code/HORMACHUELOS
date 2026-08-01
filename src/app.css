@@ -138,6 +138,13 @@
 }
 .sb-action:hover { background: var(--bg-2); color: var(--fg-0); }
 .sb-action svg { width: 14px; height: 14px; opacity: 0.7; flex-shrink: 0; }
+.sb-action > .ico { flex: 0 0 auto; }
+.sb-action-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .sb-action.active { background: var(--bg-3); color: var(--fg-0); }
 .sb-update-action:hover svg {
   color: #72c8ff;
@@ -160,6 +167,7 @@
 }
 .sb-update-badge {
   margin-left: auto;
+  flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   min-height: 18px;

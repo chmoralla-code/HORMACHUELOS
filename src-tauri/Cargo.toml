@@ -1,6 +1,6 @@
 [package]
 name = "ai-forge"
-version = "0.1.9"
+version = "0.1.10"
 description = "Monochrome agentic desktop studio — hidden PowerShell + LLM tool-calling"
 authors = ["AI-Forge"]
 edition = "2021"
