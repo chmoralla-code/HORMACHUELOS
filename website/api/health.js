@@ -12,6 +12,6 @@ export default async function handler(req, res) {
     ok: true,
     service: "hormachuelos-hosted",
     supabase: supabaseConfigured(),
-    providers: hostedProvidersStatus(),
+    providers: await hostedProvidersStatus(),
   }, req);
 }

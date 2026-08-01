@@ -1,6 +1,7 @@
 import "./app.css";
 import { listen } from "@tauri-apps/api/event";
 import type { ComputerUseFxEvent } from "./ipc";
+import { privateTypingStatus } from "./components/computer-use-hud";
 
 const cursor = document.getElementById("fx-cursor") as HTMLDivElement;
 const clickRing = document.getElementById("fx-click") as HTMLDivElement;
@@ -40,20 +41,18 @@ function pulseClick(x: number, y: number) {
 function showTyping(
   x: number,
   y: number,
-  text: string,
+  event: ComputerUseFxEvent,
   done: boolean,
-  charIndex?: number,
-  totalChars?: number,
 ) {
+  const status = privateTypingStatus(event);
   showCursor(x, y);
   typing.hidden = false;
   place(typing, x + 18, y - 42);
-  typingText.textContent = text;
+  typingText.textContent = status.mask;
   typing.classList.toggle("is-done", done);
   if (typingProgress) {
-    if (totalChars && totalChars > 0) {
-      const current = (charIndex ?? totalChars - 1) + 1;
-      typingProgress.textContent = `${current}/${totalChars}`;
+    if (status.progress) {
+      typingProgress.textContent = status.progress;
       typingProgress.hidden = false;
     } else {
       typingProgress.hidden = true;
@@ -97,7 +96,7 @@ function scheduleIdleHide() {
 }
 
 function handleFx(event: ComputerUseFxEvent) {
-  const { kind, x, y, text, charIndex, totalChars } = event;
+  const { kind, x, y } = event;
   switch (kind) {
     case "clear":
       clearFx();
@@ -123,10 +122,10 @@ function handleFx(event: ComputerUseFxEvent) {
       scheduleIdleHide();
       return;
     case "type_char":
-      showTyping(x, y, text ?? "", false, charIndex ?? undefined, totalChars ?? undefined);
+      showTyping(x, y, event, false);
       return;
     case "type_done":
-      showTyping(x, y, text ?? "", true, charIndex ?? undefined, totalChars ?? undefined);
+      showTyping(x, y, event, true);
       scheduleIdleHide();
       return;
     default:

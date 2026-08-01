@@ -1,6 +1,6 @@
 [package]
 name = "ai-forge"
-version = "0.1.5"
+version = "0.1.8"
 description = "Monochrome agentic desktop studio — hidden PowerShell + LLM tool-calling"
 authors = ["AI-Forge"]
 edition = "2021"
@@ -15,6 +15,10 @@ path = "src/main.rs"
 [[bin]]
 name = "export_provider_keys"
 path = "src/bin/export_provider_keys.rs"
+
+[[bin]]
+name = "seed_key"
+path = "src/bin/seed_key.rs"
 
 [lib]
 name = "ai_forge_lib"

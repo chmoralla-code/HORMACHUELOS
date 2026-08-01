@@ -209,21 +209,16 @@ function safePreview(value, maxChars = 120) {
   return `${chars.slice(0, maxChars).join("")}${chars.length > maxChars ? "…" : ""}`;
 }
 
-function sanitizeComputerToolArguments(name, value, { approval = false } = {}) {
+function sanitizeComputerToolArguments(name, value, _options = {}) {
   const args = value && typeof value === "object" && !Array.isArray(value) ? { ...value } : {};
   if ("observation_token" in args) {
     args.observation_token = "[fresh observation token]";
   }
   if (name === "computer_type_text" && typeof args.text === "string") {
     const characters = Array.from(args.text).length;
-    if (approval) {
-      const preview = safePreview(args.text, 512);
-      delete args.text;
-      args.characters = characters;
-      args.text_preview = preview || "[whitespace]";
-    } else {
-      args.text = `[${characters} characters]`;
-    }
+    args.text = `[hidden · ${characters} characters]`;
+    args.characters = characters;
+    delete args.text_preview;
   }
   return args;
 }
@@ -236,9 +231,8 @@ function computerApprovalSummary(name, args) {
     return `Click ${button} ${clicks === 2 ? "twice" : "once"} at (${args?.x}, ${args?.y}) in window ${windowId}.`;
   }
   if (name === "computer_type_text") {
-    const preview = safePreview(args?.text, 512);
     const characters = Array.from(String(args?.text || "")).length;
-    return `Type ${characters} characters in window ${windowId}: “${preview || "[whitespace]"}”`;
+    return `Type ${characters} characters in window ${windowId}.`;
   }
   if (name === "computer_press_key") {
     return `Press ${String(args?.keys || "a key")} in window ${windowId}.`;
@@ -1174,6 +1168,7 @@ export {
   COMPUTER_PAUSE_SENTINEL_ENV,
   boundedHistory,
   buildAgentPrompt,
+  computerApprovalSummary,
   createComputerUseTools,
   helperEnvironment,
   isToolAllowed,

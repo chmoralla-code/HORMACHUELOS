@@ -29,17 +29,21 @@
           </button>
           <!-- Project path lives in the left sandwich drawer -->
           <div class="h-project" id="header-project" hidden aria-hidden="true"></div>
-          <div class="h-provider" id="header-actions"></div>
-          <button
-            type="button"
-            class="drawer-btn drawer-btn-right active"
-            id="drawer-right-btn"
-            aria-pressed="true"
-            title="Toggle right panel"
-            aria-label="Toggle right panel"
-          >
-            <span class="drawer-btn-bars" aria-hidden="true"><i></i><i></i><i></i></span>
-          </button>
+          <div class="workspace-menu-anchor" id="workspace-menu-anchor">
+            <button
+              type="button"
+              class="drawer-btn workspace-menu-btn"
+              id="workspace-menu-btn"
+              aria-haspopup="menu"
+              aria-expanded="false"
+              aria-controls="workspace-menu"
+              title="Workspace menu"
+              aria-label="Workspace menu"
+            >
+              <span class="drawer-btn-bars" aria-hidden="true"><i></i><i></i><i></i></span>
+            </button>
+            <div class="workspace-menu" id="workspace-menu" role="menu" aria-label="Workspace actions" hidden></div>
+          </div>
         </header>
         <div class="workspace workbench">
           <section class="stage" aria-label="Build ledger">

@@ -7,6 +7,7 @@ export type Settings = {
   provider: string;
   model: string;
   base_url: string | null;
+  /** Legacy setting retained for older desktop releases; agent runs are unbounded. */
   max_iterations: number;
   command_timeout_secs: number;
   auto_approve: boolean;
@@ -157,7 +158,8 @@ export const api = {
       tool_call_id?: string;
       name?: string;
     }> = [],
-  ): Promise<void> => invoke("agent_run", { prompt, sessionId, history }),
+    projectRoot?: string,
+  ): Promise<void> => invoke("agent_run", { prompt, sessionId, history, projectRoot }),
   agentStop: (sessionId: string): Promise<void> => invoke("agent_stop", { sessionId }),
   openProjectInExplorer: (relativePath: string | null = null): Promise<void> =>
     invoke("open_project_in_explorer", { relativePath }),

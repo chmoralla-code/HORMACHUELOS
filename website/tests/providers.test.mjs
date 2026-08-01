@@ -7,42 +7,138 @@ import {
   resolveHostedModel,
   resolveUpstream,
 } from "../api/_lib/providers.js";
+import { invalidateHostedModelRouteCache } from "../api/_lib/hosted-model-configs.js";
 
-test("HORMACHUELOS FREE pins the public alias to the NeuralWatt model", () => {
+const MANAGED_CONFIG_ENV = [
+  "SUPABASE_URL",
+  "HORMACHUELOS_SUPABASE_URL",
+  "SUPABASE_SERVICE_ROLE_KEY",
+  "HORMACHUELOS_SERVICE_ROLE",
+];
+
+function disableManagedConfigsForTest() {
+  const previous = new Map(MANAGED_CONFIG_ENV.map((name) => [name, process.env[name]]));
+  for (const name of MANAGED_CONFIG_ENV) delete process.env[name];
+  invalidateHostedModelRouteCache();
+  return () => {
+    for (const [name, value] of previous) {
+      if (value == null) delete process.env[name];
+      else process.env[name] = value;
+    }
+    invalidateHostedModelRouteCache();
+  };
+}
+
+test("HORMACHUELOS FREE pins the public alias to the NeuralWatt model", async () => {
+  const restoreManaged = disableManagedConfigsForTest();
+  const priorNeuralWatt = process.env.NEURALWATT_API_KEY;
+  const priorV2 = process.env.HORMACHUELOS_V2_API_KEY;
+  const priorOpenCodeGo = process.env.OPENCODE_GO_API_KEY;
   process.env.NEURALWATT_API_KEY = "test-only-neuralwatt-key";
+  delete process.env.HORMACHUELOS_V2_API_KEY;
+  delete process.env.OPENCODE_GO_API_KEY;
   try {
-    const upstream = resolveUpstream("hormachuelos_free");
+    const upstream = await resolveUpstream("hormachuelos_free");
     assert.equal(upstream.provider, "hormachuelos_free");
     assert.equal(upstream.base, "https://api.neuralwatt.com/v1");
 
-    assert.deepEqual(resolveHostedModel(upstream, "hormachuelos-v1"), {
-      requestedModel: "hormachuelos-v1",
-      upstreamModel: "deepseek-v4-flash",
-    });
-    assert.match(resolveHostedModel(upstream, "another-model").error, /only supports/i);
+    const model = resolveHostedModel(upstream, "hormachuelos-v1");
+    assert.equal(model.requestedModel, "hormachuelos-v1");
+    assert.equal(model.upstreamModel, "deepseek-v4-flash");
+    assert.equal(model.base, "https://api.neuralwatt.com/v1");
+    assert.equal(model.apiKey, process.env.NEURALWATT_API_KEY);
+    assert.match(resolveHostedModel(upstream, "another-model").error, /not currently available/i);
     assert.equal(billableTokens("hormachuelos_free", "hormachuelos-v1", 1_000), 100);
 
-    const status = hostedProvidersStatus().hormachuelos_free;
+    const status = (await hostedProvidersStatus()).hormachuelos_free;
     assert.deepEqual(status, { ok: true, viaOpenRouter: false });
     assert.equal(JSON.stringify(status).includes(process.env.NEURALWATT_API_KEY), false);
   } finally {
-    delete process.env.NEURALWATT_API_KEY;
+    if (priorNeuralWatt == null) delete process.env.NEURALWATT_API_KEY;
+    else process.env.NEURALWATT_API_KEY = priorNeuralWatt;
+    if (priorV2 == null) delete process.env.HORMACHUELOS_V2_API_KEY;
+    else process.env.HORMACHUELOS_V2_API_KEY = priorV2;
+    if (priorOpenCodeGo == null) delete process.env.OPENCODE_GO_API_KEY;
+    else process.env.OPENCODE_GO_API_KEY = priorOpenCodeGo;
+    restoreManaged();
   }
 });
 
-test("HORMACHUELOS FREE never falls back to another provider", () => {
+test("HORMACHUELOS FREE never falls back to another provider", async () => {
+  const restoreManaged = disableManagedConfigsForTest();
   const priorNeuralWatt = process.env.NEURALWATT_API_KEY;
+  const priorV2 = process.env.HORMACHUELOS_V2_API_KEY;
+  const priorOpenCodeGo = process.env.OPENCODE_GO_API_KEY;
   const priorOpenRouter = process.env.OPENROUTER_API_KEY;
   delete process.env.NEURALWATT_API_KEY;
+  delete process.env.HORMACHUELOS_V2_API_KEY;
+  delete process.env.OPENCODE_GO_API_KEY;
   process.env.OPENROUTER_API_KEY = "test-only-openrouter-key";
   try {
-    const upstream = resolveUpstream("hormachuelos_free");
+    const upstream = await resolveUpstream("hormachuelos_free");
     assert.match(upstream.error, /missing API key/i);
     assert.equal(upstream.viaOpenRouter, undefined);
   } finally {
     if (priorNeuralWatt == null) delete process.env.NEURALWATT_API_KEY;
     else process.env.NEURALWATT_API_KEY = priorNeuralWatt;
+    if (priorV2 == null) delete process.env.HORMACHUELOS_V2_API_KEY;
+    else process.env.HORMACHUELOS_V2_API_KEY = priorV2;
+    if (priorOpenCodeGo == null) delete process.env.OPENCODE_GO_API_KEY;
+    else process.env.OPENCODE_GO_API_KEY = priorOpenCodeGo;
     if (priorOpenRouter == null) delete process.env.OPENROUTER_API_KEY;
     else process.env.OPENROUTER_API_KEY = priorOpenRouter;
+    restoreManaged();
   }
+});
+
+test("HORMACHUELOS V2 uses the dedicated OpenCode Go route", async () => {
+  const restoreManaged = disableManagedConfigsForTest();
+  const priorNeuralWatt = process.env.NEURALWATT_API_KEY;
+  const priorV2 = process.env.HORMACHUELOS_V2_API_KEY;
+  const priorOpenCodeGo = process.env.OPENCODE_GO_API_KEY;
+  process.env.NEURALWATT_API_KEY = "test-only-neuralwatt-fallback-key";
+  process.env.HORMACHUELOS_V2_API_KEY = "test-only-opencode-go-key";
+  delete process.env.OPENCODE_GO_API_KEY;
+  try {
+    const upstream = await resolveUpstream("hormachuelos_free");
+    const model = resolveHostedModel(upstream, "hormachuelos-v2");
+    assert.equal(model.requestedModel, "hormachuelos-v2");
+    assert.equal(model.upstreamModel, "deepseek-v4-flash");
+    assert.equal(model.base, "https://opencode.ai/zen/go/v1");
+    assert.equal(model.apiKey, process.env.HORMACHUELOS_V2_API_KEY);
+    assert.equal(model.fallbackRoutes.length, 1);
+    assert.equal(model.fallbackRoutes[0].upstreamModel, "deepseek-v4-flash");
+    assert.equal(model.fallbackRoutes[0].baseUrl, "https://api.neuralwatt.com/v1");
+    assert.equal(model.fallbackRoutes[0].apiKey, process.env.NEURALWATT_API_KEY);
+    const status = (await hostedProvidersStatus()).hormachuelos_free;
+    assert.deepEqual(status, { ok: true, viaOpenRouter: false });
+    assert.equal(JSON.stringify(status).includes(process.env.HORMACHUELOS_V2_API_KEY), false);
+  } finally {
+    if (priorNeuralWatt == null) delete process.env.NEURALWATT_API_KEY;
+    else process.env.NEURALWATT_API_KEY = priorNeuralWatt;
+    if (priorV2 == null) delete process.env.HORMACHUELOS_V2_API_KEY;
+    else process.env.HORMACHUELOS_V2_API_KEY = priorV2;
+    if (priorOpenCodeGo == null) delete process.env.OPENCODE_GO_API_KEY;
+    else process.env.OPENCODE_GO_API_KEY = priorOpenCodeGo;
+    restoreManaged();
+  }
+});
+
+test("managed HORMACHUELOS aliases route each model with its own server-only key", () => {
+  const upstream = {
+    modelRoutes: [
+      {
+        alias: "hormachuelos-v2",
+        upstreamModel: "deepseek-v4-flash",
+        baseUrl: "https://opencode.ai/zen/go/v1",
+        apiKey: "test-only-managed-key",
+      },
+    ],
+  };
+  const route = resolveHostedModel(upstream, "hormachuelos-v2");
+  assert.equal(route.requestedModel, "hormachuelos-v2");
+  assert.equal(route.upstreamModel, "deepseek-v4-flash");
+  assert.equal(route.base, "https://opencode.ai/zen/go/v1");
+  assert.equal(route.apiKey, "test-only-managed-key");
+  assert.match(resolveHostedModel(upstream, "deepseek-v4-flash").error, /not currently available/i);
 });

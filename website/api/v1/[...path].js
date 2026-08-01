@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { corsHeaders, json, readJson, bearerToken } from "../_lib/http.js";
 import {
   getLicenseByKey,
+  getLicenseByEmail,
   getHormachuelosFreeLicenseByEmail,
   insertLicense,
   insertUsageEvent,
@@ -39,6 +40,52 @@ function extractUsage(payload) {
   const completion = Number(u.completion_tokens || u.output_tokens || 0);
   const total = Number(u.total_tokens || 0);
   return total || prompt + completion || 0;
+}
+
+function logHostedUpstreamError({ provider, model, response, text }) {
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    parsed = null;
+  }
+  const error = parsed?.error;
+  const rawMessage =
+    (typeof error === "string" ? error : error?.message) ||
+    parsed?.message ||
+    (typeof text === "string" ? text : "");
+  const message = String(rawMessage)
+    .replace(/sk-[A-Za-z0-9_-]+/g, "[redacted]")
+    .replace(/Bearer\s+\S+/gi, "Bearer [redacted]")
+    .slice(0, 300);
+  console.warn("Hosted upstream request failed", {
+    provider,
+    model,
+    status: response.status,
+    code: typeof error === "object" ? error?.code || "" : parsed?.code || "",
+    type: typeof error === "object" ? error?.type || "" : parsed?.type || "",
+    message,
+  });
+}
+
+function hostedUpstreamErrorType(text) {
+  try {
+    const parsed = JSON.parse(text);
+    return String(parsed?.error?.type || parsed?.type || "");
+  } catch {
+    return "";
+  }
+}
+
+export function shouldUseHostedFallback(response, text) {
+  if (!response || response.ok || response.status === 429) return false;
+  if (hostedUpstreamErrorType(text).toLowerCase() === "regionerror") return true;
+  return response.status === 401 ||
+    response.status === 402 ||
+    response.status === 403 ||
+    response.status === 404 ||
+    response.status === 408 ||
+    response.status >= 500;
 }
 
 async function recordUsage(license, provider, model, raw) {
@@ -81,9 +128,26 @@ async function freeEntitlementFor(account) {
   return license;
 }
 
+/** A signed-in paid account must consume the same meter the desktop displays. */
+export function isUsablePaidLicense(license, now = Date.now()) {
+  if (!license || !license.active || license.plan === HORMACHUELOS_FREE_PROVIDER) return false;
+  const expiresAt = new Date(license.expires_at).getTime();
+  return Number.isFinite(expiresAt) && expiresAt >= now;
+}
+
 async function authenticatedFreeEntitlement(req) {
   const account = await accountFromRequest(req);
   if (!account?.email_verified) return null;
+  // HORMACHUELOS aliases authenticate with a session token. Prefer the linked
+  // paid license (or the account's current paid license) so its reported
+  // balance and the server-side meter cannot drift apart. The dedicated free
+  // allowance remains available only when there is no usable paid plan.
+  let paidLicense = null;
+  if (account.license_key) paidLicense = await getLicenseByKey(account.license_key);
+  if (!isUsablePaidLicense(paidLicense)) {
+    paidLicense = await getLicenseByEmail(account.email);
+  }
+  if (isUsablePaidLicense(paidLicense)) return paidLicense;
   return freeEntitlementFor(account);
 }
 
@@ -93,9 +157,16 @@ async function handleModels(req, res) {
   if (provider === HORMACHUELOS_FREE_PROVIDER) {
     const freeLicense = await authenticatedFreeEntitlement(req);
     if (!freeLicense) return json(res, 401, { error: "Sign in to use HORMACHUELOS FREE." }, req);
+    const upstream = await resolveUpstream(provider);
+    if (upstream.error) {
+      return json(res, 503, { error: "HORMACHUELOS FREE is temporarily unavailable." }, req);
+    }
+    const modelIds = upstream.modelRoutes?.length
+      ? upstream.modelRoutes.map((route) => route.alias)
+      : Object.keys(upstream.modelAliases || {});
     return json(res, 200, {
       object: "list",
-      data: [{ id: HORMACHUELOS_FREE_MODEL, object: "model", owned_by: "hormachuelos" }],
+      data: modelIds.map((id) => ({ id, object: "model", owned_by: "hormachuelos" })),
     }, req);
   }
   const licenseKey = bearerToken(req);
@@ -103,7 +174,7 @@ async function handleModels(req, res) {
   const license = await getLicenseByKey(licenseKey);
   if (!license?.active) return json(res, 403, { error: "Invalid license" }, req);
 
-  const upstream = resolveUpstream(provider);
+  const upstream = await resolveUpstream(provider);
   if (upstream.error) return json(res, 400, { error: upstream.error }, req);
 
   const upstreamRes = await fetch(`${upstream.base}/models`, {
@@ -161,7 +232,7 @@ async function handleChat(req, res) {
     return json(res, 402, { error: "Hosted credits exhausted" }, req);
   }
 
-  const upstream = resolveUpstream(providerHint);
+  const upstream = await resolveUpstream(providerHint);
   if (upstream.error) {
     return json(
       res,
@@ -187,20 +258,58 @@ async function handleChat(req, res) {
     delete forwardBody.max_completion_tokens;
   }
 
-  const headers = {
-    "Content-Type": "application/json",
-    Authorization: `Bearer ${upstream.apiKey}`,
-    ...upstream.headers,
-  };
+  async function requestUpstream(route) {
+    const routeBody = { ...forwardBody, model: route.upstreamModel };
+    const response = await fetch(`${route.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${route.apiKey}`,
+        ...upstream.headers,
+        ...route.headers,
+      },
+      body: JSON.stringify(routeBody),
+    });
+    return {
+      response,
+      errorText: response.ok ? "" : await response.text(),
+      route,
+    };
+  }
 
-  const upstreamRes = await fetch(`${upstream.base}/chat/completions`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(forwardBody),
-  });
+  const primaryRoute = {
+    upstreamModel: modelResolution.upstreamModel,
+    baseUrl: modelResolution.base || upstream.base,
+    apiKey: modelResolution.apiKey || upstream.apiKey,
+    headers: modelResolution.headers || {},
+  };
+  let upstreamAttempt = await requestUpstream(primaryRoute);
+  if (
+    isHormachuelosFree &&
+    shouldUseHostedFallback(upstreamAttempt.response, upstreamAttempt.errorText)
+  ) {
+    for (const fallbackRoute of modelResolution.fallbackRoutes || []) {
+      logHostedUpstreamError({
+        provider: providerHint,
+        model,
+        response: upstreamAttempt.response,
+        text: upstreamAttempt.errorText,
+      });
+      console.warn("Hosted upstream fallback activated", {
+        provider: providerHint,
+        model,
+        status: upstreamAttempt.response.status,
+        fallbackHost: new URL(fallbackRoute.baseUrl).hostname,
+      });
+      upstreamAttempt = await requestUpstream(fallbackRoute);
+      if (upstreamAttempt.response.ok || upstreamAttempt.response.status === 429) break;
+    }
+  }
+
+  const upstreamRes = upstreamAttempt.response;
 
   if (!stream) {
-    const text = await upstreamRes.text();
+    const text = upstreamRes.ok ? await upstreamRes.text() : upstreamAttempt.errorText;
     let data;
     try {
       data = JSON.parse(text);
@@ -215,6 +324,14 @@ async function handleChat(req, res) {
       );
     }
     if (!upstreamRes.ok) {
+      if (isHormachuelosFree) {
+        logHostedUpstreamError({
+          provider: providerHint,
+          model,
+          response: upstreamRes,
+          text,
+        });
+      }
       return json(
         res,
         isHormachuelosFree && upstreamRes.status !== 429 ? 502 : upstreamRes.status,
@@ -233,7 +350,15 @@ async function handleChat(req, res) {
   }
 
   if (!upstreamRes.ok) {
-    const text = await upstreamRes.text();
+    const text = upstreamAttempt.errorText;
+    if (isHormachuelosFree) {
+      logHostedUpstreamError({
+        provider: providerHint,
+        model,
+        response: upstreamRes,
+        text,
+      });
+    }
     return json(
       res,
       isHormachuelosFree && upstreamRes.status !== 429 ? 502 : upstreamRes.status,

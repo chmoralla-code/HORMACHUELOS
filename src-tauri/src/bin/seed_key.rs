@@ -18,9 +18,9 @@ fn main() {
         std::process::exit(1);
     }
     match config::store_api_key(provider, &key) {
-        Ok(()) => println!("OK: API key for '{}' stored in OS keychain.", provider),
+        Ok(()) => println!("OK: API key for '{provider}' stored in OS keychain."),
         Err(e) => {
-            eprintln!("Error storing key for '{}': {}", provider, e);
+            eprintln!("Error storing key for '{provider}': {e}");
             std::process::exit(1);
         }
     }

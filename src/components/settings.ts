@@ -41,7 +41,9 @@ export const PROVIDERS: ProviderDef[] = [
     defaultBaseUrl: "https://api.cursor.com/v1",
     keyUrl: "https://cursor.com/dashboard?tab=integrations",
     keyRequired: true,
-    models: ["grok-4.5"],
+    // These are Cursor SDK model IDs. The UI presents the product aliases
+    // below without altering the model ID sent to Cursor.
+    models: ["grok-4.5", "composer-2.5"],
   },
   {
     // Preserve native OpenAI settings for existing installations without
@@ -66,7 +68,9 @@ export const PROVIDERS: ProviderDef[] = [
     defaultBaseUrl: "https://hormachuelos.vercel.app/api/v1",
     keyUrl: "",
     keyRequired: false,
-    models: ["hormachuelos-v1"],
+    // The signed-in desktop refreshes this catalog from the hosted service.
+    // These are safe offline fallbacks, not credentials.
+    models: ["hormachuelos-v1", "hormachuelos-v2"],
   },
   {
     id: "ollama",
@@ -125,11 +129,20 @@ export const PROVIDERS: ProviderDef[] = [
     label: "OpenCode",
     logoKey: "glm",
     logoSrc: "./logos/opencode.svg",
-    defaultModel: "glm-5.2",
-    defaultBaseUrl: "https://open.bigmodel.cn/api/paas/v4",
-    keyUrl: "https://open.bigmodel.cn/usercenter/apikeys",
+    defaultModel: "deepseek-v4-flash-free",
+    defaultBaseUrl: "https://opencode.ai/zen/v1",
+    keyUrl: "https://opencode.ai/auth",
     keyRequired: true,
-    models: ["glm-5.2"],
+    // Free OpenCode Zen models only (not paid Go / Zen catalog).
+    models: [
+      "deepseek-v4-flash-free",
+      "mimo-v2.5-free",
+      "north-mini-code-free",
+      "ling-3.0-flash-free",
+      "laguna-s-2.1-free",
+      "nemotron-3-ultra-free",
+      "big-pickle",
+    ],
   },
 ];
 
@@ -141,9 +154,11 @@ export function visibleProviders(): ProviderDef[] {
 /** Friendly labels for model IDs (API id unchanged). */
 const MODEL_DISPLAY_NAMES: Record<string, string> = {
   "hormachuelos-v1": "Hormachuelos v1",
+  "hormachuelos-v2": "Hormachuelos v2",
   "deepseek-v4-flash": "DeepSeek V4 Flash",
   "deepseek-v4-pro": "DeepSeek V4 Pro",
   "grok-4.5": "GPT 5.6 Sol",
+  "composer-2.5": "GPT 5.6 Luna",
   "gpt-5.6-sol": "GPT 5.6 Sol",
   "gpt-5.6-terra": "GPT 5.6 Terra",
   "gpt-5.6-luna": "GPT 5.6 Luna",
@@ -168,13 +183,20 @@ const MODEL_DISPLAY_NAMES: Record<string, string> = {
   "composer-1.5": "Composer 1.5",
   "kimi-k2.5": "Kimi K2.5",
   "glm-5.2": "GLM 5.2",
+  "deepseek-v4-flash-free": "DeepSeek V4 Flash Free",
+  "mimo-v2.5-free": "MiMo V2.5 Free",
+  "north-mini-code-free": "North Mini Code Free",
+  "ling-3.0-flash-free": "Ling 3.0 Flash Free",
+  "laguna-s-2.1-free": "Laguna S 2.1 Free",
+  "nemotron-3-ultra-free": "Nemotron 3 Ultra Free",
+  "big-pickle": "Big Pickle Free",
 };
 
 /** Providers routed through the Cursor local SDK (not chat-completions). */
 export const CURSOR_SDK_PROVIDER_IDS = new Set(["cursor"]);
 
-/** Provider catalogs that are deliberately pinned to branded model aliases. */
-export const STATIC_MODEL_PROVIDER_IDS = new Set(["cursor", "hormachuelos_free"]);
+/** Provider catalogs that are deliberately pinned (no live /models flood). */
+export const STATIC_MODEL_PROVIDER_IDS = new Set(["cursor", "glm"]);
 
 export function isCursorSdkProvider(providerId: string): boolean {
   return CURSOR_SDK_PROVIDER_IDS.has(providerId);
@@ -182,6 +204,20 @@ export function isCursorSdkProvider(providerId: string): boolean {
 
 export function hasStaticModelCatalog(providerId: string): boolean {
   return STATIC_MODEL_PROVIDER_IDS.has(providerId);
+}
+
+/**
+ * Preserve the built-in Hormachuelos aliases when the hosted catalog is
+ * refreshed.  The website can add models at any time, but an older deployed
+ * catalog must never make a locally supported alias disappear from the
+ * desktop picker.
+ */
+export function mergeProviderModelCatalog(providerId: string, models: readonly string[]): string[] {
+  const configured =
+    providerId === "hormachuelos_free"
+      ? PROVIDERS.find((provider) => provider.id === providerId)?.models ?? []
+      : [];
+  return [...new Set([...configured, ...models].map((model) => model.trim()).filter(Boolean))];
 }
 
 /**
@@ -244,7 +280,7 @@ export function isUltraEffort(value: string | null | undefined): boolean {
 /** Resolve locally selected models to the provider that actually serves them. */
 export function backendForModel(modelId: string): { provider: string; baseUrl: string | null } {
   const id = (modelId || "").trim();
-  if (id === "hormachuelos-v1") {
+  if (/^hormachuelos-[a-z0-9._-]+$/i.test(id)) {
     return {
       provider: "hormachuelos_free",
       baseUrl: "https://hormachuelos.vercel.app/api/v1",
@@ -317,7 +353,9 @@ export function defaultSettings(): Settings {
     provider: cursor.id,
     model: cursor.defaultModel,
     base_url: cursor.defaultBaseUrl || null,
-    max_iterations: 25,
+    // Kept in the wire format for settings written by earlier releases.
+    // The agent loop is now intentionally unbounded.
+    max_iterations: 0,
     command_timeout_secs: 120,
     auto_approve: false,
     permission_mode: "plan",
@@ -360,7 +398,10 @@ export function normalizeSettings(s: Settings): Settings {
   // endpoint; real OpenAI settings remain on the native OpenAI provider.
   if (s.provider === "openai" && s.base_url === "https://api.cursor.com/v1") {
     s.provider = "cursor";
-    s.model = "grok-4.5";
+    s.model =
+      s.model === "gpt-5.6-luna" || s.model === "composer-2.5"
+        ? "composer-2.5"
+        : "grok-4.5";
     s.base_url = "https://api.cursor.com/v1";
   }
   const meta = PROVIDERS.find((p) => p.id === s.provider);
@@ -374,11 +415,15 @@ export function normalizeSettings(s: Settings): Settings {
   if (!s.model.trim()) {
     s.model = meta.defaultModel;
   }
-  if (s.provider === "cursor" && s.model !== "grok-4.5") {
-    s.model = "grok-4.5";
+  if (s.provider === "cursor") {
+    // Accept legacy display IDs from builds that persisted UI aliases while
+    // keeping the Cursor SDK request on its real model ID.
+    if (s.model === "gpt-5.6-sol") s.model = "grok-4.5";
+    if (s.model === "gpt-5.6-luna") s.model = "composer-2.5";
+    if (!meta.models.includes(s.model)) s.model = meta.defaultModel;
   }
   if (s.provider === "hormachuelos_free") {
-    s.model = "hormachuelos-v1";
+    if (!s.model.trim()) s.model = meta.defaultModel;
     s.base_url = meta.defaultBaseUrl;
   }
   if (s.provider === "deepseek" && s.model === "deepseek-chat") {
@@ -390,8 +435,24 @@ export function normalizeSettings(s: Settings): Settings {
   if (s.provider === "deepseek" && s.base_url === "https://api.deepseek.com/v1") {
     s.base_url = meta.defaultBaseUrl;
   }
-  if (s.provider === "glm" && s.base_url === "https://api.atomeocean.com/v1") {
-    s.base_url = meta.defaultBaseUrl;
+  if (s.provider === "glm") {
+    const freeModels = meta.models || [];
+    const legacyBigmodel =
+      s.base_url === "https://open.bigmodel.cn/api/paas/v4" ||
+      s.base_url === "https://api.atomeocean.com/v1" ||
+      !s.base_url?.trim();
+    if (legacyBigmodel) {
+      s.base_url = meta.defaultBaseUrl;
+    }
+    if (!freeModels.includes(s.model)) {
+      s.model = meta.defaultModel;
+    }
+  }
+  if (s.provider === "openrouter") {
+    // Keep OpenRouter on free models only — never surface paid catalog IDs.
+    if (!String(s.model || "").includes(":free")) {
+      s.model = meta.defaultModel;
+    }
   }
   if (s.provider === "pollinations" && s.base_url === "https://text.pollinations.ai/openai") {
     s.base_url = meta.defaultBaseUrl;
@@ -464,10 +525,13 @@ export class SettingsModal {
     try {
       this.settings = await getSettingsSafe();
     } catch (e) {
+      if (!this.modalSessionActive) return;
       this.renderError(e instanceof Error ? e.message : String(e));
       return;
     }
+    if (!this.modalSessionActive) return;
     this.computerUseStatus = await api.getComputerUseStatus().catch(() => null);
+    if (!this.modalSessionActive) return;
     this.computerUseUnlisten?.();
     this.computerUseUnlisten = await onComputerUseStatus((status) => {
       this.computerUseStatus = status;
@@ -475,6 +539,7 @@ export class SettingsModal {
       const panel = this.root.querySelector<HTMLElement>(".computer-use-panel");
       if (panel) panel.replaceWith(this.renderComputerUsePanel());
     }).catch(() => null);
+    if (!this.modalSessionActive) return;
     for (const p of PROVIDERS) {
       if (p.keyRequired) {
         let has = await api.hasApiKey(p.id).catch(() => false);
@@ -482,8 +547,10 @@ export class SettingsModal {
       } else {
         this.keyStates[p.id] = true; // keyless providers are always "ready"
       }
+      if (!this.modalSessionActive) return;
     }
     this.integrations = await api.listIntegrations().catch(() => []);
+    if (!this.modalSessionActive) return;
     this.render();
     // Auto-load model catalogs for every provider that can list models
     void this.autoDiscoverAllReadyProviders();
@@ -551,7 +618,20 @@ export class SettingsModal {
         this.settings.provider === providerId
           ? this.settings.base_url?.trim() || null
           : provider.defaultBaseUrl || null;
-      const models = await api.listProviderModels(providerId, base);
+      const modelsRaw = await api.listProviderModels(providerId, base);
+      // OpenRouter: keep free models only so the picker never floods with paid IDs.
+      const discovered =
+        providerId === "openrouter"
+          ? modelsRaw.filter((id) => id.includes(":free"))
+          : providerId === "glm"
+            ? modelsRaw.filter(
+                (id) =>
+                  id.endsWith("-free") ||
+                  id === "big-pickle" ||
+                  id.includes("free"),
+              )
+            : modelsRaw;
+      const models = mergeProviderModelCatalog(providerId, discovered);
       this.discoveredModels[providerId] = models;
       this.modelDiscoveryMessages[providerId] =
         models.length > 0
@@ -566,10 +646,13 @@ export class SettingsModal {
     } catch (error) {
       this.modelDiscoveryMessages[providerId] = `Could not load models: ${String(error)}`;
     }
+    // Never rebuild the modal after the user closed it (async discovery race).
+    if (!this.modalSessionActive) return;
     if (opts?.reRender !== false) this.render();
   }
 
   private async autoDiscoverAllReadyProviders() {
+    if (!this.modalSessionActive) return;
     const ready = PROVIDERS.filter((p) => !p.keyRequired || this.keyStates[p.id]);
     // Prefer active provider first so the dropdown fills quickly
     const ordered = [
@@ -577,6 +660,7 @@ export class SettingsModal {
       ...ready.filter((p) => p.id !== this.settings.provider),
     ];
     for (const p of ordered) {
+      if (!this.modalSessionActive) return;
       // Skip if already loaded this session
       if (this.discoveredModels[p.id]?.length) continue;
       await this.discoverModels(p.id, {
@@ -587,13 +671,18 @@ export class SettingsModal {
   }
 
   private renderError(msg: string) {
+    if (!this.modalSessionActive) return;
     clear(this.root);
     const overlay = el("div", { class: "modal-overlay" });
     const modal = el("div", { class: "modal", role: "dialog", "aria-modal": "true", "aria-labelledby": "settings-error-title" });
     const head = el("div", { class: "modal-head" });
     head.appendChild(el("div", { class: "modal-title", id: "settings-error-title" }, ["Settings"]));
     const closeBtn = el("button", { class: "modal-close", type: "button", "aria-label": "Close settings", html: icon("close", 16) });
-    closeBtn.addEventListener("click", () => this.close());
+    closeBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.close();
+    });
     head.appendChild(closeBtn);
     modal.appendChild(head);
     const body = el("div", { class: "modal-body" });
@@ -602,7 +691,16 @@ export class SettingsModal {
         `Could not load settings: ${msg}`,
       ]),
     ]));
+    const foot = el("div", { class: "modal-foot" });
+    const dismissBtn = el("button", { class: "btn primary", type: "button" }, ["Close"]);
+    dismissBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.close();
+    });
+    foot.appendChild(dismissBtn);
     modal.appendChild(body);
+    modal.appendChild(foot);
     overlay.appendChild(modal);
     overlay.addEventListener("click", (e) => { if (e.target === overlay) this.close(); });
     this.root.appendChild(overlay);
@@ -611,6 +709,7 @@ export class SettingsModal {
   }
 
   private render() {
+    if (!this.modalSessionActive) return;
     clear(this.root);
     const overlay = el("div", { class: "modal-overlay" });
     const modal = el("div", { class: "modal", role: "dialog", "aria-modal": "true", "aria-labelledby": "settings-title" });
@@ -619,7 +718,11 @@ export class SettingsModal {
     const head = el("div", { class: "modal-head" });
     head.appendChild(el("div", { class: "modal-title", id: "settings-title" }, ["Settings"]));
     const closeBtn = el("button", { class: "modal-close", type: "button", "aria-label": "Close settings", html: icon("close", 16) });
-    closeBtn.addEventListener("click", () => this.close());
+    closeBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.close();
+    });
     head.appendChild(closeBtn);
     modal.appendChild(head);
 
@@ -639,13 +742,22 @@ export class SettingsModal {
         `<img class="provider-card-logo" src="${p.logoSrc}" alt="" width="22" height="22" draggable="false" />` +
         `<div class="provider-card-meta"><span class="provider-card-name">${p.label}</span></div>`;
       card.addEventListener("click", () => {
+        const wasSelectedProvider = this.settings.provider === p.id;
+        const currentBase = (this.settings.base_url || "").trim();
         this.settings.provider = p.id;
         this.settings.model = p.defaultModel;
-        const newBase = p.defaultBaseUrl.trim();
-        const currentBase = (this.settings.base_url || "").trim();
-        const wasDefault = !currentBase || isKnownProviderBaseUrl(currentBase);
-        if (wasDefault) {
-          this.settings.base_url = newBase || null;
+        if (p.id === "ollama") {
+          const backend = backendForModel(p.defaultModel);
+          this.settings.provider = backend.provider;
+          if (!wasSelectedProvider || !currentBase) {
+            this.settings.base_url = backend.baseUrl;
+          }
+        } else {
+          const newBase = p.defaultBaseUrl.trim();
+          const wasDefault = !currentBase || isKnownProviderBaseUrl(currentBase);
+          if (wasDefault) {
+            this.settings.base_url = newBase || null;
+          }
         }
         const known = this.discoveredModels[p.id];
         if (known?.length && !known.includes(this.settings.model)) {
@@ -721,9 +833,13 @@ export class SettingsModal {
           const m = sel.value;
           this.settings.model = m;
           if (uiId === "ollama") {
-            const backend = backendForModel(m);
-            this.settings.provider = backend.provider;
-            this.settings.base_url = backend.baseUrl;
+            // A local Ollama model may share an id with another provider. Model
+            // selection must never change the selected provider or overwrite an
+            // explicitly configured Ollama host.
+            this.settings.provider = "ollama";
+            if (!this.settings.base_url?.trim()) {
+              this.settings.base_url = catalogProvider.defaultBaseUrl || null;
+            }
           }
         });
       }
@@ -736,7 +852,9 @@ export class SettingsModal {
       const msg =
       this.modelDiscoveryMessages[discoveryProvider.id] ||
       (uiIdForKeys === "hormachuelos_free"
-        ? "Hormachuelos v1 is included for signed-in users. No provider key is stored on this computer."
+        ? "Hormachuelos models are included for signed-in users. No provider key is stored on this computer."
+        : uiIdForKeys === "glm"
+        ? "Free OpenCode models only. Get a key at opencode.ai/auth."
         : uiIdForKeys === "ollama"
         ? "Select a locally installed Ollama model above."
         : discoveryProvider.keyRequired && !this.keyStates[discoveryProvider.id]
@@ -832,7 +950,7 @@ export class SettingsModal {
     } else {
       const note = el("div", { class: "set-hint", style: "padding:8px 10px;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--fg-2)" });
       note.textContent = activeProvider.id === "hormachuelos_free"
-        ? "Included for signed-in Hormachuelos users. The provider credential is protected by the hosted service and is never bundled with the app."
+        ? "Included for signed-in Hormachuelos users. Model credentials are protected by the hosted service and are never bundled with the app."
         : `${activeProvider.label} does not require an API key. Just pick a model and start building.`;
       keyRow.appendChild(note);
     }
@@ -840,11 +958,6 @@ export class SettingsModal {
 
     // Agent behavior
     body.appendChild(this.section("Agent"));
-    body.appendChild(this.field("Max iterations", () => {
-      const inp = el("input", { class: "field", type: "number", value: String(this.settings.max_iterations), min: "1", max: "100" }) as HTMLInputElement;
-      inp.addEventListener("input", () => (this.settings.max_iterations = parseInt(inp.value) || 25));
-      return inp;
-    }));
     body.appendChild(this.field("Command timeout (seconds)", () => {
       const inp = el("input", { class: "field", type: "number", value: String(this.settings.command_timeout_secs), min: "5", max: "600" }) as HTMLInputElement;
       inp.addEventListener("input", () => (this.settings.command_timeout_secs = parseInt(inp.value) || 120));
@@ -976,19 +1089,26 @@ export class SettingsModal {
 
     // Footer
     const foot = el("div", { class: "modal-foot" });
-    const cancelBtn = el("button", { class: "btn" }, ["Cancel"]);
-    cancelBtn.addEventListener("click", () => this.close());
-    const saveAllBtn = el("button", { class: "btn primary" }, ["Save"]);
-    saveAllBtn.addEventListener("click", async () => {
+    const cancelBtn = el("button", { class: "btn", type: "button" }, ["Cancel"]);
+    cancelBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.close();
+    });
+    const saveAllBtn = el("button", { class: "btn primary", type: "button" }, ["Save"]);
+    saveAllBtn.addEventListener("click", async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
       this.settings.permission_mode = (this.settings.permission_mode || "plan").toLowerCase();
       this.settings.auto_approve =
         this.settings.permission_mode === "auto" || this.settings.permission_mode === "full";
       try {
         await api.saveSettings(this.settings);
         this.close();
-      } catch (e) {
-        console.error("save settings failed", e);
-        alert("Could not save settings: " + String(e));
+      } catch (err) {
+        console.error("save settings failed", err);
+        if (!this.modalSessionActive) return;
+        alert("Could not save settings: " + String(err));
       }
     });
     foot.appendChild(cancelBtn);
@@ -999,6 +1119,7 @@ export class SettingsModal {
     overlay.addEventListener("click", (e) => {
       if (e.target === overlay) this.close();
     });
+    if (!this.modalSessionActive) return;
     this.root.appendChild(overlay);
     (overlay as HTMLElement).style.pointerEvents = "auto";
     this.focusDefault(closeBtn);
@@ -1011,6 +1132,10 @@ export class SettingsModal {
   private renderComputerUsePanel(): HTMLElement {
     const status = this.computerUseStatus;
     const supported = status?.supported ?? false;
+    const enabled = supported && !!this.settings.computer_use_enabled;
+    const warningText = (isEnabled: boolean) => isEnabled
+      ? "Full desktop control is enabled with zero approval prompts. A live cursor + typing FX overlay follows every action. Emergency stop: Ctrl+Alt+Esc."
+      : "Computer use is off. Enable it to allow desktop actions. Emergency stop: Ctrl+Alt+Esc.";
     const panel = el("section", {
       class: "computer-use-panel",
       "aria-labelledby": "computer-use-title",
@@ -1032,7 +1157,9 @@ export class SettingsModal {
         ? "Unsupported"
         : status.paused
           ? "Paused"
-          : "Ready";
+          : enabled
+            ? "Ready"
+            : "Available";
     const badge = el(
       "span",
       {
@@ -1058,6 +1185,10 @@ export class SettingsModal {
     input.disabled = !supported;
     input.addEventListener("change", () => {
       this.settings.computer_use_enabled = input.checked;
+      if (supported && !status?.paused) {
+        badge.textContent = input.checked ? "Ready" : "Available";
+      }
+      warning.textContent = warningText(input.checked && supported);
     });
     toggle.appendChild(input);
     const toggleCopy = el("span", { class: "computer-use-toggle-copy" });
@@ -1072,18 +1203,15 @@ export class SettingsModal {
     toggle.appendChild(toggleCopy);
     panel.appendChild(toggle);
 
-    panel.appendChild(
-      el(
-        "div",
-        {
-          class: "computer-use-warning",
-          id: "computer-use-help",
-        },
-        [
-          "Full desktop control is enabled with zero approval prompts. A live cursor + typing FX overlay follows every action. Emergency stop: Ctrl+Alt+Esc.",
-        ],
-      ),
+    const warning = el(
+      "div",
+      {
+        class: "computer-use-warning",
+        id: "computer-use-help",
+      },
+      [warningText(enabled)],
     );
+    panel.appendChild(warning);
 
     const controls = el("div", { class: "computer-use-controls" });
     const shortcut = status?.emergencyShortcut || "Ctrl+Alt+Esc";
@@ -1367,17 +1495,31 @@ export class SettingsModal {
   }
 
   close() {
-    if (!this.modalSessionActive) return;
+    if (!this.modalSessionActive) {
+      // Still clear any leftover DOM if a stale async render left content behind.
+      if (this.root?.childElementCount) clear(this.root);
+      return;
+    }
     this.modalSessionActive = false;
     this.computerUseUnlisten?.();
     this.computerUseUnlisten = null;
     this.root.removeEventListener("keydown", this.dialogKeyHandler);
     clear(this.root);
-    for (const { node, wasInert } of this.inertSiblings) node.inert = wasInert;
+    for (const { node, wasInert } of this.inertSiblings) {
+      try {
+        node.inert = wasInert;
+      } catch {
+        /* ignore */
+      }
+    }
     this.inertSiblings = [];
     const restoreFocus = this.previousFocus;
     this.previousFocus = null;
-    this.onClose();
+    try {
+      this.onClose();
+    } catch (e) {
+      console.warn("settings onClose failed", e);
+    }
     window.requestAnimationFrame(() => {
       if (restoreFocus?.isConnected) restoreFocus.focus({ preventScroll: true });
     });

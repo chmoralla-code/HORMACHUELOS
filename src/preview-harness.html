@@ -16,6 +16,11 @@
     </style>
   </head>
   <body>
+    <script>
+      window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
+      window.__TAURI_INTERNALS__.convertFileSrc = (filePath) =>
+        `https://asset.localhost/${encodeURIComponent(String(filePath).replaceAll("\\", "/"))}`;
+    </script>
     <div id="app">
       <div class="workbench">
         <main class="test-stage"></main>
@@ -34,12 +39,23 @@
             <head>
               <meta name="viewport" content="width=device-width,initial-scale=1" />
               <style>
+                @import "./assets/import.css";
+                /* Keep literal example: url("./assets/comment.png"); */
                 body { margin: 0; font-family: sans-serif; }
-                #target { margin: 24px; padding: 18px; }
+                #target {
+                  margin: 24px;
+                  padding: 18px;
+                  background-image: url("./assets/style-block.png");
+                }
+                #literal-target::before { content: "url('./assets/literal.png')"; }
                 @media (max-width: 500px) { body { background: rgb(230, 255, 235); } }
               </style>
             </head>
-            <body><button id="target">Preview target</button></body>
+            <body>
+              <button id="target">Preview target</button>
+              <div id="inline-style-target" style="background-image: url('./assets/style-attribute.png')"></div>
+              <div id="literal-target"></div>
+            </body>
           </html>`,
         size: 512,
         language: "html",
@@ -76,7 +92,12 @@
       await preview.open({
         projectRoot: "C:\\preview-fixture",
         entryPath: "index.html",
-        files: ["index.html"],
+        files: [
+          "index.html",
+          "assets/import.css",
+          "assets/style-block.png",
+          "assets/style-attribute.png",
+        ],
         title: "Mode test",
       });
     </script>

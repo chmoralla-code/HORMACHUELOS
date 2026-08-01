@@ -288,10 +288,35 @@ async fn list_provider_models(
 ) -> Result<Vec<String>, String> {
     config::validate_provider_id(&provider).map_err(|e| e.to_string())?;
     if provider.eq_ignore_ascii_case("hormachuelos_free") {
-        return Ok(vec!["hormachuelos-v1".into()]);
+        let builtin_aliases = ["hormachuelos-v1", "hormachuelos-v2"];
+        let session = match config::load_website_session() {
+            Ok(session) => session,
+            // Keep a usable offline fallback before the browser-link flow
+            // completes. Once signed in, the server returns the live admin
+            // managed alias catalog.
+            Err(_) => return Ok(builtin_aliases.into_iter().map(str::to_string).collect()),
+        };
+        let mut model_ids = llm::openai::fetch_model_ids(
+            "hormachuelos_free",
+            &session,
+            &license::hosted_chat_base_url(),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        // A deployed website may lag behind a desktop update. Keep local
+        // aliases selectable while retaining all live admin-managed aliases.
+        for alias in builtin_aliases {
+            if !model_ids
+                .iter()
+                .any(|model| model.eq_ignore_ascii_case(alias))
+            {
+                model_ids.push(alias.to_string());
+            }
+        }
+        return Ok(model_ids);
     }
     let license = license::LicenseStatus::load().unwrap_or_default();
-    let use_hosted = license::should_use_hosted(&license);
+    let use_hosted = license::should_use_hosted_for_provider(&license, &provider);
     if provider.eq_ignore_ascii_case("cursor") && !use_hosted {
         let key = config::load_cursor_sdk_api_key("cursor")
             .map_err(|_| "Save a Cursor / OpenAI key before refreshing models.".to_string())?;
@@ -478,6 +503,7 @@ async fn agent_run(
     prompt: String,
     session_id: String,
     history: Option<Vec<agent::HistoryTurn>>,
+    project_root: Option<String>,
     app: tauri::AppHandle,
     state: tauri::State<'_, state::AppState>,
 ) -> Result<(), String> {
@@ -511,12 +537,21 @@ async fn agent_run(
             }
         }
     }
-    let project_root = state
-        .project_root
-        .lock()
-        .unwrap()
-        .clone()
-        .ok_or_else(|| "No project open. Create or open a project first.".to_string())?;
+    // Carry the workspace captured by the frontend into this specific run.
+    // A project switch must never redirect an already-starting agent.
+    let project_root = if let Some(path) = project_root.filter(|path| !path.trim().is_empty()) {
+        workspace::canonical_project_root(std::path::Path::new(&path))
+            .map_err(|error| error.to_string())?
+            .to_string_lossy()
+            .to_string()
+    } else {
+        state
+            .project_root
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| "No project open. Create or open a project first.".to_string())?
+    };
     // Always reload settings from disk so Plan/Auto/Full mode changes apply
     // even if in-memory state was stale.
     let settings = match config::Settings::load() {

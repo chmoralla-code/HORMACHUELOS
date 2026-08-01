@@ -135,7 +135,7 @@ pub fn provider_default_base_url(provider: &str) -> Option<&'static str> {
         "openrouter" => Some("https://openrouter.ai/api/v1"),
         "pollinations" => Some("https://gen.pollinations.ai/v1"),
         "deepseek" => Some("https://api.deepseek.com"),
-        "glm" => Some("https://open.bigmodel.cn/api/paas/v4"),
+        "glm" => Some("https://opencode.ai/zen/v1"),
         "openai" => Some("https://api.openai.com/v1"),
         "cursor" => Some("https://api.cursor.com/v1"),
         "hormachuelos_free" => Some("https://hormachuelos.vercel.app/api/v1"),

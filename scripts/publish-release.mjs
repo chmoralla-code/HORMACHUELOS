@@ -112,6 +112,38 @@ function bumpVersions(version) {
     writeFileSync(appJs, src);
     console.log(`updated ${appJs}`);
   }
+
+  // Keep the website's no-database fallback aligned with the installers that
+  // this release publishes. This makes the update and download paths work even
+  // while the release database is temporarily unreachable.
+  const releasesJs = join(ROOT, "website", "api", "_lib", "releases.js");
+  if (existsSync(releasesJs)) {
+    let src = readFileSync(releasesJs, "utf8");
+    src = src.replace(
+      /const BUILTIN_RELEASE_VERSION = "[^"]+";/,
+      `const BUILTIN_RELEASE_VERSION = "${version}";`,
+    );
+    writeFileSync(releasesJs, src);
+    console.log(`updated ${releasesJs}`);
+  }
+
+  // The installers are intentionally excluded from ordinary deployments. Add
+  // just this release's two files back so the bundled fallback URLs remain
+  // usable as well as the primary Supabase download URLs.
+  const vercelIgnore = join(ROOT, "website", ".vercelignore");
+  if (existsSync(vercelIgnore)) {
+    let src = readFileSync(vercelIgnore, "utf8");
+    src = src.replace(
+      /!downloads\/Hormachuelos_\d+\.\d+\.\d+_x64_en-US\.msi/g,
+      `!downloads/Hormachuelos_${version}_x64_en-US.msi`,
+    );
+    src = src.replace(
+      /!downloads\/Hormachuelos_\d+\.\d+\.\d+_x64-setup\.exe/g,
+      `!downloads/Hormachuelos_${version}_x64-setup.exe`,
+    );
+    writeFileSync(vercelIgnore, src);
+    console.log(`updated ${vercelIgnore}`);
+  }
 }
 
 function installerPaths(version) {

@@ -106,6 +106,108 @@ function resolveRel(fromDir: string, href: string): string {
   return `${base.join("/")}${suffix}`;
 }
 
+function isExternalAssetUrl(value: string): boolean {
+  return /^(?:[a-z][a-z0-9+.-]*:|#|\/\/)/i.test(value.trim());
+}
+
+function cssStringEnd(css: string, start: number): number {
+  const quote = css[start];
+  for (let i = start + 1; i < css.length; i += 1) {
+    if (css[i] === "\\") {
+      i += 1;
+    } else if (css[i] === quote) {
+      return i + 1;
+    }
+  }
+  return css.length;
+}
+
+function isCssIdentifierChar(value: string | undefined): boolean {
+  return !!value && /[a-z0-9_-]/i.test(value);
+}
+
+function rewriteInlineCssAssets(css: string, rewriteUrl: (url: string) => string): string {
+  let output = "";
+  let i = 0;
+  while (i < css.length) {
+    if (css.startsWith("/*", i)) {
+      const end = css.indexOf("*/", i + 2);
+      const next = end < 0 ? css.length : end + 2;
+      output += css.slice(i, next);
+      i = next;
+      continue;
+    }
+
+    if (css[i] === '"' || css[i] === "'") {
+      const end = cssStringEnd(css, i);
+      output += css.slice(i, end);
+      i = end;
+      continue;
+    }
+
+    const importToken = css.slice(i, i + 7);
+    if (
+      importToken.toLowerCase() === "@import" &&
+      !isCssIdentifierChar(css[i + 7])
+    ) {
+      let valueStart = i + 7;
+      while (/\s/.test(css[valueStart] || "")) valueStart += 1;
+      const quote = css[valueStart];
+      if (quote === '"' || quote === "'") {
+        const end = cssStringEnd(css, valueStart);
+        if (end > valueStart + 1 && css[end - 1] === quote) {
+          const raw = css.slice(valueStart + 1, end - 1).trim();
+          output += !raw || isExternalAssetUrl(raw)
+            ? css.slice(i, end)
+            : css.slice(i, valueStart + 1) + rewriteUrl(raw) + quote;
+          i = end;
+          continue;
+        }
+      }
+    }
+
+    if (
+      css.slice(i, i + 4).toLowerCase() === "url(" &&
+      !isCssIdentifierChar(css[i - 1])
+    ) {
+      let valueStart = i + 4;
+      while (/\s/.test(css[valueStart] || "")) valueStart += 1;
+      const quote = css[valueStart];
+      if (quote === '"' || quote === "'") {
+        const end = cssStringEnd(css, valueStart);
+        let close = end;
+        while (/\s/.test(css[close] || "")) close += 1;
+        if (end > valueStart + 1 && css[end - 1] === quote && css[close] === ")") {
+          const raw = css.slice(valueStart + 1, end - 1).trim();
+          output += !raw || isExternalAssetUrl(raw)
+            ? css.slice(i, close + 1)
+            : css.slice(i, valueStart + 1) + rewriteUrl(raw) + css.slice(end - 1, close + 1);
+          i = close + 1;
+          continue;
+        }
+      } else {
+        let close = valueStart;
+        while (close < css.length && css[close] !== ")") {
+          if (css[close] === "\\") close += 1;
+          close += 1;
+        }
+        if (css[close] === ")") {
+          const raw = css.slice(valueStart, close).trim();
+          output += !raw || isExternalAssetUrl(raw)
+            ? css.slice(i, close + 1)
+            : `${css.slice(i, valueStart)}"${rewriteUrl(raw)}"${css.slice(close, close + 1)}`;
+          i = close + 1;
+          continue;
+        }
+      }
+    }
+
+    output += css[i];
+    i += 1;
+  }
+  return output;
+}
+
 function rewriteHtmlAssets(html: string, entryRel: string, projectRoot: string): string {
   const dir = dirnameRel(entryRel);
   const toAsset = (rel: string) => {
@@ -116,13 +218,25 @@ function rewriteHtmlAssets(html: string, entryRel: string, projectRoot: string):
       return rel;
     }
   };
-  return html.replace(
+  const rewriteUrl = (url: string) => {
+    if (!url || isExternalAssetUrl(url)) return url;
+    return toAsset(resolveRel(dir, url));
+  };
+  const rewrittenAttributes = html.replace(
     /(\s(?:src|href)=["'])([^"']+)(["'])/gi,
     (_m, pre: string, url: string, post: string) => {
-      if (/^(https?:|data:|blob:|mailto:|javascript:|#|\/\/)/i.test(url)) return `${pre}${url}${post}`;
-      const resolved = resolveRel(dir, url);
-      return `${pre}${toAsset(resolved)}${post}`;
+      return `${pre}${rewriteUrl(url)}${post}`;
     },
+  );
+  const rewrittenStyleBlocks = rewrittenAttributes.replace(
+    /(<style\b[^>]*>)([\s\S]*?)(<\/style\s*>)/gi,
+    (_match, open: string, css: string, close: string) =>
+      `${open}${rewriteInlineCssAssets(css, rewriteUrl)}${close}`,
+  );
+  return rewrittenStyleBlocks.replace(
+    /(\sstyle\s*=\s*)(['"])([\s\S]*?)\2/gi,
+    (_match, prefix: string, quote: string, css: string) =>
+      `${prefix}${quote}${rewriteInlineCssAssets(css, rewriteUrl)}${quote}`,
   );
 }
 
@@ -229,6 +343,8 @@ export class SitePreview {
   private selected: SelectedEl | null = null;
   private onDescribe: ((prompt: string) => void) | null = null;
   private closing = false;
+  private closeTimer: number | null = null;
+  private closeGeneration = 0;
   private resizing = false;
   private resizeCleanup: (() => void) | null = null;
 
@@ -558,8 +674,17 @@ export class SitePreview {
     return this.activeTab?.frame ?? null;
   }
 
-  async open(opts: PreviewOpenOptions) {
+  private cancelCloseTeardown() {
+    this.closeGeneration += 1;
+    if (this.closeTimer != null) {
+      window.clearTimeout(this.closeTimer);
+      this.closeTimer = null;
+    }
     this.closing = false;
+  }
+
+  async open(opts: PreviewOpenOptions) {
+    this.cancelCloseTeardown();
     this.projectRoot = opts.projectRoot;
     let files = opts.files?.length
       ? opts.files
@@ -628,13 +753,16 @@ export class SitePreview {
   close() {
     if (this.root.hidden || this.closing) return;
     this.closing = true;
+    const generation = ++this.closeGeneration;
     this.setDesignMode(false);
     this.root.classList.remove("is-open");
     this.root.classList.add("is-closing");
     document.body.classList.remove("preview-open");
     const workbench = document.querySelector(".workbench");
     workbench?.classList.remove("preview-open");
-    window.setTimeout(() => {
+    this.closeTimer = window.setTimeout(() => {
+      this.closeTimer = null;
+      if (!this.closing || generation !== this.closeGeneration) return;
       this.root.hidden = true;
       this.root.classList.remove("is-closing");
       this.destroyAllTabs();
@@ -643,6 +771,7 @@ export class SitePreview {
   }
 
   private showShell(_title: string) {
+    this.cancelCloseTeardown();
     this.root.removeAttribute("hidden");
     this.root.hidden = false;
     // Force reflow before fade-in
@@ -660,11 +789,6 @@ export class SitePreview {
         localStorage.setItem("ai-forge:right-drawer-open", "1");
       } catch {
         /* ignore */
-      }
-      const rightBtn = document.getElementById("drawer-right-btn");
-      if (rightBtn) {
-        rightBtn.classList.add("active");
-        rightBtn.setAttribute("aria-pressed", "true");
       }
     }
   }

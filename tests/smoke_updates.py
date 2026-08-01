@@ -45,10 +45,25 @@ def install_tauri_mock(page):
           const callbacks = new Map();
           const settings = %s;
           const licenseStatus = %s;
+          window.__testSettings = settings;
+          window.__savedSettingsHistory = [];
+          window.__delayOllamaDiscovery = false;
+          window.__pendingOllamaDiscoveries = 0;
+          window.__ollamaDiscoveryResolvers = [];
+          window.__releaseOllamaDiscoveries = () => {
+            window.__delayOllamaDiscovery = false;
+            const resolvers = window.__ollamaDiscoveryResolvers.splice(0);
+            for (const resolve of resolvers) resolve();
+          };
           const invoke = async (cmd, args = {}) => {
             if (cmd === 'plugin:event|listen') return args.handler;
             if (cmd === 'plugin:event|unlisten') return null;
             if (cmd === 'get_settings') return {...settings};
+            if (cmd === 'save_settings') {
+              Object.assign(settings, args.settings || {});
+              window.__savedSettingsHistory.push({...settings});
+              return null;
+            }
             if (cmd === 'get_computer_use_status') return {
               supported: true,
               paused: false,
@@ -61,8 +76,19 @@ def install_tauri_mock(page):
             if (cmd === 'list_integrations') return [];
             if (cmd === 'list_project_templates') return [];
             if (cmd === 'has_api_key') return false;
-            if (cmd === 'list_provider_models') return [];
-            if (cmd === 'app_version') return '0.1.0';
+            if (cmd === 'list_provider_models') {
+              if (args.provider !== 'ollama') return [];
+              const models = ['deepseek-v4-flash', 'glm-5.1:cloud', 'glm-5.2:cloud'];
+              if (!window.__delayOllamaDiscovery) return models;
+              window.__pendingOllamaDiscoveries += 1;
+              await new Promise((resolve) => {
+                window.__ollamaDiscoveryResolvers.push(resolve);
+              });
+              window.__pendingOllamaDiscoveries -= 1;
+              return models;
+            }
+            if (cmd === 'get_website_session') return 'desktop-test-session';
+            if (cmd === 'app_version') return '0.1.5';
             return null;
           };
           window.__TAURI_INTERNALS__ = {
@@ -97,6 +123,37 @@ def main():
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 900, "height": 600})
         install_tauri_mock(page)
+        page.route(
+            "https://hormachuelos.vercel.app/api/update?*",
+            lambda route: route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "updateAvailable": False,
+                        "forceUpdate": False,
+                        "currentVersion": "0.1.5",
+                        "latest": None,
+                    }
+                ),
+            ),
+        )
+        page.route(
+            "https://hormachuelos.vercel.app/api/auth/me",
+            lambda route: route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "ok": True,
+                        "user": {
+                            "email": "desktop-test@example.com",
+                            "plan": "free",
+                        },
+                    }
+                ),
+            ),
+        )
         page.on("pageerror", lambda error: errors.append(str(error)))
         page.on(
             "console",
@@ -108,6 +165,38 @@ def main():
             "Math.max(document.body.scrollWidth, document.documentElement.scrollWidth) - innerWidth"
         )
         assert overflow <= 1, f"page overflows the 900px viewport by {overflow}px"
+
+        page.evaluate("window.__delayOllamaDiscovery = true")
+        page.locator(".chip-model").click()
+        page.locator(".chip-menu-provider", has_text="Ollama").click()
+        page.wait_for_function("window.__pendingOllamaDiscoveries === 1")
+        page.locator(".chip-model").click()
+        page.locator(".chip-menu-provider", has_text="DeepSeek").click()
+        page.wait_for_function("window.__testSettings.provider === 'deepseek'")
+        page.evaluate("window.__releaseOllamaDiscoveries()")
+        page.wait_for_function("window.__pendingOllamaDiscoveries === 0")
+        page.wait_for_timeout(50)
+        assert page.evaluate("window.__testSettings.provider") == "deepseek"
+        assert page.evaluate("window.__savedSettingsHistory.at(-1).provider") == "deepseek"
+
+        page.reload(wait_until="networkidle")
+
+        page.locator(".chip-model").click()
+        page.locator(".chip-menu-provider", has_text="Ollama").click()
+        page.wait_for_function(
+            "window.__savedSettingsHistory.some(s => s.provider === 'ollama')"
+        )
+        ollama_saves = page.evaluate(
+            "window.__savedSettingsHistory.filter(s => s.provider === 'ollama')"
+        )
+        assert ollama_saves[0]["model"] in {
+            "deepseek-v4-flash",
+            "glm-5.1:cloud",
+            "glm-5.2:cloud",
+        }
+        assert not any(saved["model"] == "llama3.2" for saved in ollama_saves)
+
+        page.reload(wait_until="networkidle")
 
         files_tab = page.locator("#files-tab")
         files_tab.focus()
@@ -123,23 +212,69 @@ def main():
         assert dialog.evaluate("dialog => dialog.contains(document.activeElement)")
 
         provider_names = dialog.locator(".provider-card-name").all_inner_texts()
-        assert "Cursor SDK" in provider_names
-        assert "OpenAI" in provider_names
+        assert provider_names == [
+            "OpenAI",
+            "HORMACHUELOS FREE",
+            "Ollama",
+            "DeepSeek",
+            "OpenRouter",
+            "OpenCode",
+        ]
         assert not any("Claude" in name for name in provider_names)
 
         model_label = dialog.locator("label", has_text="Model").first
         model_select = dialog.locator(f"#{model_label.get_attribute('for')}")
         assert model_select.input_value() == "grok-4.5"
-        assert "Grok 4.5" in model_select.locator("option:checked").inner_text()
+        assert "GPT 5.6 Sol" in model_select.locator("option:checked").inner_text()
+
+        base_label = dialog.locator("label", has_text="Base URL").first
+        base_input = dialog.locator(f"#{base_label.get_attribute('for')}")
+        base_input.fill("https://private-proxy.example/v1")
+        dialog.get_by_role("button", name="Ollama", exact=True).click()
+
+        active_label = dialog.locator("label", has_text="Active provider").first
+        active_select = dialog.locator(f"#{active_label.get_attribute('for')}")
+        assert active_select.input_value() == "ollama"
+        base_label = dialog.locator("label", has_text="Base URL").first
+        base_input = dialog.locator(f"#{base_label.get_attribute('for')}")
+        assert base_input.input_value() == "http://localhost:11434/v1"
+
+        custom_ollama_base = "http://192.168.1.44:11434/v1"
+        base_input.fill(custom_ollama_base)
+        dialog.get_by_role("button", name="Ollama", exact=True).click()
+        base_label = dialog.locator("label", has_text="Base URL").first
+        base_input = dialog.locator(f"#{base_label.get_attribute('for')}")
+        assert base_input.input_value() == custom_ollama_base
+
+        model_label = dialog.locator("label", has_text="Model").first
+        model_select = dialog.locator(f"#{model_label.get_attribute('for')}")
+        model_select.locator("option[value='deepseek-v4-flash']").wait_for(state="attached")
+        model_select.select_option("deepseek-v4-flash")
+        dialog.get_by_role("button", name="Save", exact=True).click()
+        dialog.wait_for(state="hidden")
+        selected = page.evaluate("({...window.__testSettings})")
+        assert selected["provider"] == "ollama"
+        assert selected["model"] == "deepseek-v4-flash"
+        assert selected["base_url"] == custom_ollama_base
+
+        settings_button.click()
+        dialog = page.get_by_role("dialog", name="Settings")
+        dialog.wait_for(state="visible")
 
         computer_panel = dialog.locator(".computer-use-panel")
         assert computer_panel.is_visible()
         computer_status = computer_panel.locator(".computer-use-badge").inner_text()
-        assert "READY" in computer_status.upper(), f"unexpected computer-use status: {computer_status}"
+        assert "AVAILABLE" in computer_status.upper(), f"unexpected computer-use status: {computer_status}"
+        assert "Computer use is off" in computer_panel.inner_text()
         assert "Ctrl+Alt+Esc" in computer_panel.inner_text()
         computer_toggle = computer_panel.get_by_role("checkbox", name="Enable computer use")
         assert computer_toggle.is_enabled()
         assert not computer_toggle.is_checked()
+        computer_toggle.check()
+        assert "READY" in computer_panel.locator(".computer-use-badge").inner_text().upper()
+        assert "Full desktop control is enabled" in computer_panel.inner_text()
+        computer_toggle.uncheck()
+        assert "AVAILABLE" in computer_panel.locator(".computer-use-badge").inner_text().upper()
 
         for label in dialog.locator("label[for]").all():
             target_id = label.get_attribute("for")

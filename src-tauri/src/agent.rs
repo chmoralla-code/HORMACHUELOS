@@ -84,6 +84,69 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> (&str, bool) {
     (&value[..end], true)
 }
 
+fn is_private_typing_tool(name: &str) -> bool {
+    name.trim().eq_ignore_ascii_case("computer_type_text")
+}
+
+/// Arguments safe to cross the backend/UI event boundary or enter saved history.
+/// The original arguments remain in the live tool call and are used for execution.
+fn public_tool_arguments(name: &str, arguments: &Value) -> Value {
+    if !name.trim().to_ascii_lowercase().starts_with("computer_") {
+        return arguments.clone();
+    }
+
+    let mut public = arguments.as_object().cloned().unwrap_or_default();
+    if public.contains_key("observation_token") {
+        public.insert(
+            "observation_token".into(),
+            Value::String("[fresh observation]".into()),
+        );
+    }
+    if is_private_typing_tool(name) {
+        let characters = public
+            .get("characters")
+            .and_then(Value::as_u64)
+            .unwrap_or_else(|| {
+                public
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(|text| text.chars().count() as u64)
+                    .unwrap_or(0)
+            });
+        public.insert(
+            "text".into(),
+            Value::String(format!("[hidden · {characters} characters]")),
+        );
+        public.insert("characters".into(), Value::from(characters));
+        public.remove("text_preview");
+    }
+    Value::Object(public)
+}
+
+fn public_tool_preview_delta(name: &str, arguments_delta: &str) -> String {
+    let normalized = name.trim().to_ascii_lowercase();
+    // A provider may stream arguments before or alongside the completed tool
+    // name. Fail closed while the name is unknown or still a prefix of the
+    // private typing tool so those early chunks never cross the UI boundary.
+    if normalized.is_empty() || "computer_type_text".starts_with(&normalized) {
+        String::new()
+    } else {
+        arguments_delta.to_string()
+    }
+}
+
+fn resolve_tool_preview_name(
+    names: &mut std::collections::HashMap<usize, String>,
+    index: usize,
+    streamed_name: &str,
+) -> Option<String> {
+    let streamed_name = streamed_name.trim();
+    if !streamed_name.is_empty() {
+        names.insert(index, streamed_name.to_string());
+    }
+    names.get(&index).cloned()
+}
+
 /// Split text into small UTF-8-safe chunks for progressive UI streaming.
 fn chunk_text_for_stream(value: &str, max_chars: usize) -> Vec<String> {
     if value.is_empty() {
@@ -285,6 +348,7 @@ async fn await_tool_confirm(
     args: &Value,
 ) -> bool {
     let summary = tool_confirm_summary(name, args);
+    let public_arguments = public_tool_arguments(name, args);
     let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
     *run.confirm_tx.lock().unwrap() = Some(tx);
     emit(
@@ -294,7 +358,7 @@ async fn await_tool_confirm(
         json!({
             "id": id,
             "name": name,
-            "arguments": args,
+            "arguments": public_arguments,
             "summary": summary,
         }),
     );
@@ -338,10 +402,11 @@ pub async fn run_loop(
         );
         if let Some(tool_calls) = &mut turn.tool_calls {
             for tool_call in tool_calls {
-                tool_call.arguments = integration_chat::redact_sensitive_value(
+                let redacted = integration_chat::redact_sensitive_value(
                     &tool_call.arguments,
                     known_integration_secrets.as_ref(),
                 );
+                tool_call.arguments = public_tool_arguments(&tool_call.name, &redacted);
             }
         }
     }
@@ -396,7 +461,7 @@ Current user request:\n{prompt}",
     let mut routed_auth_tool = integration_chat::auth_tool_for_prompt(&prompt);
     let auth_request_routed = routed_auth_tool.is_some();
     let license = crate::license::LicenseStatus::load().unwrap_or_default();
-    let use_hosted = crate::license::should_use_hosted(&license);
+    let use_hosted = crate::license::should_use_hosted_for_provider(&license, &settings.provider);
     let uses_hormachuelos_free = settings.provider.eq_ignore_ascii_case("hormachuelos_free");
     let (key, base_url_override) = if uses_hormachuelos_free {
         let session = crate::config::load_website_session().map_err(|_| {
@@ -637,6 +702,7 @@ BASE RULES (mode rules above win on conflict):\n\
 8. If a command fails, read the error, fix the cause, and retry — don't give up immediately.\n\
 9. Only do what the user asked (or what they approved in Plan mode). No unrelated changes.\n\
 10. For deploy/git hosting: use connected integrations first. If missing, call connect_account (in-chat secure form + browser) — do not run interactive CLI login via run_command and do not request credentials in the chat message box.\n\
+11. Format final prose as clean Markdown: use headings for sections, bullets for lists, and Markdown tables only for comparisons. Every table must include a header row and separator row; never use unaligned plain-text columns.\n\
 {memory_rules}\n\
 TOOL REFERENCE: read_file, write_file, edit_file, list_dir, glob, grep, run_command, git_init, git_add_all, git_commit, git_status, list_drives, sys_info, env_vars, list_processes, kill_process, open_url, open_path, download_file, move_file, copy_file, delete_file, make_dir, file_info, connect_account, integration_status, web_search, browse_page, export_client_pack, computer_list_windows, computer_observe, computer_focus_window, computer_click, computer_type_text, computer_press_key, computer_scroll, computer_drag, computer_game_sequence, ask_user, done.",
         root = root.display(),
@@ -781,7 +847,11 @@ Use them as continuous memory for everything that follows.",
         json!({ "iteration": 0, "turn_tokens": 0, "total_tokens": 0 }),
     );
 
-    for iteration in 0..settings.max_iterations {
+    // Runs remain active until the assistant finishes, the user presses Stop,
+    // a command/provider fails, or usage safeguards halt execution. The
+    // counter is telemetry only; it no longer imposes an arbitrary ceiling.
+    let mut iteration: u32 = 0;
+    loop {
         if cancel.load(Ordering::SeqCst) {
             emit_cancelled(&app, &session_id, iteration);
             return Ok(None);
@@ -836,13 +906,24 @@ Use them as continuous memory for everything that follows.",
         let app_for_tool_preview = app.clone();
         let sid_for_tool_preview = session_id.clone();
         let secrets_for_tool_preview = known_integration_secrets.clone();
+        let tool_preview_names = Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
+            usize,
+            String,
+        >::new()));
         let tool_call_sink: ToolCallSink =
             Arc::new(move |index: usize, name: &str, arguments_delta: &str| {
-                if name.trim().is_empty() && arguments_delta.is_empty() {
+                let resolved_name = {
+                    let Ok(mut names) = tool_preview_names.lock() else {
+                        return;
+                    };
+                    resolve_tool_preview_name(&mut names, index, name)
+                };
+                let Some(resolved_name) = resolved_name else {
                     return;
-                }
+                };
+                let public_delta = public_tool_preview_delta(&resolved_name, arguments_delta);
                 let arguments_delta = integration_chat::redact_sensitive_text(
-                    arguments_delta,
+                    &public_delta,
                     secrets_for_tool_preview.as_ref(),
                 );
                 emit(
@@ -851,7 +932,7 @@ Use them as continuous memory for everything that follows.",
                     "tool_preview",
                     json!({
                         "id": format!("tool-preview-{iteration}-{index}"),
-                        "name": name,
+                        "name": resolved_name,
                         "arguments_delta": arguments_delta,
                     }),
                 );
@@ -1030,6 +1111,7 @@ Call ask_user NOW with:\n\
 - allow_other: true\n\
 Do not write the options only as markdown. Do not scaffold or write files yet.",
                 ));
+                iteration = iteration.saturating_add(1);
                 continue;
             }
 
@@ -1095,6 +1177,9 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
                 }
             }
 
+            let public_arguments = public_tool_arguments(&tc.name, &tc.arguments);
+            let args_str = serde_json::to_string_pretty(&public_arguments).unwrap_or_default();
+
             emit(
                 &app,
                 &session_id,
@@ -1102,12 +1187,11 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
                 json!({
                     "id": tc.id,
                     "name": tc.name,
-                    "arguments": tc.arguments,
+                    "arguments": public_arguments,
                     "preview_id": format!("tool-preview-{iteration}-{tool_index}"),
                 }),
             );
 
-            let args_str = serde_json::to_string_pretty(&tc.arguments).unwrap_or_default();
             let (args_preview, args_truncated) = truncate_utf8(&args_str, 4000);
             if args_truncated {
                 emit(
@@ -1384,19 +1468,8 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
 
             messages.push(ChatMessage::tool(&tc.id, &tc.name, &content));
         }
+        iteration = iteration.saturating_add(1);
     }
-
-    emit(
-        &app,
-        &session_id,
-        "end",
-        json!({
-            "reason": "max_iterations",
-            "iteration": settings.max_iterations,
-            "total_tokens": total_tokens,
-        }),
-    );
-    Ok(None)
 }
 
 /// The Cursor SDK is used only for the explicitly selected Cursor provider.
@@ -1504,6 +1577,7 @@ fn display_model_name(model_id: &str) -> String {
     }
     match raw.to_ascii_lowercase().as_str() {
         "hormachuelos-v1" => "Hormachuelos v1".into(),
+        "hormachuelos-v2" => "Hormachuelos v2".into(),
         _ => raw.to_string(),
     }
 }
@@ -1595,8 +1669,13 @@ mod tests {
     use super::{
         cursor_computer_use_instructions, cursor_effort_for_request,
         cursor_permission_instructions, display_model_name, display_provider_name,
-        identity_instructions, normalized_permission_mode, truncate_utf8, uses_cursor_sdk,
+        identity_instructions, normalized_permission_mode, public_tool_arguments,
+        public_tool_preview_delta, resolve_tool_preview_name, tool_confirm_summary, truncate_utf8,
+        uses_cursor_sdk,
     };
+    use serde_json::json;
+
+    const TYPED_SENTINEL: &str = "typed-secret-SENTINEL-agent-4b83";
 
     #[test]
     fn truncates_unicode_only_at_character_boundaries() {
@@ -1604,6 +1683,53 @@ mod tests {
         let (truncated, was_truncated) = truncate_utf8(value, 3);
         assert_eq!(truncated, "a");
         assert!(was_truncated);
+    }
+
+    #[test]
+    fn computer_type_text_is_private_across_public_agent_payloads() {
+        let arguments = json!({
+            "window_id": "42",
+            "observation_token": "one-use-token",
+            "text": TYPED_SENTINEL,
+        });
+        let public = public_tool_arguments("computer_type_text", &arguments);
+        let public_json = serde_json::to_string(&public).unwrap();
+        let summary = tool_confirm_summary("computer_type_text", &arguments);
+        let preview = public_tool_preview_delta("computer_type_text", TYPED_SENTINEL);
+        let preview_before_name = public_tool_preview_delta("", TYPED_SENTINEL);
+        let preview_while_name_streams =
+            public_tool_preview_delta("computer_type_te", TYPED_SENTINEL);
+
+        assert!(!public_json.contains(TYPED_SENTINEL));
+        assert!(!public_json.contains("one-use-token"));
+        assert!(!summary.contains(TYPED_SENTINEL));
+        assert!(preview.is_empty());
+        assert!(preview_before_name.is_empty());
+        assert!(preview_while_name_streams.is_empty());
+        assert_eq!(public["characters"], TYPED_SENTINEL.chars().count());
+    }
+
+    #[test]
+    fn streamed_tool_arguments_reuse_only_a_known_safe_name() {
+        let mut names = std::collections::HashMap::new();
+
+        assert!(resolve_tool_preview_name(&mut names, 0, "").is_none());
+        assert!(public_tool_preview_delta("", TYPED_SENTINEL).is_empty());
+
+        assert_eq!(
+            resolve_tool_preview_name(&mut names, 1, "write_file").as_deref(),
+            Some("write_file")
+        );
+        let continued_write = resolve_tool_preview_name(&mut names, 1, "").unwrap();
+        assert_eq!(continued_write, "write_file");
+        assert_eq!(
+            public_tool_preview_delta(&continued_write, TYPED_SENTINEL),
+            TYPED_SENTINEL
+        );
+
+        resolve_tool_preview_name(&mut names, 2, "computer_type_text");
+        let continued_typing = resolve_tool_preview_name(&mut names, 2, "").unwrap();
+        assert!(public_tool_preview_delta(&continued_typing, TYPED_SENTINEL).is_empty());
     }
 
     #[test]
@@ -1617,10 +1743,12 @@ mod tests {
     #[test]
     fn runtime_identity_reports_actual_provider_and_model() {
         assert_eq!(display_model_name("grok-4.5"), "grok-4.5");
+        assert_eq!(display_model_name("composer-2.5"), "composer-2.5");
         assert_eq!(display_model_name("vendor/model:free"), "vendor/model:free");
         assert_eq!(display_provider_name("cursor"), "Cursor SDK");
         assert_eq!(display_provider_name("glm"), "GLM");
         assert_eq!(display_model_name("hormachuelos-v1"), "Hormachuelos v1");
+        assert_eq!(display_model_name("hormachuelos-v2"), "Hormachuelos v2");
         assert_eq!(
             display_provider_name("hormachuelos_free"),
             "HORMACHUELOS FREE"

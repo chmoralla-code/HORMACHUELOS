@@ -1,7 +1,7 @@
 {
   "name": "ai-forge",
   "private": true,
-  "version": "0.1.5",
+  "version": "0.1.8",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -10,7 +10,7 @@
     "check": "tsc --noEmit",
     "stage:cursor-runtime": "node scripts/stage-cursor-runtime.mjs",
     "test": "npm run check && cargo test --locked --manifest-path src-tauri/Cargo.toml",
-    "test:providers": "node --test website/tests/providers.test.mjs",
+    "test:providers": "node --test website/tests/providers.test.mjs website/tests/secret-box.test.mjs website/tests/releases.test.mjs website/tests/hosted-route.test.mjs",
     "verify": "npm run build && cargo fmt --manifest-path src-tauri/Cargo.toml -- --check && cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings && cargo test --locked --manifest-path src-tauri/Cargo.toml",
     "tauri": "cargo tauri",
     "desktop:dev": "cargo tauri dev",

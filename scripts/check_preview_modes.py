@@ -27,7 +27,7 @@ def main() -> None:
             "glm",
         ], f"unexpected visible provider catalog: {providers}"
         assert body.get_attribute("data-cursor-models") == "grok-4.5"
-        assert body.get_attribute("data-hormachuelos-free-models") == "hormachuelos-v1"
+        assert body.get_attribute("data-hormachuelos-free-models") == "hormachuelos-v1,hormachuelos-v2"
         assert body.get_attribute("data-tool-animation") == "lightningToolSpawnBlue"
         assert body.get_attribute("data-agentic-animation") == "lightningFadeInOutBlue"
         assert body.get_attribute("data-agentic-color") == "rgb(85, 185, 255)"
@@ -46,6 +46,24 @@ def main() -> None:
 
         frame = page.frame_locator("iframe")
         frame.locator("#target").wait_for(state="visible")
+        style_block_url = frame.locator("#target").evaluate(
+            "element => getComputedStyle(element).backgroundImage"
+        )
+        style_attribute_url = frame.locator("#inline-style-target").evaluate(
+            "element => getComputedStyle(element).backgroundImage"
+        )
+        for asset_url in (style_block_url, style_attribute_url):
+            assert "asset.localhost" in asset_url, asset_url
+            assert "127.0.0.1:1420/assets" not in asset_url, asset_url
+        style_text = frame.locator("style").text_content() or ""
+        assert '@import "https://asset.localhost/' in style_text, style_text
+        assert 'url("./assets/comment.png")' in style_text, style_text
+        literal_content = frame.locator("#literal-target").evaluate(
+            "element => getComputedStyle(element, '::before').content"
+        )
+        assert "./assets/literal.png" in literal_content, literal_content
+        assert "asset.localhost" not in literal_content, literal_content
+
         page.get_by_role("button", name="Design").click()
         frame.locator("#target").click()
         assert page.locator("#site-preview-edit-tag").inner_text() == "button"
@@ -64,6 +82,30 @@ def main() -> None:
         page.get_by_role("button", name="Reload preview").click()
         frame.locator("#target").wait_for(state="visible")
         page.screenshot(path=str(SCREENSHOT), full_page=True)
+
+        # A reopen during the 280 ms close animation must cancel the stale teardown.
+        page.get_by_role("button", name="Close preview").click()
+        page.wait_for_timeout(50)
+        page.evaluate(
+            "opts => window.__preview.open(opts)",
+            {
+                "projectRoot": r"C:\preview-fixture",
+                "entryPath": "index.html",
+                "files": [
+                    "index.html",
+                    "assets/import.css",
+                    "assets/style-block.png",
+                    "assets/style-attribute.png",
+                ],
+                "title": "Rapid reopen test",
+            },
+        )
+        preview.wait_for(state="visible")
+        page.wait_for_timeout(350)
+        assert preview.is_visible()
+        assert "is-open" in (preview.get_attribute("class") or "")
+        assert page.locator("iframe").count() == 1
+        page.frame_locator("iframe").locator("#target").wait_for(state="visible")
 
         page.get_by_role("button", name="Close preview").click()
         preview.wait_for(state="hidden")

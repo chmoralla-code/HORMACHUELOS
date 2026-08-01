@@ -12,6 +12,11 @@ import {
   adminPublishRelease,
   adminSetForceUpdate,
 } from "../_lib/releases.js";
+import {
+  adminDeleteHostedModelConfig,
+  adminListHostedModelConfigs,
+  adminSaveHostedModelConfig,
+} from "../_lib/hosted-model-configs.js";
 
 function actionOf(req) {
   const q = req.query?.path;
@@ -49,7 +54,7 @@ export default async function handler(req, res) {
       );
     }
 
-    if (action === "users" || action === "releases") {
+    if (action === "users" || action === "releases" || action === "models") {
       if (!supabaseConfigured()) {
         return json(res, 503, { error: "Admin service not configured" }, req);
       }
@@ -102,6 +107,23 @@ export default async function handler(req, res) {
         }
         const release = await adminPublishRelease({ ...body, version: body.version });
         return json(res, 200, { ok: true, release }, req);
+      }
+    }
+
+    if (action === "models") {
+      if (req.method === "GET") {
+        return json(res, 200, { ok: true, ...(await adminListHostedModelConfigs()) }, req);
+      }
+      if (req.method === "POST" || req.method === "PATCH") {
+        const body = await readJson(req);
+        const config = await adminSaveHostedModelConfig(body);
+        return json(res, req.method === "POST" ? 201 : 200, { ok: true, config }, req);
+      }
+      if (req.method === "DELETE") {
+        const body = await readJson(req);
+        if (!body.id) return json(res, 400, { error: "Missing model configuration id" }, req);
+        await adminDeleteHostedModelConfig(body.id);
+        return json(res, 200, { ok: true }, req);
       }
     }
 

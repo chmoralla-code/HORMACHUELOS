@@ -18,12 +18,18 @@ import {
 import { checkDesktopUpdate, showUpdateDialog, showUpdateGate } from "./components/update-gate";
 import { basename, clear, div, el, speakDoneWorking } from "./components/util";
 import {
+  activeProjectWorkspacePath,
+  activateProjectWorkspace,
+  listProjectWorkspaces,
+  rememberRecentProjectWorkspaces,
+} from "./components/projects";
+import {
   loadSessions, saveSession, scheduleSessionSave, flushSessionSaves,
   deleteSession, deleteAllSessions, newSessionId, sessionTitle,
   recordAgentEvent, buildLlmHistory, redactChatCredentials, addSessionTokens, SESSION_TOKEN_BUDGET,
   type Session,
 } from "./components/session";
-import { icon, logo } from "./components/icons";
+import { icon } from "./components/icons";
 
 let sidebar: Sidebar;
 let chat: Chat;
@@ -35,8 +41,12 @@ let sitePreview: SitePreview;
 let currentProjectPath: string | null = null;
 let sessions: Session[] = [];
 let activeSessionId: string | null = null;
+/** Loaded sessions remain addressable after switching to another project. */
+const sessionRegistry = new Map<string, Session>();
 /** Session ids with an in-flight agent run (multiple can run at once). */
 const runningSessions = new Set<string>();
+/** Each run keeps its original workspace even when the visible project changes. */
+const runProjectPaths = new Map<string, string>();
 /** Files created/edited during a run — used to auto-open the build preview. */
 const runTouchedFiles = new Map<string, Set<string>>();
 /** Snapshot of project files at run start (relative paths). */
@@ -48,6 +58,18 @@ const pendingConfirms = new Map<
   string,
   { id: string; name: string; summary: string; arguments: any }
 >();
+
+function projectPathKey(path: string | null | undefined): string {
+  return String(path || "")
+    .trim()
+    .replace(/[\\/]+$/, "")
+    .toLocaleLowerCase();
+}
+
+function sameProjectPath(a: string | null | undefined, b: string | null | undefined): boolean {
+  const aKey = projectPathKey(a);
+  return !!aKey && aKey === projectPathKey(b);
+}
 
 function normalizeToolName(name: string): string {
   return (name || "")
@@ -90,7 +112,7 @@ const PREVIEW_OPEN_TOOLS = new Set([
   "openfile",
 ]);
 
-function toProjectRelPath(path: string): string {
+function toProjectRelPath(path: string, projectRoot = currentProjectPath): string {
   let p = path.replace(/\\/g, "/").trim();
   if (/^file:\/\//i.test(p)) {
     p = decodeURIComponent(p.replace(/^file:\/\/\/?/i, ""));
@@ -98,7 +120,7 @@ function toProjectRelPath(path: string): string {
       /* keep decoded */
     }
   }
-  const root = currentProjectPath?.replace(/\\/g, "/").replace(/\/$/, "");
+  const root = projectRoot?.replace(/\\/g, "/").replace(/\/$/, "");
   if (root && p.toLowerCase().startsWith(root.toLowerCase() + "/")) {
     return p.slice(root.length + 1);
   }
@@ -113,7 +135,10 @@ function walkProjectFiles(nodes: { path: string; isDir: boolean; children?: any[
   return out;
 }
 
-async function snapshotProjectFiles(): Promise<Set<string>> {
+async function snapshotProjectFiles(projectRoot = currentProjectPath): Promise<Set<string>> {
+  // The IPC file tree is rooted in the currently selected workspace. Do not
+  // accidentally snapshot a second project after the user has switched views.
+  if (!sameProjectPath(projectRoot, currentProjectPath)) return new Set();
   try {
     const tree = await api.listProjectFiles(16);
     return new Set(walkProjectFiles(tree.nodes || []));
@@ -124,6 +149,7 @@ async function snapshotProjectFiles(): Promise<Set<string>> {
 
 function trackRunTouchedFile(sessionId: string | undefined, name: string, args: Record<string, unknown> | undefined) {
   if (!sessionId || !args) return;
+  const projectRoot = runProjectPaths.get(sessionId) || currentProjectPath;
   const tool = normalizeToolName(name);
   if (!PREVIEW_WRITE_TOOLS.has(tool)) return;
   const keys = ["path", "file_path", "target", "dst", "destination", "src", "source", "filename"];
@@ -135,17 +161,21 @@ function trackRunTouchedFile(sessionId: string | undefined, name: string, args: 
   for (const key of keys) {
     const value = args[key];
     if (typeof value === "string" && value.trim()) {
-      bucket.add(toProjectRelPath(value));
+      bucket.add(toProjectRelPath(value, projectRoot));
     }
   }
   // Shell-ish tools sometimes pass a command string containing an .html path
   const blob = JSON.stringify(args);
   for (const m of blob.matchAll(/[A-Za-z0-9_./\\-]+\.(?:html?|css|js|mjs|tsx?|jsx|apk|exe)/gi)) {
-    bucket.add(toProjectRelPath(m[0]));
+    bucket.add(toProjectRelPath(m[0], projectRoot));
   }
 }
 
-function htmlPathFromOpenArgs(name: string, args: Record<string, unknown> | undefined): string | null {
+function htmlPathFromOpenArgs(
+  name: string,
+  args: Record<string, unknown> | undefined,
+  projectRoot = currentProjectPath,
+): string | null {
   if (!args) return null;
   const tool = normalizeToolName(name);
   if (!PREVIEW_OPEN_TOOLS.has(tool)) return null;
@@ -155,7 +185,7 @@ function htmlPathFromOpenArgs(name: string, args: Record<string, unknown> | unde
     (typeof args.url === "string" && args.url) ||
     "";
   if (!raw) return null;
-  const rel = toProjectRelPath(raw.replace(/^file:\/\/\/?/i, ""));
+  const rel = toProjectRelPath(raw.replace(/^file:\/\/\/?/i, ""), projectRoot);
   if (/\.html?$/i.test(rel) || /\.html?$/i.test(raw)) return rel;
   return null;
 }
@@ -165,15 +195,17 @@ async function openBuildPreview(opts: {
   files?: string[];
   title?: string;
   sessionId?: string;
+  projectRoot?: string | null;
 }) {
   if (!currentProjectPath || !sitePreview) return;
+  if (opts.projectRoot && !sameProjectPath(opts.projectRoot, currentProjectPath)) return;
   if (opts.sessionId) {
     if (previewOpenedForRun.has(opts.sessionId) && sitePreview.isOpen) return;
     previewOpenedForRun.add(opts.sessionId);
   }
   let files = opts.files || [];
   if (!files.length) {
-    files = [...(await snapshotProjectFiles())];
+    files = [...(await snapshotProjectFiles(opts.projectRoot || currentProjectPath))];
   }
   const entry = opts.entryPath || pickPreviewEntry(files);
   await sitePreview.open({
@@ -186,6 +218,12 @@ async function openBuildPreview(opts: {
 
 async function maybeOpenBuildPreview(sessionId: string | undefined, reason: string) {
   if (!sessionId || reason === "cancelled" || !currentProjectPath) return;
+  const runProjectPath = runProjectPaths.get(sessionId);
+  if (runProjectPath && !sameProjectPath(runProjectPath, currentProjectPath)) {
+    runTouchedFiles.delete(sessionId);
+    runBaselineFiles.delete(sessionId);
+    return;
+  }
   if (previewOpenedForRun.has(sessionId) && sitePreview?.isOpen) {
     runTouchedFiles.delete(sessionId);
     runBaselineFiles.delete(sessionId);
@@ -217,10 +255,17 @@ async function maybeOpenBuildPreview(sessionId: string | undefined, reason: stri
     files: [...now],
     entryPath: pickPreviewEntry(candidates) || htmlEntry,
     title: "Build preview",
+    projectRoot: runProjectPath,
   });
 }
 
 function refreshSidebar() {
+  const runningProjectPaths = new Set(
+    [...runningSessions]
+      .map((sessionId) => sessionRegistry.get(sessionId)?.projectId || runProjectPaths.get(sessionId) || "")
+      .filter(Boolean),
+  );
+  sidebar.setProjectWorkspaces(listProjectWorkspaces(), currentProjectPath, runningProjectPaths);
   sidebar.render(sessions, activeSessionId, runningSessions).catch((e) => console.error("sidebar render failed", e));
 }
 
@@ -235,6 +280,7 @@ function persistCurrentSession(deferred = false) {
   if (!activeSessionId || !currentProjectPath) return;
   const s = sessions.find((x) => x.id === activeSessionId);
   if (!s) return;
+  sessionRegistry.set(s.id, s);
   s.messages = chat.getMessages();
   if (deferred) scheduleSessionSave(s);
   else saveSession(s);
@@ -395,7 +441,7 @@ function applyUsageToSession(
     } | null;
   },
 ) {
-  const s = sessions.find((x) => x.id === sessionId);
+  const s = sessionRegistry.get(sessionId) || sessions.find((x) => x.id === sessionId);
   const add = Math.max(0, Math.floor(payload.turn_tokens ?? 0));
   if (s && add > 0) {
     addSessionTokens(s, add);
@@ -411,11 +457,12 @@ function applyUsageToSession(
 }
 
 function persistSessionById(id: string, deferred = false) {
-  const s = sessions.find((x) => x.id === id);
-  if (!s || !currentProjectPath) return;
+  const s = sessionRegistry.get(id) || sessions.find((x) => x.id === id);
+  if (!s) return;
   if (id === activeSessionId) {
     s.messages = chat.getMessages();
   }
+  sessionRegistry.set(s.id, s);
   if (deferred) scheduleSessionSave(s);
   else saveSession(s);
 }
@@ -436,6 +483,7 @@ function createNewSession() {
     sessionTokens: 0,
   };
   sessions.unshift(s);
+  sessionRegistry.set(s.id, s);
   activeSessionId = s.id;
   chat.startSession("");
   // Clear the empty user message that startSession pushes for a blank session
@@ -493,6 +541,7 @@ function removeSession(id: string) {
     runningSessions.delete(id);
   }
   deleteSession(id);
+  sessionRegistry.delete(id);
   sessions = sessions.filter((s) => s.id !== id);
   if (activeSessionId === id) {
     activeSessionId = null;
@@ -574,12 +623,14 @@ function removeAllSessions() {
 
 function doRemoveAllSessions() {
   if (sessions.length === 0) return;
-  // Stop every concurrent run
-  for (const id of [...runningSessions]) {
+  // Remove only the current project's work; other project runs stay alive.
+  const ids = sessions.map((session) => session.id);
+  for (const id of ids.filter((id) => runningSessions.has(id))) {
     api.agentStop(id).catch(() => {});
+    runningSessions.delete(id);
   }
-  runningSessions.clear();
   deleteAllSessions(currentProjectPath!);
+  for (const id of ids) sessionRegistry.delete(id);
   // Keep project token usage — do not reset the meter to 100%
   sessions = [];
   activeSessionId = null;
@@ -600,6 +651,7 @@ function loadProjectSessions() {
     return;
   }
   sessions = loadSessions(currentProjectPath);
+  for (const session of sessions) sessionRegistry.set(session.id, session);
   if (sessions.length > 0) {
     activeSessionId = sessions[0].id;
     if (sessions[0].messages.length > 0) {
@@ -613,6 +665,9 @@ function loadProjectSessions() {
     chat.messages = [];
     chat.renderEmpty();
   }
+  // Project switching is allowed during a run. Reflect only the selected
+  // session's activity instead of leaving the previous project in the UI.
+  chat.setRunning(!!activeSessionId && runningSessions.has(activeSessionId), { processQueue: false });
   // Shared budget across every session in this project
   syncUsageBar();
 }
@@ -702,133 +757,219 @@ function toggleRightDrawer() {
   setDrawerOpen(RIGHT_DRAWER_KEY, open);
   applyDrawers();
   syncDrawerButtons();
+  renderWorkspaceMenu();
 }
 
 function syncDrawerButtons() {
   const leftOpen = isDrawerOpen(LEFT_DRAWER_KEY, true);
-  const rightOpen = isDrawerOpen(RIGHT_DRAWER_KEY, true);
   const leftBtn = document.getElementById("drawer-left-btn");
-  const rightBtn = document.getElementById("drawer-right-btn");
   if (leftBtn) {
     leftBtn.classList.toggle("active", leftOpen);
     leftBtn.setAttribute("aria-pressed", String(leftOpen));
     leftBtn.setAttribute("title", leftOpen ? "Hide left panel" : "Show left panel");
     leftBtn.setAttribute("aria-label", leftOpen ? "Hide left panel" : "Show left panel");
   }
-  if (rightBtn) {
-    rightBtn.classList.toggle("active", rightOpen);
-    rightBtn.setAttribute("aria-pressed", String(rightOpen));
-    rightBtn.setAttribute("title", rightOpen ? "Hide right panel" : "Show right panel");
-    rightBtn.setAttribute("aria-label", rightOpen ? "Hide right panel" : "Show right panel");
-  }
 }
 
-/** Wire permanent sandwich buttons once (they live in index.html). */
+let workspaceMenuCleanup: (() => void) | null = null;
+
+function workspaceMenuItems(): HTMLButtonElement[] {
+  const menu = document.getElementById("workspace-menu");
+  if (!menu) return [];
+  return Array.from(menu.querySelectorAll<HTMLButtonElement>(".workspace-menu-item:not(:disabled)"));
+}
+
+function closeWorkspaceMenu(restoreFocus = false) {
+  const menu = document.getElementById("workspace-menu");
+  const button = document.getElementById("workspace-menu-btn") as HTMLButtonElement | null;
+  if (!menu || !button || menu.hidden) return;
+  menu.hidden = true;
+  button.setAttribute("aria-expanded", "false");
+  button.classList.remove("is-open");
+  const cleanup = workspaceMenuCleanup;
+  workspaceMenuCleanup = null;
+  cleanup?.();
+  if (restoreFocus) button.focus({ preventScroll: true });
+}
+
+function renderWorkspaceMenu() {
+  const menu = document.getElementById("workspace-menu");
+  if (!menu) return;
+  clear(menu);
+
+  const hasProject = !!currentProjectPath;
+  const previewOpen = !!sitePreview?.isOpen;
+  const rightOpen = isDrawerOpen(RIGHT_DRAWER_KEY, true);
+  menu.appendChild(el("div", { class: "workspace-menu-title" }, ["Workspace"]));
+
+  const appendAction = (
+    action: string,
+    label: string,
+    iconName: "folder" | "globe" | "panelRight",
+    onClick: () => void,
+    disabled = false,
+  ) => {
+    const item = el("button", {
+      class: "workspace-menu-item",
+      type: "button",
+      role: "menuitem",
+      "data-workspace-action": action,
+    }) as HTMLButtonElement;
+    item.disabled = disabled;
+    item.append(
+      el("span", { class: "workspace-menu-icon", html: icon(iconName, 15) }),
+      el("span", { class: "workspace-menu-label" }, [label]),
+    );
+    item.addEventListener("click", () => {
+      if (item.disabled) return;
+      closeWorkspaceMenu();
+      onClick();
+    });
+    menu.appendChild(item);
+  };
+
+  appendAction(
+    "preview",
+    previewOpen ? "Close build preview" : "Open build preview",
+    "globe",
+    () => {
+      if (!currentProjectPath) return;
+      if (sitePreview?.isOpen) sitePreview.close();
+      else void openBuildPreview({ title: "Build preview" });
+    },
+    !hasProject,
+  );
+  appendAction(
+    "explorer",
+    "Reveal project in Explorer",
+    "folder",
+    () => {
+      if (currentProjectPath) void api.openProjectInExplorer();
+    },
+    !hasProject,
+  );
+  menu.appendChild(el("div", { class: "workspace-menu-divider", role: "separator" }));
+  appendAction(
+    "inspector",
+    rightOpen ? "Hide project panel" : "Show project panel",
+    "panelRight",
+    () => toggleRightDrawer(),
+  );
+}
+
+function openWorkspaceMenu() {
+  const menu = document.getElementById("workspace-menu");
+  const button = document.getElementById("workspace-menu-btn") as HTMLButtonElement | null;
+  const anchor = document.getElementById("workspace-menu-anchor");
+  if (!menu || !button || !anchor) return;
+  renderWorkspaceMenu();
+  menu.hidden = false;
+  button.setAttribute("aria-expanded", "true");
+  button.classList.add("is-open");
+
+  const onPointerDown = (event: PointerEvent) => {
+    if (!anchor.contains(event.target as Node)) closeWorkspaceMenu();
+  };
+  const onKeyDown = (event: KeyboardEvent) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeWorkspaceMenu(true);
+      return;
+    }
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    const items = workspaceMenuItems();
+    if (!items.length) return;
+    event.preventDefault();
+    const currentIndex = items.indexOf(document.activeElement as HTMLButtonElement);
+    const offset = event.key === "ArrowDown" ? 1 : -1;
+    const nextIndex = currentIndex < 0
+      ? (offset > 0 ? 0 : items.length - 1)
+      : (currentIndex + offset + items.length) % items.length;
+    items[nextIndex].focus({ preventScroll: true });
+  };
+  document.addEventListener("pointerdown", onPointerDown, true);
+  document.addEventListener("keydown", onKeyDown, true);
+  workspaceMenuCleanup = () => {
+    document.removeEventListener("pointerdown", onPointerDown, true);
+    document.removeEventListener("keydown", onKeyDown, true);
+  };
+  requestAnimationFrame(() => workspaceMenuItems()[0]?.focus({ preventScroll: true }));
+}
+
+function bindWorkspaceMenuButton() {
+  const button = document.getElementById("workspace-menu-btn") as HTMLButtonElement | null;
+  if (!button || (button as any).__bound) return;
+  button.addEventListener("click", () => {
+    const menu = document.getElementById("workspace-menu");
+    if (menu?.hidden) openWorkspaceMenu();
+    else closeWorkspaceMenu();
+  });
+  button.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    event.preventDefault();
+    openWorkspaceMenu();
+    requestAnimationFrame(() => {
+      const items = workspaceMenuItems();
+      const target = event.key === "ArrowUp" ? items.at(-1) : items[0];
+      target?.focus({ preventScroll: true });
+    });
+  });
+  (button as any).__bound = true;
+}
+
+/** Wire permanent header controls once (they live in index.html). */
 function bindDrawerButtons() {
   const leftBtn = document.getElementById("drawer-left-btn");
-  const rightBtn = document.getElementById("drawer-right-btn");
   if (leftBtn && !(leftBtn as any).__bound) {
     leftBtn.addEventListener("click", () => toggleLeftDrawer());
     (leftBtn as any).__bound = true;
   }
-  if (rightBtn && !(rightBtn as any).__bound) {
-    rightBtn.addEventListener("click", () => toggleRightDrawer());
-    (rightBtn as any).__bound = true;
-  }
+  bindWorkspaceMenuButton();
   applyDrawers();
   syncDrawerButtons();
 }
 
 async function refreshHeader() {
-  // Project name/path is only in the left sandwich drawer — not in the top header
-  const actionsEl = document.getElementById("header-actions");
-  if (!actionsEl) return;
-
   sidebar?.setProject(currentProjectPath);
   chat?.setComposerProject(currentProjectPath);
-
-  clear(actionsEl);
-  try {
-    const s = await getSettingsSafe();
-    const meta = getProviderMeta(s.provider);
-    const chip = el("span", { class: "chip" });
-    const label = `${displayProviderName(s.provider)} · ${displayModelName(s.model)}`;
-    if (meta) {
-      chip.innerHTML = logo(meta.logoKey, 13) + `<span style="margin-left:2px">${label}</span>`;
-    } else {
-      chip.textContent = label;
-    }
-    actionsEl.appendChild(chip);
-  } catch (e) {
-    console.error("refreshHeader: getSettings failed", e);
-  }
-  const explorerBtn = el("button", {
-    class: "btn sm",
-    title: "Reveal project in Explorer",
-    "aria-label": "Reveal project in Explorer",
-    html: icon("folder", 12),
-  });
-  explorerBtn.disabled = !currentProjectPath;
-  explorerBtn.addEventListener("click", () => {
-    if (currentProjectPath) api.openProjectInExplorer();
-  });
-  actionsEl.appendChild(explorerBtn);
-
-  const previewBtn = el("button", {
-    class: "btn sm",
-    title: "Open build preview",
-    "aria-label": "Open build preview",
-  }, ["Preview"]);
-  previewBtn.disabled = !currentProjectPath;
-  previewBtn.addEventListener("click", () => {
-    if (!currentProjectPath) return;
-    if (sitePreview?.isOpen) sitePreview.close();
-    else void openBuildPreview({ title: "Build preview" });
-  });
-  actionsEl.appendChild(previewBtn);
-
   bindDrawerButtons();
+  renderWorkspaceMenu();
 }
 
 async function selectProject(path: string) {
-  if (!canChangeProject()) return;
+  if (sameProjectPath(currentProjectPath, path)) return;
   persistCurrentSession();
   flushSessionSaves();
   await api.setProjectRoot(path);
-  currentProjectPath = path;
+  const canonicalPath = (await api.getProjectRoot()) || path;
+  currentProjectPath = canonicalPath;
+  activateProjectWorkspace(canonicalPath);
   loadProjectSessions();
-  await sidebar.render(sessions, activeSessionId);
+  refreshSidebar();
   chat.setProjectReady(true);
-  await workspacePanel.setProject(path);
+  await workspacePanel.setProject(canonicalPath);
   await refreshHeader();
 }
 
 async function createProject(path: string, templateId?: string) {
-  if (!canChangeProject()) return;
   persistCurrentSession();
   flushSessionSaves();
   await api.createProjectDir(path, templateId);
-  currentProjectPath = path;
+  const canonicalPath = (await api.getProjectRoot()) || path;
+  currentProjectPath = canonicalPath;
+  activateProjectWorkspace(canonicalPath);
   sessions = [];
   activeSessionId = null;
   chat.messages = [];
-  await sidebar.render(sessions, activeSessionId);
+  chat.renderEmpty();
+  chat.setRunning(false, { processQueue: false });
+  refreshSidebar();
   chat.setProjectReady(true);
-  await workspacePanel.setProject(path);
+  await workspacePanel.setProject(canonicalPath);
   await refreshHeader();
 }
 
-function canChangeProject(): boolean {
-  if (runningSessions.size === 0) return true;
-  const count = runningSessions.size;
-  reportError(
-    `Finish or stop the active run${count === 1 ? "" : "s"} before changing projects.`,
-  );
-  return false;
-}
-
 function openNewProjectPicker() {
-  if (!canChangeProject()) return;
   const root = document.getElementById("modal-root")!;
   clear(root);
   const picker = new ProjectPicker(root, "new", async (path, templateId) => {
@@ -839,7 +980,6 @@ function openNewProjectPicker() {
 }
 
 function openOpenProjectPicker() {
-  if (!canChangeProject()) return;
   const root = document.getElementById("modal-root")!;
   clear(root);
   const picker = new ProjectPicker(root, "open", async (path) => {
@@ -850,6 +990,11 @@ function openOpenProjectPicker() {
 }
 
 function openSettings(integrationId?: string) {
+  try {
+    settingsModal?.close();
+  } catch {
+    /* ignore stale modal */
+  }
   settingsModal = new SettingsModal(async () => {
     await refreshHeader();
     await refreshProviderReadiness();
@@ -897,9 +1042,14 @@ async function sendPrompt(prompt: string) {
     openNewProjectPicker();
     return;
   }
+  const projectRoot = currentProjectPath;
   if (!(await refreshProviderReadiness())) {
     reportError("Connect the selected provider in Settings before sending a request.");
     openSettings();
+    return;
+  }
+  if (!sameProjectPath(projectRoot, currentProjectPath)) {
+    reportError("Project changed before the request started. Send it again from the active project.");
     return;
   }
   if (isUsageExhausted()) {
@@ -928,12 +1078,13 @@ async function sendPrompt(prompt: string) {
       const s: Session = {
         id: newSessionId(),
         title: sessionTitle(prompt),
-        projectId: currentProjectPath,
+        projectId: projectRoot,
         messages: [],
         createdAt: Date.now(),
         sessionTokens: 0,
       };
       sessions.unshift(s);
+      sessionRegistry.set(s.id, s);
       activeSessionId = s.id;
       existing = s;
     }
@@ -947,18 +1098,25 @@ async function sendPrompt(prompt: string) {
   // Maximize memory: send prior turns in this session (user, AI, tools, decisions)
   const history = buildLlmHistory(chat.getMessages(), prompt);
   runningSessions.add(sessionId);
+  runProjectPaths.set(sessionId, projectRoot);
   runTouchedFiles.set(sessionId, new Set());
   previewOpenedForRun.delete(sessionId);
-  void snapshotProjectFiles().then((snap) => runBaselineFiles.set(sessionId, snap));
-  // Only touch workspace/console UI for the active view
-  await workspacePanel.beginRun();
-  chat.setRunning(true);
+  void snapshotProjectFiles(projectRoot).then((snap) => {
+    if (sameProjectPath(runProjectPaths.get(sessionId), projectRoot)) runBaselineFiles.set(sessionId, snap);
+  });
+  // Only touch workspace/console UI while this project is still visible.
+  if (sameProjectPath(projectRoot, currentProjectPath)) {
+    await workspacePanel.beginRun();
+    if (sameProjectPath(projectRoot, currentProjectPath) && activeSessionId === sessionId) {
+      chat.setRunning(true);
+    }
+  }
   updateGlobalRunStatus();
   // Shared project budget — continues across all sessions
   syncUsageBar();
   refreshSidebar();
   try {
-    await api.agentRun(prompt, sessionId, history);
+    await api.agentRun(prompt, sessionId, history, projectRoot);
   } catch (e: any) {
     const msg = String(e ?? "");
     // Don't dump "already running" into the transcript — queue handles that path
@@ -969,11 +1127,12 @@ async function sendPrompt(prompt: string) {
         chat.appendAssistantText(`Error: ${e}`);
         chat.appendEnd("no_tool_calls");
       } else {
-        const s = sessions.find((x) => x.id === sessionId);
+        const s = sessionRegistry.get(sessionId) || sessions.find((x) => x.id === sessionId);
         if (s) {
           recordAgentEvent(s.messages, { kind: "text", payload: { text: `Error: ${e}` } });
           recordAgentEvent(s.messages, { kind: "end", payload: { reason: "no_tool_calls" } });
           saveSession(s);
+          sessionRegistry.set(s.id, s);
         }
       }
       reportError(msg);
@@ -1003,6 +1162,7 @@ async function sendPrompt(prompt: string) {
     updateGlobalRunStatus();
     syncUsageBar();
     refreshSidebar();
+    runProjectPaths.delete(sessionId);
   }
 }
 
@@ -1043,16 +1203,17 @@ function handleAgentEvent(e: AgentEvent) {
     }
     if (e.kind === "tool_call") {
       trackRunTouchedFile(sid, e.payload.name, e.payload.arguments);
-      const htmlOpen = htmlPathFromOpenArgs(e.payload.name, e.payload.arguments);
+      const htmlOpen = htmlPathFromOpenArgs(e.payload.name, e.payload.arguments, runProjectPaths.get(sid));
       if (htmlOpen) {
         void openBuildPreview({
           sessionId: sid,
           entryPath: htmlOpen,
           title: "Build preview",
+          projectRoot: runProjectPaths.get(sid),
         });
       }
     }
-    const s = sessions.find((x) => x.id === sid);
+    const s = sessionRegistry.get(sid) || sessions.find((x) => x.id === sid);
     if (s) {
       recordAgentEvent(s.messages, e);
       if (
@@ -1072,6 +1233,7 @@ function handleAgentEvent(e: AgentEvent) {
           saveSession(s);
         }
       }
+      sessionRegistry.set(s.id, s);
     }
     // Background run end events: do NOT remove from runningSessions here.
     // sendPrompt's finally owns that set (avoids "already running" races).
@@ -1098,12 +1260,17 @@ function handleAgentEvent(e: AgentEvent) {
   workspacePanel.handleAgentEvent(e);
   if (e.kind === "tool_call") {
     trackRunTouchedFile(sid, e.payload.name, e.payload.arguments);
-    const htmlOpen = htmlPathFromOpenArgs(e.payload.name, e.payload.arguments);
+    const htmlOpen = htmlPathFromOpenArgs(
+      e.payload.name,
+      e.payload.arguments,
+      sid ? runProjectPaths.get(sid) : currentProjectPath,
+    );
     if (htmlOpen) {
       void openBuildPreview({
         sessionId: sid || undefined,
         entryPath: htmlOpen,
         title: "Build preview",
+        projectRoot: sid ? runProjectPaths.get(sid) : currentProjectPath,
       });
     }
     consolePanel.handleToolCall(e.payload.name, e.payload.arguments);
@@ -1257,6 +1424,8 @@ async function init() {
   sidebar = new Sidebar({
     onNewProject: openNewProjectPicker,
     onOpenProject: openOpenProjectPicker,
+    onSelectProject: (path) => void selectProject(path).catch((error) => reportError(String(error))),
+    onAddAnotherProject: openNewProjectPicker,
     onOpenSettings: openSettings,
     onCheckForUpdates: () => document.body.appendChild(showUpdateDialog()),
     onNewSession: createNewSession,
@@ -1272,16 +1441,30 @@ async function init() {
   await sidebar.render().catch((e) => console.error("sidebar render failed", e));
   await refreshHeader().catch((e) => console.error("refreshHeader failed", e));
 
-  // Required app update (published from website Admin → Releases).
-  try {
-    const update = await checkDesktopUpdate();
-    if (update.forceUpdate && update.latest) {
-      document.body.appendChild(showUpdateGate(update));
-      return;
+  // New releases get a visible sidebar badge. Required releases still block
+  // the app, while the background refresh keeps long-running clients informed.
+  let forcedUpdateGateVisible = false;
+  const refreshUpdateNotification = async () => {
+    try {
+      const update = await checkDesktopUpdate();
+      const available = update.updateAvailable || update.forceUpdate;
+      sidebar.setUpdateNotification(available, update.latest?.version);
+      if (update.forceUpdate && update.latest && !forcedUpdateGateVisible) {
+        forcedUpdateGateVisible = true;
+        document.body.appendChild(showUpdateGate(update));
+        return true;
+      }
+    } catch (e) {
+      // Keep an already-shown notification rather than hiding it due to a
+      // transient offline error.
+      console.warn("update check failed", e);
     }
-  } catch (e) {
-    console.warn("update check failed", e);
-  }
+    return false;
+  };
+  if (await refreshUpdateNotification()) return;
+  window.setInterval(() => {
+    void refreshUpdateNotification();
+  }, 30 * 60 * 1000);
 
   // Website account required — desktop signs in automatically after browser login/signup.
   websiteUser = await ensureWebsiteSession().catch(() => null);
@@ -1351,11 +1534,20 @@ async function init() {
     if (document.visibilityState === "hidden") flushSessionSaves();
   });
 
-  // Restore last project if any
+  // Restore every known workspace. Runs keep their own root, so opening or
+  // adding another project never interrupts an existing project run.
   try {
     const recent = await api.listRecentProjects();
-    if (recent.length > 0) {
-      await selectProject(recent[0]);
+    const workspaces = rememberRecentProjectWorkspaces(recent);
+    const rememberedActive = activeProjectWorkspacePath();
+    const initialProject =
+      workspaces.find((workspace) => workspace.path === rememberedActive)?.path ||
+      recent[0] ||
+      workspaces[0]?.path;
+    if (initialProject) {
+      await selectProject(initialProject);
+    } else {
+      refreshSidebar();
     }
   } catch (e) {
     console.error("restore recent project failed", e);

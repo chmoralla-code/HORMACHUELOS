@@ -2,6 +2,7 @@ import { api } from "../ipc";
 import { icon } from "./icons";
 import { clear, div, el, displayPlanLabel } from "./util";
 import { SESSION_TOKEN_BUDGET, type Session } from "./session";
+import type { ProjectWorkspace } from "./projects";
 
 export type UsageDisplayMeta = {
   /** Remaining plan % (for aria / empty styling). */
@@ -27,6 +28,8 @@ export class Sidebar {
   node: HTMLElement;
   onNewProject: () => void;
   onOpenProject: () => void;
+  onSelectProject: (path: string) => void;
+  onAddAnotherProject: () => void;
   onOpenSettings: () => void;
   /** Check the hosted release feed and offer the latest installer. */
   onCheckForUpdates: () => void;
@@ -45,14 +48,22 @@ export class Sidebar {
   onRefreshAccount: () => void;
   /** Current project path (composer chip shows it; left drawer does not). */
   private projectPath: string | null = null;
+  private projectWorkspaces: ProjectWorkspace[] = [];
+  private activeProjectPath: string | null = null;
+  private runningProjectPaths = new Set<string>();
   private usageMeta: UsageDisplayMeta = {};
   private usageRoot: HTMLElement | null = null;
   private accountRoot: HTMLElement | null = null;
   private accountStatus: AccountStatusState = { state: "checking" };
+  private updateButton: HTMLButtonElement | null = null;
+  private updateAvailable = false;
+  private updateVersion = "";
 
   constructor(handlers: {
     onNewProject: () => void;
     onOpenProject: () => void;
+    onSelectProject: (path: string) => void;
+    onAddAnotherProject: () => void;
     onOpenSettings: () => void;
     onCheckForUpdates: () => void;
     onNewSession: () => void;
@@ -67,6 +78,8 @@ export class Sidebar {
   }) {
     this.onNewProject = handlers.onNewProject;
     this.onOpenProject = handlers.onOpenProject;
+    this.onSelectProject = handlers.onSelectProject;
+    this.onAddAnotherProject = handlers.onAddAnotherProject;
     this.onOpenSettings = handlers.onOpenSettings;
     this.onCheckForUpdates = handlers.onCheckForUpdates;
     this.onNewSession = handlers.onNewSession;
@@ -90,8 +103,6 @@ export class Sidebar {
     this.node.appendChild(div("sb-brand",
       `<div class="sb-logo">H</div><div class="sb-title">Hormachuelos</div><div class="sb-version">v${version}</div>`));
 
-    // Project path/name stays off the left sandwich drawer (composer chip + New/Open cover it)
-
     const actions = el("div", { class: "sb-actions" });
     actions.appendChild(this.actionBtn("new", "New Build", this.onNewProject));
     actions.appendChild(this.actionBtn("open", "Open Project", this.onOpenProject));
@@ -99,8 +110,12 @@ export class Sidebar {
     actions.appendChild(this.actionBtn("settings", "Settings", this.onOpenSettings));
     const updateBtn = this.actionBtn("refresh", "Update", this.onCheckForUpdates);
     updateBtn.classList.add("sb-update-action");
+    this.updateButton = updateBtn;
+    this.paintUpdateNotification();
     actions.appendChild(updateBtn);
     this.node.appendChild(actions);
+
+    this.node.appendChild(this.buildProjectsSection());
 
     // Sessions section
     const sessionSection = el("div", { class: "sb-section" });
@@ -211,9 +226,106 @@ export class Sidebar {
     this.paintAccount();
   }
 
+  /** Show a durable sidebar notification when the hosted release feed has a newer build. */
+  setUpdateNotification(available: boolean, version?: string | null) {
+    this.updateAvailable = available;
+    this.updateVersion = available
+      ? String(version || "").trim().replace(/^v/i, "")
+      : "";
+    this.paintUpdateNotification();
+  }
+
+  private paintUpdateNotification() {
+    const button = this.updateButton;
+    if (!button) return;
+    button.querySelector(".sb-update-badge")?.remove();
+    button.classList.toggle("has-update", this.updateAvailable);
+    button.dataset.updateAvailable = this.updateAvailable ? "true" : "false";
+
+    if (!this.updateAvailable) {
+      button.removeAttribute("aria-label");
+      button.setAttribute("title", "Check for updates");
+      return;
+    }
+
+    const versionLabel = this.updateVersion ? `v${this.updateVersion}` : "New";
+    button.setAttribute("aria-label", `Update available: ${versionLabel}. Check for updates`);
+    button.setAttribute("title", `Update available: ${versionLabel}`);
+    button.appendChild(
+      el("span", { class: "sb-update-badge", "aria-hidden": "true" }, [versionLabel]),
+    );
+  }
+
   /** Keep project path in sync (UI lives on the composer chip, not the left drawer). */
   setProject(path: string | null) {
     this.projectPath = path;
+    this.activeProjectPath = path;
+  }
+
+  /** Render an active workspace plus every other project already open in the app. */
+  setProjectWorkspaces(
+    workspaces: ProjectWorkspace[],
+    activePath: string | null,
+    runningPaths: Iterable<string> = [],
+  ) {
+    this.projectWorkspaces = [...workspaces];
+    this.activeProjectPath = activePath;
+    this.runningProjectPaths = new Set(
+      [...runningPaths]
+        .filter(Boolean)
+        .map((path) => String(path).replace(/[\\/]+$/, "").toLocaleLowerCase()),
+    );
+  }
+
+  private buildProjectsSection(): HTMLElement {
+    const section = el("div", { class: "sb-section sb-projects-section" });
+    const header = el("div", { class: "sb-section-row sb-projects-head" });
+    header.appendChild(el("div", { class: "sb-section-label" }, ["Projects"]));
+    const add = el(
+      "button",
+      {
+        class: "sb-add-project",
+        type: "button",
+        title: "Add another project",
+        "aria-label": "Add another project",
+      },
+      ["+ Add another project"],
+    ) as HTMLButtonElement;
+    add.addEventListener("click", () => this.onAddAnotherProject());
+    header.appendChild(add);
+    section.appendChild(header);
+
+    const list = el("div", { class: "sb-projects-list", role: "list", "aria-label": "Open projects" });
+    if (this.projectWorkspaces.length === 0) {
+      list.appendChild(el("div", { class: "sb-project-empty" }, ["Create or open a project to keep it here."]));
+    } else {
+      const activeKey = String(this.activeProjectPath || "").replace(/[\\/]+$/, "").toLocaleLowerCase();
+      for (const workspace of this.projectWorkspaces) {
+        const key = workspace.path.replace(/[\\/]+$/, "").toLocaleLowerCase();
+        const active = key === activeKey;
+        const running = this.runningProjectPaths.has(key);
+        const item = el(
+          "button",
+          {
+            class: `sb-project-workspace${active ? " active" : ""}${running ? " running" : ""}`,
+            type: "button",
+            title: `${workspace.path}${running ? "\nAgent run in progress" : ""}`,
+            "aria-current": active ? "page" : "false",
+            role: "listitem",
+          },
+        ) as HTMLButtonElement;
+        item.appendChild(el("span", { class: "sb-project-mark", "aria-hidden": "true" }, [(workspace.name[0] || "P").toUpperCase()]));
+        const copy = el("span", { class: "sb-project-copy" });
+        copy.appendChild(el("strong", {}, [workspace.name]));
+        copy.appendChild(el("span", {}, [active ? "Active workspace" : running ? "Running in background" : "Ready"]));
+        item.appendChild(copy);
+        if (running) item.appendChild(el("span", { class: "sb-project-live", title: "Agent run in progress" }, ["●"]));
+        item.addEventListener("click", () => this.onSelectProject(workspace.path));
+        list.appendChild(item);
+      }
+    }
+    section.appendChild(list);
+    return section;
   }
 
   /**
@@ -389,13 +501,6 @@ export class Sidebar {
     }
   }
 
-  private formatTokens(n: number): string {
-    const v = Math.max(0, Math.floor(Number(n) || 0));
-    if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(v >= 10_000_000 ? 0 : 1)}M`;
-    if (v >= 1_000) return `${(v / 1_000).toFixed(v >= 100_000 ? 0 : 1)}k`;
-    return String(v);
-  }
-
   private paintUsage() {
     if (!this.usageRoot) return;
     const m = this.usageMeta;
@@ -409,8 +514,6 @@ export class Sidebar {
     const name = displayPlanLabel(planId);
     const active = m.planActive === true && !["free", "expired", ""].includes(planId.toLowerCase());
     const clampedPct = Math.max(0, Math.min(100, planPct));
-    const used = Math.max(0, Math.floor(Number(m.tokensUsed) || 0));
-    const budget = Math.max(0, Math.floor(Number(m.tokenBudget) || 0));
 
     this.usageRoot.classList.toggle("usage-low", active && planPct <= 20 && planPct > 5);
     this.usageRoot.classList.toggle("usage-critical", active && planPct <= 5 && planPct > 0);
@@ -430,9 +533,7 @@ export class Sidebar {
       meter.setAttribute("aria-valuenow", active ? String(clampedPct) : "0");
       meter.setAttribute(
         "aria-valuetext",
-        active
-          ? `${clampedPct}% remaining (${this.formatTokens(used)} / ${this.formatTokens(budget)} used)`
-          : "No active plan",
+        active ? `${clampedPct}% remaining this period` : "No active plan",
       );
     }
     if (hint) {
@@ -443,11 +544,11 @@ export class Sidebar {
             ? "Plan expired · Mag-load to renew"
             : "No plan yet · Mag-load via GCash";
       } else if (planPct <= 0) {
-        hint.textContent = `Used ${this.formatTokens(used)} / ${this.formatTokens(budget)} · Mag-load`;
+        hint.textContent = "Period used up · Mag-load to continue";
       } else if (exp) {
-        hint.textContent = `${this.formatTokens(used)} / ${this.formatTokens(budget)} used · ends ${exp}`;
+        hint.textContent = `${clampedPct}% left · ends ${exp}`;
       } else {
-        hint.textContent = `${this.formatTokens(used)} / ${this.formatTokens(budget)} used`;
+        hint.textContent = `${clampedPct}% left this period`;
       }
     }
     row?.classList.toggle("is-byok", !active);
@@ -485,19 +586,19 @@ export class Sidebar {
     }
 
     this.usageRoot.title = active
-      ? `${name} · ${clampedPct}% left · ${this.formatTokens(used)}/${this.formatTokens(budget)}`
+      ? `${name} · ${clampedPct}% left this period`
       : "No active plan — Mag-load via GCash";
   }
   private actionBtn(
     iconName: "new" | "open" | "settings" | "export" | "refresh",
     label: string,
     onClick: () => void,
-  ): HTMLElement {
+  ): HTMLButtonElement {
     const btn = el("button", {
       class: "sb-action",
       type: "button",
       html: icon(iconName) + `<span>${label}</span>`,
-    });
+    }) as HTMLButtonElement;
     btn.addEventListener("click", onClick);
     return btn;
   }

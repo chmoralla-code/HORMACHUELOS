@@ -175,7 +175,9 @@ async function installMock(page) {
             projectRoot = args.path;
             return null;
           case "app_version":
-            return "0.1.0-test";
+            return "0.1.5";
+          case "get_website_session":
+            return "message-test-session";
           case "get_settings":
             return { ...settings };
           case "save_settings":
@@ -280,7 +282,7 @@ async function sendMessage(page, text) {
   await input.click();
   await input.fill(text);
   // Prefer send button to avoid flaky Enter
-  const send = page.locator(".send-btn, button[aria-label='Send message']").first();
+  const send = page.getByRole("button", { name: "Send message", exact: true });
   await send.click();
 }
 
@@ -292,6 +294,28 @@ test("send three messages and get mock agent replies", async ({ page }) => {
   });
 
   await installMock(page);
+  await page.route("https://hormachuelos.vercel.app/api/update?*", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        updateAvailable: false,
+        forceUpdate: false,
+        currentVersion: "0.1.5",
+        latest: null,
+      }),
+    }),
+  );
+  await page.route("https://hormachuelos.vercel.app/api/auth/me", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        ok: true,
+        user: { email: "message-test@example.com", plan: "free" },
+      }),
+    }),
+  );
   await page.goto(APP, { waitUntil: "networkidle" });
   await page.waitForTimeout(1500);
 
@@ -341,8 +365,8 @@ test("send three messages and get mock agent replies", async ({ page }) => {
     // Wait until not running
     await page.waitForFunction(
       () => {
-        const btn = document.querySelector(".send-btn");
-        return btn && !btn.classList.contains("stop") && !btn.disabled;
+        const btn = document.querySelector(".send-btn:not(.stop-btn)");
+        return btn && btn.getAttribute("aria-label") === "Send message" && !btn.disabled;
       },
       { timeout: 15000 },
     ).catch(() => {});
@@ -360,8 +384,8 @@ test("send three messages and get mock agent replies", async ({ page }) => {
     await page.waitForTimeout(400);
     await page.waitForFunction(
       () => {
-        const btn = document.querySelector(".send-btn");
-        return btn && !btn.classList.contains("stop");
+        const btn = document.querySelector(".send-btn:not(.stop-btn)");
+        return btn && btn.getAttribute("aria-label") === "Send message";
       },
       { timeout: 15000 },
     ).catch(() => {});

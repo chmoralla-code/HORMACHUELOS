@@ -1,6 +1,7 @@
 import { api, type AgentEvent, type ComputerUseFxEvent } from "../ipc";
+import { privateTypingStatus } from "./computer-use-hud";
 import { icon } from "./icons";
-import type { SessionMessage } from "./session";
+import { redactToolArguments, type SessionMessage } from "./session";
 import { ToolArgsStreamDecoder, type ToolArgField } from "./tool-args-stream";
 import { clear, div, el, escapeHtml, formatChatTime, renderMarkdown, setShimmerText } from "./util";
 
@@ -165,19 +166,24 @@ export class Chat {
     const provider = (opts.provider || "").trim().toLowerCase();
     const model = (opts.model || "").trim().toLowerCase();
     const effort = (opts.effort || "").trim().toLowerCase();
-    const isCursorOpenAi =
-      provider === "cursor" || model.includes("grok") || model === "grok-4.5";
-    const sol =
-      isCursorOpenAi ||
+    const isOpenAiAlias =
+      provider === "cursor" ||
       provider === "openai" ||
+      model.includes("grok") ||
+      model === "grok-4.5" ||
+      model === "composer-2.5" ||
       model === "gpt-5.6-sol" ||
-      model.includes("sol");
+      model === "gpt-5.6-luna";
+    const isLunaAlias = model === "composer-2.5" || model === "gpt-5.6-luna";
+    const sol = isOpenAiAlias || model.includes("sol");
     const claude =
-      !isCursorOpenAi &&
+      !isOpenAiAlias &&
       (provider === "anthropic" || model.includes("claude") || model.includes("composer"));
     this.replyProfile = sol ? "sol" : claude ? "claude" : "default";
-    this.replyModelLabel = isCursorOpenAi
-      ? "GPT 5.6 Sol"
+    this.replyModelLabel = isOpenAiAlias
+      ? isLunaAlias
+        ? "GPT 5.6 Luna"
+        : "GPT 5.6 Sol"
       : sol
         ? "GPT 5.6 Sol"
         : provider === "anthropic" || model.includes("claude")
@@ -191,7 +197,7 @@ export class Chat {
     this.composer?.classList.toggle("composer-sol", sol);
     this.composer?.classList.toggle("composer-premium", sol || claude);
     this.composer?.classList.toggle("composer-ultra", this.ultraEffort);
-    // Re-paint live shimmer so red letters apply after provider switch
+    // Re-paint live shimmer so the active provider's color applies after a switch.
     this.refreshLiveShimmerTone();
   }
 
@@ -1432,16 +1438,7 @@ export class Chat {
 
   private toolArgsHeader(name: string, args: any): string {
     const friendly = this.friendlyToolName(name);
-    let displayArgs = args;
-    if (name.startsWith("computer_") && args && typeof args === "object") {
-      displayArgs = { ...args };
-      if ("observation_token" in displayArgs) {
-        displayArgs.observation_token = "[fresh observation]";
-      }
-      if (name === "computer_type_text" && typeof displayArgs.text === "string") {
-        displayArgs.text = `[hidden · ${displayArgs.text.length} characters]`;
-      }
-    }
+    const displayArgs = redactToolArguments(name, args);
     const argsStr = typeof displayArgs === "string"
       ? displayArgs
       : JSON.stringify(displayArgs ?? {}, null, 2);
@@ -2249,9 +2246,11 @@ export class Chat {
   handleComputerFx(event: ComputerUseFxEvent) {
     if (this.replaying || event.kind === "clear") return;
     let label = "Desktop control";
+    const isTyping = event.kind === "type_char" || event.kind === "type_done";
+    const typingStatus = isTyping ? privateTypingStatus(event) : null;
     if (event.kind === "click") label = `Click at ${event.x}, ${event.y}`;
-    else if (event.kind === "type_char" || event.kind === "type_done") {
-      label = event.kind === "type_done" ? "Typed" : "Typing…";
+    else if (isTyping && typingStatus) {
+      label = event.kind === "type_done" ? typingStatus.detail : `Typing… · ${typingStatus.detail}`;
     } else if (event.kind === "drag") label = `Drag to ${event.x}, ${event.y}`;
     else if (event.kind === "scroll") label = `Scroll at ${event.x}, ${event.y}`;
     else if (event.kind === "cursor_move") label = `Cursor ${event.x}, ${event.y}`;
@@ -2261,12 +2260,18 @@ export class Chat {
       const detail = this.runningIndicator.querySelector(".computer-fx-live") as HTMLElement | null;
       if (lab) setShimmerText(lab, label, true);
       if (detail) {
-        detail.hidden = !(event.kind === "type_char" || event.kind === "type_done");
-        if (!detail.hidden) detail.textContent = event.text ?? "";
-      } else if (event.kind === "type_char" || event.kind === "type_done") {
+        detail.hidden = !typingStatus;
+        if (typingStatus) {
+          detail.textContent = typingStatus.progress
+            ? `${typingStatus.mask} (${typingStatus.progress})`
+            : typingStatus.mask;
+        }
+      } else if (typingStatus) {
         const row = document.createElement("div");
         row.className = "computer-fx-live";
-        row.textContent = event.text ?? "";
+        row.textContent = typingStatus.progress
+          ? `${typingStatus.mask} (${typingStatus.progress})`
+          : typingStatus.mask;
         this.runningIndicator.appendChild(row);
       }
       this.scrollToBottom();
@@ -2715,10 +2720,13 @@ export class Chat {
   private showTruncatedToolArgs(id: string, preview: string) {
     const tc = this.toolCards.get(id);
     if (!tc) return;
-    const name = this.friendlyToolName(
-      tc.head.querySelector(".tool-name")?.getAttribute("data-tool") || "tool",
-    );
+    const toolName = tc.head.querySelector(".tool-name")?.getAttribute("data-tool") || "tool";
+    const name = this.friendlyToolName(toolName);
     const argsEl = tc.body.querySelector(".args");
+    if (toolName === "computer_type_text") {
+      if (argsEl) argsEl.textContent = `· ${name}\n••••••••\n[typed content hidden]`;
+      return;
+    }
     if (argsEl) argsEl.textContent = `· ${name}\n${preview}\n… preview truncated`;
   }
 
@@ -3330,9 +3338,6 @@ export class Chat {
   appendEnd(reason: string, at?: number, workMs?: number) {
     this.finalizeThinking();
     this.sealPendingTools("done");
-    if (reason === "max_iterations") {
-      this.appendSystemNote("Stopped — hit the iteration limit. Try a shorter request.", at);
-    }
     // Stamp the last AI chat once the agent is done replying
     this.sealAiTimestamp(at, workMs ?? this.currentWorkMs(at) ?? undefined);
     this.pendingAssistant = null;
@@ -3498,7 +3503,7 @@ export class Chat {
         }
         break;
       }
-      case "tool_call": this.messages.push({ type: "tool_call", id: e.payload.id, name: e.payload.name, arguments: e.payload.arguments, at }); break;
+      case "tool_call": this.messages.push({ type: "tool_call", id: e.payload.id, name: e.payload.name, arguments: redactToolArguments(e.payload.name, e.payload.arguments), at }); break;
       case "tool_result": {
         const qIdx = this.messages.findIndex((m) => m.type === "question" && m.id === e.payload.id);
         if (qIdx >= 0) {

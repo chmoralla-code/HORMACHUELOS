@@ -1,5 +1,5 @@
 import { api, type Settings } from "../ipc";
-import { PROVIDERS, effortOptionsForProvider, displayModelName, getProviderMeta, getSettingsSafe, hasStaticModelCatalog, isCursorSdkProvider, isUltraEffort, normalizeEffortForProvider, uiProviderId, visibleProviders } from "./settings";
+import { PROVIDERS, effortOptionsForProvider, displayModelName, getProviderMeta, getSettingsSafe, hasStaticModelCatalog, isCursorSdkProvider, isUltraEffort, mergeProviderModelCatalog, normalizeEffortForProvider, uiProviderId, visibleProviders } from "./settings";
 import { clear, el } from "./util";
 import { icon, icons } from "./icons";
 
@@ -82,7 +82,6 @@ export class ModelBar {
   node: HTMLElement;
   settings!: Settings;
   private onChange: () => void;
-  private maxIterations = 25;
   private statusEl: HTMLElement | null = null;
   /** Mounted into composer toolbar (chips + menus). */
   providerRail: HTMLElement;
@@ -90,6 +89,7 @@ export class ModelBar {
   private capabilityId = "thinking";
   private openMenu: HTMLElement | null = null;
   private outsideClose: ((e: MouseEvent) => void) | null = null;
+  private providerSelectionGeneration = 0;
   /** Full model catalogs per provider (auto-fetched when key/connection is ready). */
   private discoveredModels: Record<string, string[]> = {};
 
@@ -106,7 +106,6 @@ export class ModelBar {
 
   async load() {
     this.settings = await getSettingsSafe();
-    this.maxIterations = this.settings.max_iterations || 25;
     this.normalizeMode();
     this.syncCapabilityDefault();
     this.render();
@@ -135,12 +134,17 @@ export class ModelBar {
     if (hasStaticModelCatalog(providerId)) return;
     try {
       // Keyless providers always; others need a saved key (backend enforces).
-      const models = await api.listProviderModels(
+      const modelsRaw = await api.listProviderModels(
         providerId,
         this.settings.provider === providerId
           ? this.settings.base_url?.trim() || null
           : meta.defaultBaseUrl || null,
       );
+      const discovered =
+        providerId === "openrouter"
+          ? modelsRaw.filter((id) => id.includes(":free"))
+          : modelsRaw;
+      const models = mergeProviderModelCatalog(providerId, discovered);
       if (models.length) {
         this.discoveredModels[providerId] = models;
         if (
@@ -739,6 +743,7 @@ export class ModelBar {
   private async selectProvider(id: string) {
     const p = PROVIDERS.find((x) => x.id === id);
     if (!p) return;
+    const selectionGeneration = ++this.providerSelectionGeneration;
     this.closeMenus();
     const already =
       uiProviderId(this.settings.provider, this.settings.model) === p.id;
@@ -746,14 +751,21 @@ export class ModelBar {
       this.renderProviderRail();
       return;
     }
+    // Ollama's static fallback may not exist on this machine. Discover its
+    // actual local/cloud handles before persisting a selection so a fast send
+    // cannot race against model discovery with an unavailable fallback model.
+    if (p.id === "ollama" && !this.discoveredModels[p.id]?.length) {
+      await this.ensureModelsLoaded(p.id);
+      if (selectionGeneration !== this.providerSelectionGeneration) return;
+    }
+    const known = this.discoveredModels[p.id];
     this.settings.provider = p.id;
-    this.settings.model = p.defaultModel;
+    this.settings.model = known?.[0] || p.defaultModel;
     this.settings.base_url = p.defaultBaseUrl || null;
     try {
       await api.saveSettings(this.settings);
       this.settings = await api.getSettings();
       this.normalizeMode();
-      const known = this.discoveredModels[p.id];
       if (known?.length && !known.includes(this.settings.model)) {
         this.settings.model = known[0];
         await api.saveSettings(this.settings).catch(() => {});
@@ -772,6 +784,5 @@ export class ModelBar {
   private render() {
     clear(this.node);
     this.normalizeMode();
-    this.maxIterations = this.settings.max_iterations || 25;
   }
 }

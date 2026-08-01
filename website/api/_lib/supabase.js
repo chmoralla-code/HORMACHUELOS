@@ -230,3 +230,47 @@ export async function updateRelease(id, patch) {
   });
   return Array.isArray(rows) ? rows[0] : rows;
 }
+
+/** Server-only hosted-model routing records. Credentials remain encrypted in this table. */
+export async function listHostedModelConfigs({ activeOnly = false } = {}) {
+  const filter = activeOnly ? "&active=eq.true" : "";
+  const rows = await sb(
+    `hosted_model_configs?select=*&order=provider_id.asc,display_name.asc${filter}`,
+  );
+  return Array.isArray(rows) ? rows : [];
+}
+
+export async function getHostedModelConfig(providerId, alias) {
+  const q =
+    `hosted_model_configs?provider_id=eq.${encodeURIComponent(providerId)}` +
+    `&alias=eq.${encodeURIComponent(alias)}&select=*&limit=1`;
+  const rows = await sb(q);
+  return Array.isArray(rows) && rows.length ? rows[0] : null;
+}
+
+export async function getHostedModelConfigById(id) {
+  const rows = await sb(
+    `hosted_model_configs?id=eq.${encodeURIComponent(id)}&select=*&limit=1`,
+  );
+  return Array.isArray(rows) && rows.length ? rows[0] : null;
+}
+
+export async function insertHostedModelConfig(row) {
+  const rows = await sb("hosted_model_configs", { method: "POST", body: row });
+  return Array.isArray(rows) ? rows[0] : rows;
+}
+
+export async function updateHostedModelConfig(id, patch) {
+  const rows = await sb(`hosted_model_configs?id=eq.${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: { ...patch, updated_at: new Date().toISOString() },
+  });
+  return Array.isArray(rows) ? rows[0] : rows;
+}
+
+export async function deleteHostedModelConfig(id) {
+  await sb(`hosted_model_configs?id=eq.${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: { Prefer: "return=minimal" },
+  });
+}

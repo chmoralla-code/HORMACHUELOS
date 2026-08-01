@@ -1,6 +1,6 @@
 /**
- * Playwright check: serve dist/, open UI, assert sandwich drawer buttons
- * are visible, click them, screenshot.
+ * Playwright check: serve dist/, open UI, assert the left sandwich control
+ * and unified workspace menu are visible, click them, screenshot.
  */
 import { createServer } from "http";
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from "fs";
@@ -56,8 +56,9 @@ const tauriMock = `
   };
   const invoke = async (cmd) => {
     if (cmd === "list_recent_projects") return [];
-    if (cmd === "app_version") return "0.1.0";
+    if (cmd === "app_version") return "0.1.5";
     if (cmd === "get_settings") return settings;
+    if (cmd === "get_website_session") return "drawer-test-session";
     if (cmd === "has_api_key") return false;
     if (cmd === "get_project_root") return null;
     if (cmd === "list_project_files") return { nodes: [], truncated: false };
@@ -119,19 +120,41 @@ async function main() {
   });
 
   await page.addInitScript(tauriMock);
+  await page.route("https://hormachuelos.vercel.app/api/update?*", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        updateAvailable: false,
+        forceUpdate: false,
+        currentVersion: "0.1.5",
+        latest: null,
+      }),
+    }),
+  );
+  await page.route("https://hormachuelos.vercel.app/api/auth/me", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        ok: true,
+        user: { email: "drawer-test@example.com", plan: "free" },
+      }),
+    }),
+  );
 
   try {
     await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: "networkidle", timeout: 15000 });
     await page.waitForTimeout(800);
 
     const left = page.locator("#drawer-left-btn");
-    const right = page.locator("#drawer-right-btn");
+    const workspaceMenu = page.locator("#workspace-menu-btn");
     const header = page.locator("#header");
 
     const leftCount = await left.count();
-    const rightCount = await right.count();
+    const workspaceMenuCount = await workspaceMenu.count();
     report.checks.push({ name: "left btn in DOM", pass: leftCount === 1, detail: String(leftCount) });
-    report.checks.push({ name: "right btn in DOM", pass: rightCount === 1, detail: String(rightCount) });
+    report.checks.push({ name: "workspace menu in DOM", pass: workspaceMenuCount === 1, detail: String(workspaceMenuCount) });
 
     if (leftCount) {
       const b = await box(left);
@@ -146,10 +169,10 @@ async function main() {
         detail: `x=${b.x} y=${b.y}`,
       });
     }
-    if (rightCount) {
-      const b = await box(right);
+    if (workspaceMenuCount) {
+      const b = await box(workspaceMenu);
       report.checks.push({
-        name: "right btn visible box",
+        name: "workspace menu button visible box",
         pass: b.w > 20 && b.h > 20 && b.opacity !== "0" && b.visibility !== "hidden" && b.display !== "none",
         detail: JSON.stringify(b),
       });
@@ -170,11 +193,20 @@ async function main() {
       await left.click();
       await page.waitForTimeout(400);
     }
-    if (rightCount) {
-      await right.click();
+    if (workspaceMenuCount) {
+      await workspaceMenu.click();
+      await page.waitForTimeout(400);
+      const openMenu = page.locator("#workspace-menu:not([hidden])");
+      const menuCount = await openMenu.count();
+      report.checks.push({ name: "workspace menu opens", pass: menuCount === 1, detail: String(menuCount) });
+      await page.screenshot({ path: join(SHOTS, "workspace_menu_open.png"), fullPage: true });
+      const inspectorAction = page.locator('[data-workspace-action="inspector"]');
+      const inspectorActionCount = await inspectorAction.count();
+      report.checks.push({ name: "inspector action in menu", pass: inspectorActionCount === 1, detail: String(inspectorActionCount) });
+      if (inspectorActionCount) await inspectorAction.click();
       await page.waitForTimeout(400);
       const closedRight = await page.locator("#app.right-drawer-closed").count();
-      report.checks.push({ name: "right click toggles closed", pass: closedRight === 1, detail: String(closedRight) });
+      report.checks.push({ name: "menu inspector action toggles closed", pass: closedRight === 1, detail: String(closedRight) });
       await page.screenshot({ path: join(SHOTS, "drawer_right_closed.png"), fullPage: true });
     }
 

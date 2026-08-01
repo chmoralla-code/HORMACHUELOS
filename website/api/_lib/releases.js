@@ -22,6 +22,40 @@ export function publicRelease(row) {
   };
 }
 
+const BUILTIN_RELEASE_VERSION = "0.1.8";
+const BUILTIN_RELEASE_NOTES =
+  "Adds a clear in-app update notification, a unified workspace menu, improved provider aliases and visual effects, plus the latest preview, Computer Use, project, sign-in sync, installer, and hosted-model reliability improvements.";
+
+/**
+ * A deployment-bundled release keeps the download/update path available even
+ * when the release database cannot yet be updated from the publishing machine.
+ * A database release with the same or newer version always remains authoritative.
+ */
+export function builtinLatestRelease() {
+  const siteUrl = String(
+    process.env.PUBLIC_SITE_URL || process.env.SITE_URL || "https://hormachuelos.vercel.app",
+  ).replace(/\/$/, "");
+  return {
+    id: `builtin-${BUILTIN_RELEASE_VERSION}`,
+    version: BUILTIN_RELEASE_VERSION,
+    title: `Hormachuelos ${BUILTIN_RELEASE_VERSION}`,
+    whatsNew: BUILTIN_RELEASE_NOTES,
+    msiUrl: `${siteUrl}/downloads/Hormachuelos_${BUILTIN_RELEASE_VERSION}_x64_en-US.msi`,
+    exeUrl: `${siteUrl}/downloads/Hormachuelos_${BUILTIN_RELEASE_VERSION}_x64-setup.exe`,
+    forceUpdate: false,
+    isLatest: true,
+    publishedAt: "2026-08-02T00:00:00.000Z",
+  };
+}
+
+export function effectiveLatestRelease(row) {
+  const databaseRelease = publicRelease(row);
+  const bundledRelease = builtinLatestRelease();
+  return databaseRelease && cmpSemver(databaseRelease.version, bundledRelease.version) >= 0
+    ? databaseRelease
+    : bundledRelease;
+}
+
 /** Compare semver-ish strings. >0 if a>b, <0 if a<b, 0 if equal. */
 export function cmpSemver(a, b) {
   const parse = (v) =>
@@ -40,19 +74,16 @@ export function cmpSemver(a, b) {
 }
 
 export async function latestReleasePublic() {
-  return publicRelease(await getLatestRelease());
+  return effectiveLatestRelease(await getLatestRelease());
 }
 
 export async function checkUpdate(currentVersion) {
-  const latest = await getLatestRelease();
-  if (!latest) {
-    return { updateAvailable: false, forceUpdate: false, latest: null, currentVersion };
-  }
+  const latest = effectiveLatestRelease(await getLatestRelease());
   const outdated = cmpSemver(latest.version, currentVersion) > 0;
   return {
     updateAvailable: outdated,
-    forceUpdate: outdated && Boolean(latest.force_update),
-    latest: publicRelease(latest),
+    forceUpdate: outdated && Boolean(latest.forceUpdate),
+    latest,
     currentVersion: String(currentVersion || ""),
   };
 }

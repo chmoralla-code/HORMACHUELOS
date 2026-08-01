@@ -1,5 +1,40 @@
 import type { ComputerUseFxEvent } from "../ipc";
 
+export type PrivateTypingStatus = {
+  mask: string;
+  progress: string;
+  detail: string;
+};
+
+function nonNegativeInteger(value: number | null | undefined): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return null;
+  return Math.floor(value);
+}
+
+/**
+ * Build typing feedback exclusively from non-sensitive progress metadata.
+ * Deliberately never reads event.text so legacy events cannot reveal typed content.
+ */
+export function privateTypingStatus(event: ComputerUseFxEvent): PrivateTypingStatus {
+  const total = nonNegativeInteger(event.totalChars);
+  const index = nonNegativeInteger(event.charIndex);
+  const rawCurrent = event.kind === "type_done" ? (total ?? 0) : (index ?? -1) + 1;
+  const current = total == null ? rawCurrent : Math.min(rawCurrent, total);
+  const visibleBullets = Math.max(1, Math.min(current || total || 3, 12));
+  const mask = `${"•".repeat(visibleBullets)}${current > visibleBullets ? "…" : ""}`;
+  const progress = total != null ? `${current}/${total}` : current > 0 ? `${current}` : "";
+  const detail =
+    event.kind === "type_done"
+      ? total == null
+        ? "Text entered"
+        : `${total} ${total === 1 ? "character" : "characters"} entered`
+      : total == null
+        ? "Entering text"
+        : `Character ${current} of ${total}`;
+
+  return { mask, progress, detail };
+}
+
 let hud: HTMLElement | null = null;
 let labelEl: HTMLElement | null = null;
 let detailEl: HTMLElement | null = null;
@@ -35,7 +70,7 @@ function describe(event: ComputerUseFxEvent): { label: string; detail: string } 
     case "type_done":
       return {
         label: event.kind === "type_done" ? "Typed" : "Typing",
-        detail: event.text ?? "",
+        detail: privateTypingStatus(event).detail,
       };
     default:
       return { label: "Moving cursor", detail: `${event.x}, ${event.y}` };
@@ -63,11 +98,8 @@ export function updateComputerUseHud(event: ComputerUseFxEvent) {
     const isTyping = event.kind === "type_char" || event.kind === "type_done";
     typingRow.hidden = !isTyping;
     if (isTyping) {
-      const progress =
-        event.totalChars && event.totalChars > 0
-          ? ` (${((event.charIndex ?? event.totalChars - 1) + 1)}/${event.totalChars})`
-          : "";
-      typed.textContent = `${event.text ?? ""}${progress}`;
+      const status = privateTypingStatus(event);
+      typed.textContent = status.progress ? `${status.mask} (${status.progress})` : status.mask;
     }
   }
 

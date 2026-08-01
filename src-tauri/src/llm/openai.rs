@@ -507,7 +507,7 @@ impl OpenAi {
             "openrouter" => "https://openrouter.ai/api/v1",
             "pollinations" => "https://gen.pollinations.ai/v1",
             "deepseek" => "https://api.deepseek.com",
-            "glm" => "https://open.bigmodel.cn/api/paas/v4",
+            "glm" => "https://opencode.ai/zen/v1",
             "cursor" => "https://api.cursor.com/v1",
             "hormachuelos_free" => "https://hormachuelos.vercel.app/api/v1",
             _ => "https://api.openai.com/v1",

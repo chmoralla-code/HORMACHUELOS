@@ -16,17 +16,17 @@ const ASSET_BASE =
 
 /** Desktop installer files (uploaded to Supabase after `npm run desktop:build`). */
 const DESKTOP_DOWNLOADS = {
-  version: "0.1.5",
+  version: "0.1.8",
   windows: {
     msi: {
       label: "Windows installer (MSI)",
-      href: `${ASSET_BASE}/downloads/Hormachuelos_0.1.5_x64_en-US.msi`,
-      file: "Hormachuelos_0.1.5_x64_en-US.msi",
+      href: "/downloads/Hormachuelos_0.1.8_x64_en-US.msi",
+      file: "Hormachuelos_0.1.8_x64_en-US.msi",
     },
     setup: {
       label: "Windows setup (EXE)",
-      href: `${ASSET_BASE}/downloads/Hormachuelos_0.1.5_x64-setup.exe`,
-      file: "Hormachuelos_0.1.5_x64-setup.exe",
+      href: "/downloads/Hormachuelos_0.1.8_x64-setup.exe",
+      file: "Hormachuelos_0.1.8_x64-setup.exe",
     },
   },
 };
@@ -1271,6 +1271,7 @@ function renderAdmin() {
   function wireAdminChrome(tab) {
     actions.innerHTML = `
       <button type="button" class="btn btn-sm ${tab === "users" ? "btn-primary" : ""}" id="admin-tab-users">Users</button>
+      <button type="button" class="btn btn-sm ${tab === "models" ? "btn-primary" : ""}" id="admin-tab-models">Models</button>
       <button type="button" class="btn btn-sm ${tab === "releases" ? "btn-primary" : ""}" id="admin-tab-releases">Releases</button>
       <button type="button" class="btn btn-sm" id="admin-refresh">Refresh</button>
       <button type="button" class="btn btn-sm btn-ghost" id="admin-logout">Log out</button>`;
@@ -1281,6 +1282,7 @@ function renderAdmin() {
     };
     actions.querySelector("#admin-refresh").onclick = () => paintAdmin(tab);
     actions.querySelector("#admin-tab-users").onclick = () => paintAdmin("users");
+    actions.querySelector("#admin-tab-models").onclick = () => paintAdmin("models");
     actions.querySelector("#admin-tab-releases").onclick = () => paintAdmin("releases");
   }
 
@@ -1290,6 +1292,10 @@ function renderAdmin() {
       return;
     }
     wireAdminChrome(tab);
+    if (tab === "models") {
+      await paintModels();
+      return;
+    }
     if (tab === "releases") {
       await paintReleases();
       return;
@@ -1393,6 +1399,133 @@ function renderAdmin() {
             btn.textContent = "Save";
           }
         });
+      });
+    } catch (ex) {
+      if (String(ex.message || "").toLowerCase().includes("admin")) {
+        setAdminToken("");
+        paintLogin();
+        return;
+      }
+      root.innerHTML = `<div class="alert warn">${escapeHtml(String(ex.message || ex))}</div>`;
+    }
+  }
+
+  async function paintModels() {
+    root.innerHTML = `<p class="muted">Loading hosted models…</p>`;
+    try {
+      const data = await apiAdmin("/api/admin/models");
+      const configs = data.configs || [];
+      const storageWarning = data.credentialStorageReady
+        ? ""
+        : `<div class="alert warn">Credential encryption is not configured on the server. Set <code>HORMACHUELOS_MODEL_CONFIG_KEY</code> before saving a model key.</div>`;
+      root.innerHTML = `
+        <div class="card" style="margin-bottom:16px">
+          <h3 style="margin-top:0">Hosted HORMACHUELOS models</h3>
+          <p class="muted small">Keys are encrypted on the server and are never sent to the desktop app. Saving a key here updates the hosted route used by every compatible signed-in app version.</p>
+          ${storageWarning}
+          <form id="hosted-model-form" class="admin-release-form">
+            <div class="field"><label>Alias</label><input id="model-alias" class="field" required placeholder="hormachuelos-v3" pattern="[a-z0-9][a-z0-9._-]*" /></div>
+            <div class="field"><label>Display name</label><input id="model-name" class="field" required placeholder="Hormachuelos v3" /></div>
+            <div class="field"><label>Upstream model ID</label><input id="model-upstream" class="field" required placeholder="deepseek-v4-flash" /></div>
+            <div class="field"><label>HTTPS base URL</label><input id="model-base" class="field" required type="url" placeholder="https://provider.example/v1" /></div>
+            <div class="field"><label>Provider API key</label><input id="model-key" class="field" required type="password" autocomplete="new-password" placeholder="Paste once — it will not be shown again" /></div>
+            <label class="admin-active" style="margin:8px 0 14px;display:inline-flex"><input type="checkbox" id="model-active" checked /> Active</label>
+            <div class="field-error" id="model-error" hidden></div>
+            <button class="btn btn-primary" type="submit">Add hosted model</button>
+          </form>
+        </div>
+        <div class="admin-table-wrap">
+          <table class="admin-table">
+            <thead><tr><th>Alias</th><th>Upstream model</th><th>Base URL</th><th>Server key</th><th>Active</th><th></th></tr></thead>
+            <tbody>
+              ${configs.length
+                ? configs.map((m) => `<tr data-model-id="${escapeHtml(m.id)}" data-provider="${escapeHtml(m.providerId)}">
+                    <td><strong>${escapeHtml(m.displayName)}</strong><span class="muted small mono">${escapeHtml(m.alias)}</span></td>
+                    <td><input class="field admin-model-upstream" value="${escapeHtml(m.upstreamModel)}" /></td>
+                    <td><input class="field admin-model-base" type="url" value="${escapeHtml(m.baseUrl)}" /></td>
+                    <td><input class="field admin-model-key" type="password" autocomplete="new-password" placeholder="${m.keyConfigured ? "•••••••• (leave blank to keep)" : "No key saved"}" /><span class="muted small">${m.keyConfigured ? "Key configured" : "No key configured"}</span></td>
+                    <td><label class="admin-active"><input type="checkbox" class="admin-model-active" ${m.active ? "checked" : ""} /> Active</label></td>
+                    <td><button type="button" class="btn btn-sm btn-primary admin-model-save">Save</button><button type="button" class="btn btn-sm admin-model-clear" ${m.keyConfigured ? "" : "disabled"}>Clear key</button></td>
+                  </tr>`).join("")
+                : `<tr><td colspan="6" class="muted">No hosted models yet. Add one above.</td></tr>`}
+            </tbody>
+          </table>
+        </div>`;
+
+      const fieldsFor = (row) => ({
+        id: row.getAttribute("data-model-id"),
+        providerId: row.getAttribute("data-provider"),
+        alias: row.querySelector(".mono").textContent.trim(),
+        displayName: row.querySelector("strong").textContent.trim(),
+        upstreamModel: row.querySelector(".admin-model-upstream").value.trim(),
+        baseUrl: row.querySelector(".admin-model-base").value.trim(),
+        active: row.querySelector(".admin-model-active").checked,
+      });
+
+      root.querySelectorAll("tr[data-model-id]").forEach((row) => {
+        row.querySelector(".admin-model-save").addEventListener("click", async () => {
+          const btn = row.querySelector(".admin-model-save");
+          const keyInput = row.querySelector(".admin-model-key");
+          btn.disabled = true;
+          btn.textContent = "Saving…";
+          try {
+            const body = fieldsFor(row);
+            if (keyInput.value.trim()) body.apiKey = keyInput.value.trim();
+            await apiAdmin("/api/admin/models", { method: "PATCH", body });
+            toast("Hosted model saved");
+            await paintAdmin("models");
+          } catch (ex) {
+            toast(String(ex.message || ex));
+            btn.disabled = false;
+            btn.textContent = "Save";
+          }
+        });
+        row.querySelector(".admin-model-clear").addEventListener("click", async () => {
+          if (!confirm("Clear this server-side API key? The model will stop serving requests until a new key is saved.")) return;
+          const btn = row.querySelector(".admin-model-clear");
+          btn.disabled = true;
+          try {
+            await apiAdmin("/api/admin/models", {
+              method: "PATCH",
+              body: { ...fieldsFor(row), clearApiKey: true },
+            });
+            toast("Hosted model key cleared");
+            await paintAdmin("models");
+          } catch (ex) {
+            toast(String(ex.message || ex));
+            btn.disabled = false;
+          }
+        });
+      });
+
+      root.querySelector("#hosted-model-form").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const error = root.querySelector("#model-error");
+        const btn = root.querySelector('#hosted-model-form button[type="submit"]');
+        error.hidden = true;
+        btn.disabled = true;
+        btn.textContent = "Saving…";
+        try {
+          await apiAdmin("/api/admin/models", {
+            method: "POST",
+            body: {
+              providerId: "hormachuelos_free",
+              alias: root.querySelector("#model-alias").value.trim(),
+              displayName: root.querySelector("#model-name").value.trim(),
+              upstreamModel: root.querySelector("#model-upstream").value.trim(),
+              baseUrl: root.querySelector("#model-base").value.trim(),
+              apiKey: root.querySelector("#model-key").value.trim(),
+              active: root.querySelector("#model-active").checked,
+            },
+          });
+          toast("Hosted model added");
+          await paintAdmin("models");
+        } catch (ex) {
+          error.hidden = false;
+          error.textContent = String(ex.message || ex);
+          btn.disabled = false;
+          btn.textContent = "Add hosted model";
+        }
       });
     } catch (ex) {
       if (String(ex.message || "").toLowerCase().includes("admin")) {

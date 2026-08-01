@@ -44,10 +44,18 @@ function openUpdateUrl(url: string) {
 
 /** Dismissible manual update checker opened from the desktop sidebar. */
 export function showUpdateDialog(): HTMLElement {
-  document.querySelector(".update-dialog-overlay")?.remove();
+  const existing = document.querySelector<HTMLElement>(".update-dialog-overlay");
+  if (existing) {
+    existing.dispatchEvent(new Event("update-dialog-dismiss"));
+    if (existing.isConnected) existing.remove();
+  }
   const previousFocus = document.activeElement instanceof HTMLElement
     ? document.activeElement
     : null;
+  const inertSiblings = Array.from(document.body.children)
+    .filter((node): node is HTMLElement => node instanceof HTMLElement)
+    .map((node) => ({ node, wasInert: node.inert }));
+  for (const { node } of inertSiblings) node.inert = true;
 
   const overlay = el("div", {
     class: "auth-gate-overlay update-dialog-overlay",
@@ -70,10 +78,17 @@ export function showUpdateDialog(): HTMLElement {
   card.appendChild(content);
   overlay.appendChild(card);
 
+  let closed = false;
   const close = () => {
+    if (closed) return;
+    closed = true;
     overlay.remove();
-    window.requestAnimationFrame(() => previousFocus?.focus({ preventScroll: true }));
+    for (const { node, wasInert } of inertSiblings) node.inert = wasInert;
+    window.requestAnimationFrame(() => {
+      if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
+    });
   };
+  overlay.addEventListener("update-dialog-dismiss", close);
   closeBtn.addEventListener("click", close);
   overlay.addEventListener("click", (event) => {
     if (event.target === overlay) close();
@@ -82,8 +97,41 @@ export function showUpdateDialog(): HTMLElement {
     if (event.key === "Escape") {
       event.preventDefault();
       close();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = Array.from(
+      overlay.querySelectorAll<HTMLElement>(
+        "button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex='-1'])",
+      ),
+    ).filter((node) => !node.hidden && node.getAttribute("aria-hidden") !== "true");
+    if (!focusable.length) {
+      event.preventDefault();
+      card.tabIndex = -1;
+      card.focus();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    const active = document.activeElement;
+    if (event.shiftKey && (active === first || !overlay.contains(active))) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && (active === last || !overlay.contains(active))) {
+      event.preventDefault();
+      first.focus();
     }
   });
+
+  const ensureFocusInside = () => {
+    const focusCloseButton = () => {
+      if (overlay.isConnected && !overlay.contains(document.activeElement)) {
+        closeBtn.focus({ preventScroll: true });
+      }
+    };
+    if (overlay.isConnected) focusCloseButton();
+    else window.requestAnimationFrame(focusCloseButton);
+  };
 
   const addTitle = (title: string) => {
     content.appendChild(el("h1", { class: "auth-gate-title", id: "update-dialog-title" }, [title]));
@@ -118,6 +166,7 @@ export function showUpdateDialog(): HTMLElement {
       const laterBtn = el("button", { class: "btn", type: "button" }, ["Not now"]);
       laterBtn.addEventListener("click", close);
       content.appendChild(laterBtn);
+      ensureFocusInside();
       return;
     }
 
@@ -127,6 +176,7 @@ export function showUpdateDialog(): HTMLElement {
     const doneBtn = el("button", { class: "btn primary", type: "button" }, ["Done"]);
     doneBtn.addEventListener("click", close);
     content.appendChild(doneBtn);
+    ensureFocusInside();
   };
 
   const runCheck = async () => {
@@ -143,11 +193,12 @@ export function showUpdateDialog(): HTMLElement {
       retryBtn.addEventListener("click", () => void runCheck());
       content.appendChild(retryBtn);
       addWebButton();
+      ensureFocusInside();
     }
   };
 
   void runCheck();
-  window.requestAnimationFrame(() => closeBtn.focus({ preventScroll: true }));
+  ensureFocusInside();
   return overlay;
 }
 

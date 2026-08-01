@@ -14,11 +14,14 @@
     </style>
   </head>
   <body>
-    <aside id="sidebar" class="sidebar"></aside>
+    <div id="app">
+      <aside id="sidebar" class="sidebar"></aside>
+      <button id="background-action" type="button">Background action</button>
+    </div>
     <script type="module">
       import { api } from "./ipc.ts";
       import { Sidebar } from "./components/sidebar.ts";
-      import { showUpdateDialog } from "./components/update-gate.ts";
+      import { checkDesktopUpdate, showUpdateDialog } from "./components/update-gate.ts";
 
       window.__updateMode = "available";
       api.appVersion = async () => "0.1.4";
@@ -64,6 +67,11 @@
         onRefreshAccount: noop,
       });
       await sidebar.render();
+      const update = await checkDesktopUpdate();
+      sidebar.setUpdateNotification(
+        update.updateAvailable || update.forceUpdate,
+        update.latest?.version,
+      );
     </script>
   </body>
 </html>

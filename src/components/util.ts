@@ -37,28 +37,33 @@ export function escapeHtml(s: string): string {
 
 /**
  * Paint a label with letter-by-letter shine (live activity rows).
- * Live shimmer is always crimson red (Claude / OpenAI premium feel).
+ * OpenAI aliases use pink; other providers retain the existing blue effect.
  */
 export function setShimmerText(el: HTMLElement | null, text: string, shimmer: boolean) {
   if (!el) return;
+  const pinkOpenAi = !!el.closest("#chat.chat-sol");
+  const toneClass = pinkOpenAi ? "shine-pink" : "shine-red";
+  const animationName = pinkOpenAi ? "lightningFadeInOutPink" : "letterShineRed";
+  const fallbackColor = pinkOpenAi ? "#ff75bb" : "#c44a44";
   if (!shimmer) {
     el.removeAttribute("data-shimmer");
     el.removeAttribute("aria-label");
-    el.classList.remove("activity-shimmer", "shine-red");
+    el.classList.remove("activity-shimmer", "shine-red", "shine-pink");
     el.textContent = text;
     return;
   }
   if (
     el.getAttribute("data-shimmer") === text &&
     el.classList.contains("activity-shimmer") &&
-    el.classList.contains("shine-red") &&
-    el.querySelector(".shine-ch.shine-red")
+    el.classList.contains(toneClass) &&
+    el.querySelector(`.shine-ch.${toneClass}`)
   ) {
     return;
   }
   el.setAttribute("data-shimmer", text);
   el.setAttribute("aria-label", text);
-  el.classList.add("activity-shimmer", "shine-red");
+  el.classList.remove("shine-red", "shine-pink");
+  el.classList.add("activity-shimmer", toneClass);
   const frag = document.createDocumentFragment();
   const chars = Array.from(text);
   const max = 120;
@@ -68,11 +73,11 @@ export function setShimmerText(el: HTMLElement | null, text: string, shimmer: bo
       break;
     }
     const span = document.createElement("span");
-    span.className = "shine-ch shine-red";
+    span.className = `shine-ch ${toneClass}`;
     span.style.setProperty("--i", String(i));
-    // Inline fallback so WebView can't lose the red to stylesheet order
-    span.style.animation = `letterShineRed 1.25s ease-in-out ${i * 0.045}s infinite`;
-    span.style.color = "#c44a44";
+    // Inline fallback keeps the selected tone visible while WebView resolves CSS.
+    span.style.animation = `${animationName} 1.25s ease-in-out ${i * 0.045}s infinite`;
+    span.style.color = fallbackColor;
     span.textContent = chars[i] === " " ? "\u00A0" : chars[i];
     frag.appendChild(span);
   }
@@ -121,6 +126,115 @@ export function displayPlanLabel(plan: string): string {
   }
   if (!p) return "Plan";
   return p.charAt(0).toUpperCase() + p.slice(1);
+}
+
+type MarkdownTableAlignment = "left" | "center" | "right";
+
+function isEscapedAt(value: string, index: number): boolean {
+  let slashCount = 0;
+  for (let cursor = index - 1; cursor >= 0 && value[cursor] === "\\"; cursor -= 1) {
+    slashCount += 1;
+  }
+  return slashCount % 2 === 1;
+}
+
+/** Split a Markdown table row without treating escaped pipes as columns. */
+function splitMarkdownTableRow(line: string): string[] {
+  let row = line.trim();
+  if (row.startsWith("|")) row = row.slice(1);
+  if (row.endsWith("|") && !isEscapedAt(row, row.length - 1)) row = row.slice(0, -1);
+
+  const cells: string[] = [];
+  let cell = "";
+  for (let index = 0; index < row.length; index += 1) {
+    if (row[index] === "|" && !isEscapedAt(row, index)) {
+      cells.push(cell);
+      cell = "";
+    } else {
+      cell += row[index];
+    }
+  }
+  cells.push(cell);
+  return cells.map((value) => value.trim().replace(/\\\|/g, "|"));
+}
+
+function isMarkdownTableDivider(cells: string[]): boolean {
+  return cells.length > 1 && cells.every((cell) => /^:?-{3,}:?$/.test(cell.replace(/\s+/g, "")));
+}
+
+function markdownTableAlignment(marker: string): MarkdownTableAlignment {
+  const value = marker.trim();
+  if (value.startsWith(":") && value.endsWith(":")) return "center";
+  if (value.endsWith(":")) return "right";
+  return "left";
+}
+
+/**
+ * Converts standard Markdown tables into an accessible, scrollable table.
+ * This is intentionally run after escaping user text, so table cells cannot
+ * introduce raw HTML into the chat transcript.
+ */
+function renderMarkdownTables(text: string): string {
+  const lines = text.split("\n");
+  const output: string[] = [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const headerLine = lines[index];
+    const dividerLine = lines[index + 1];
+    if (!headerLine.includes("|") || !dividerLine?.includes("|")) {
+      output.push(headerLine);
+      continue;
+    }
+
+    const headers = splitMarkdownTableRow(headerLine);
+    const dividers = splitMarkdownTableRow(dividerLine);
+    if (
+      headers.length < 2 ||
+      headers.length !== dividers.length ||
+      !isMarkdownTableDivider(dividers)
+    ) {
+      output.push(headerLine);
+      continue;
+    }
+
+    const hasOuterPipes = headerLine.trim().startsWith("|");
+    const alignments = dividers.map(markdownTableAlignment);
+    const rows: string[][] = [];
+    let cursor = index + 2;
+    while (cursor < lines.length) {
+      const rowLine = lines[cursor];
+      if (
+        !rowLine.trim() ||
+        !rowLine.includes("|") ||
+        (hasOuterPipes && !rowLine.trim().startsWith("|"))
+      ) {
+        break;
+      }
+      const cells = splitMarkdownTableRow(rowLine);
+      if (cells.length < 2) break;
+      rows.push(headers.map((_header, cellIndex) => cells[cellIndex] || ""));
+      cursor += 1;
+    }
+
+    const headerHtml = headers
+      .map((header, cellIndex) => (
+        `<th scope="col" data-align="${alignments[cellIndex]}">${header}</th>`
+      ))
+      .join("");
+    const bodyHtml = rows
+      .map((row) => `<tr>${row.map((cell, cellIndex) => `<td data-align="${alignments[cellIndex]}">${cell}</td>`).join("")}</tr>`)
+      .join("");
+
+    // Blank separators ensure surrounding prose still receives paragraph markup.
+    output.push("");
+    output.push(
+      `<div class="md-table-wrap" role="region" aria-label="Response table" tabindex="0"><table class="md-table"><thead><tr>${headerHtml}</tr></thead><tbody>${bodyHtml}</tbody></table></div>`,
+    );
+    output.push("");
+    index = cursor - 1;
+  }
+
+  return output.join("\n");
 }
 
 /**
@@ -194,13 +308,16 @@ export function renderMarkdown(src: string): string {
     '$1<a class="md-link" href="$2" target="_blank" rel="noopener noreferrer"><span class="md-link-ico" aria-hidden="true"></span>$2</a>',
   );
 
+  // Tables must be converted before generic paragraph splitting.
+  text = renderMarkdownTables(text);
+
   // Paragraphs / line breaks for remaining plain lines
   text = text
     .split(/\n{2,}/)
     .map((block) => {
       const t = block.trim();
       if (!t) return "";
-      if (/^<(h[1-6]|ul|ol|pre|blockquote)/.test(t)) return t;
+      if (/^<(h[1-6]|ul|ol|pre|blockquote|div|table)/.test(t)) return t;
       return `<p>${t.replace(/\n/g, "<br>")}</p>`;
     })
     .join("\n");

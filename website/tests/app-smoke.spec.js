@@ -52,12 +52,21 @@ test("desktop shell loads critical regions", async ({ page }) => {
     appFindings.push({ severity: "major", message: "Composer UI not found after init" });
   }
   expect(hasComposer).toBeTruthy();
+  const authGate = page.locator(".auth-gate-overlay");
+  const authRequired = await authGate.isVisible().catch(() => false);
+  if (authRequired) {
+    await expect(authGate).toContainText("Sign in to continue");
+    appFindings.push({
+      severity: "info",
+      message: "Browser-only desktop smoke reached the expected sign-in gate",
+    });
+  }
 
   // Project chip should exist (interactive directory control)
   const projectChip = page.locator("#composer-project-chip, .composer-project-chip");
   if ((await projectChip.count()) === 0) {
     appFindings.push({ severity: "major", message: "Project chip missing under composer" });
-  } else {
+  } else if (!authRequired) {
     await projectChip.first().click().catch(() => {});
     await page.waitForTimeout(300);
     const menu = page.locator(".composer-project-menu, .chip-menu");
@@ -71,7 +80,7 @@ test("desktop shell loads critical regions", async ({ page }) => {
 
   // Drawer toggles
   const left = page.locator("#drawer-left-btn");
-  if (await left.count()) {
+  if (!authRequired && (await left.count())) {
     await left.click();
     await page.waitForTimeout(200);
     await left.click();
@@ -108,6 +117,12 @@ test("desktop shell loads critical regions", async ({ page }) => {
 test("empty chat / send without project prompts", async ({ page }) => {
   await page.goto(APP);
   await page.waitForTimeout(1000);
+  const authGate = page.locator(".auth-gate-overlay");
+  if (await authGate.isVisible().catch(() => false)) {
+    await expect(authGate).toContainText("Sign in to continue");
+    await page.screenshot({ path: path.join(OUT, "11-app-auth-gate.png"), fullPage: true });
+    return;
+  }
   const input = page.locator("#forge-dock textarea, .composer textarea, textarea").first();
   if ((await input.count()) === 0) {
     appFindings.push({ severity: "major", message: "No composer textarea" });

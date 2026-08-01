@@ -262,6 +262,13 @@ pub fn should_use_hosted(status: &LicenseStatus) -> bool {
     true
 }
 
+/// Whether a selected provider should be routed through the hosted proxy.
+/// Ollama must always use its configured local host: that host is also the
+/// authenticated bridge for Ollama Cloud models such as `glm-5.2:cloud`.
+pub fn should_use_hosted_for_provider(status: &LicenseStatus, provider: &str) -> bool {
+    !provider.eq_ignore_ascii_case("ollama") && should_use_hosted(status)
+}
+
 impl LicenseStatus {
     fn enforce_expiry_at(&mut self, today: NaiveDate) -> bool {
         if !self.active || self.plan.eq_ignore_ascii_case("free") {
@@ -724,6 +731,31 @@ pub fn record_provider_usage(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hosted_pro_status() -> LicenseStatus {
+        LicenseStatus {
+            plan: "pro".into(),
+            active: true,
+            license_key: "HORMA-TEST".into(),
+            hosted: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ollama_always_uses_its_configured_local_host() {
+        let status = hosted_pro_status();
+        assert!(should_use_hosted(&status));
+        assert!(!should_use_hosted_for_provider(&status, "ollama"));
+        assert!(!should_use_hosted_for_provider(&status, "OLLAMA"));
+    }
+
+    #[test]
+    fn hosted_plan_still_proxies_supported_cloud_providers() {
+        let status = hosted_pro_status();
+        assert!(should_use_hosted_for_provider(&status, "deepseek"));
+        assert!(should_use_hosted_for_provider(&status, "openrouter"));
+    }
 
     #[test]
     fn paid_license_is_deactivated_after_expiry() {

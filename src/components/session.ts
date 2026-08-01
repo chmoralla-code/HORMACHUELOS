@@ -70,6 +70,36 @@ function redactCredentialValue(value: unknown): unknown {
   return value;
 }
 
+function typedCharacterCount(args: Record<string, unknown>): number {
+  const declared = args.characters;
+  if (typeof declared === "number" && Number.isFinite(declared) && declared >= 0) {
+    return Math.floor(declared);
+  }
+  const text = typeof args.text === "string" ? args.text : "";
+  const redactedCount = text.match(/^\[hidden · (\d+) characters\]$/)?.[1];
+  if (redactedCount) return Number(redactedCount);
+  return Array.from(text).length;
+}
+
+/** Redact tool arguments before UI display, transcript storage, or history replay. */
+export function redactToolArguments(name: string, value: unknown): unknown {
+  const redacted = redactCredentialValue(value);
+  if (!name.trim().toLowerCase().startsWith("computer_")) return redacted;
+
+  const args =
+    redacted && typeof redacted === "object" && !Array.isArray(redacted)
+      ? { ...(redacted as Record<string, unknown>) }
+      : {};
+  if ("observation_token" in args) args.observation_token = "[fresh observation]";
+  if (name.trim().toLowerCase() === "computer_type_text") {
+    const characters = typedCharacterCount(args);
+    args.text = `[hidden · ${characters} characters]`;
+    args.characters = characters;
+    delete args.text_preview;
+  }
+  return args;
+}
+
 function redactSessionMessage(message: SessionMessage): SessionMessage {
   switch (message.type) {
     case "user":
@@ -79,7 +109,7 @@ function redactSessionMessage(message: SessionMessage): SessionMessage {
     case "tool_call":
       return {
         ...message,
-        arguments: redactCredentialValue(message.arguments),
+        arguments: redactToolArguments(message.name, message.arguments),
       };
     case "tool_result":
       return { ...message, content: redactChatCredentials(message.content) };
@@ -172,13 +202,15 @@ export function loadSessions(projectId: string): Session[] {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return [];
     const all: Session[] = JSON.parse(raw);
-    return all
+    const safeAll = all.map(safeSessionForStorage);
+    // Migrate legacy transcripts that may contain raw Computer Use typing arguments.
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(safeAll));
+    } catch {
+      // Keep the sanitized in-memory transcript even if storage is unavailable.
+    }
+    return safeAll
       .filter((s) => s.projectId === projectId)
-      .map((session) => ({
-        ...session,
-        title: redactChatCredentials(session.title),
-        messages: (session.messages || []).map(redactSessionMessage),
-      }))
       .sort((a, b) => b.createdAt - a.createdAt);
   } catch {
     return [];
@@ -355,7 +387,7 @@ export function buildLlmHistory(messages: SessionMessage[], currentPrompt: strin
         ? {
             tool_calls: toolCalls.map((call) => ({
               ...call,
-              arguments: redactCredentialValue(call.arguments),
+              arguments: redactToolArguments(call.name, call.arguments),
             })),
           }
         : {}),
@@ -492,7 +524,7 @@ export function recordAgentEvent(
         type: "tool_call",
         id: e.payload.id,
         name: e.payload.name,
-        arguments: redactCredentialValue(e.payload.arguments),
+        arguments: redactToolArguments(e.payload.name, e.payload.arguments),
         at,
       });
       break;

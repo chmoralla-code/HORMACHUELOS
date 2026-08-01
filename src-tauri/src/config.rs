@@ -15,6 +15,10 @@ pub struct Settings {
     pub provider: String,
     pub model: String,
     pub base_url: Option<String>,
+    /// Legacy persisted value kept so settings from older desktop releases
+    /// still load. Agent runs are intentionally unbounded; Stop, command
+    /// timeouts, and hosted usage safeguards remain active.
+    #[serde(default)]
     pub max_iterations: u32,
     pub command_timeout_secs: u64,
     pub auto_approve: bool,
@@ -48,6 +52,21 @@ fn default_model_effort() -> String {
     "high".into()
 }
 
+/// Hosted aliases are selected from the server-managed catalog. Keeping the
+/// prefix constrained prevents a desktop client from using the shared hosted
+/// credential to request an arbitrary upstream model.
+fn is_hormachuelos_model_alias(model: &str) -> bool {
+    let model = model.trim();
+    let Some(rest) = model.strip_prefix("hormachuelos-") else {
+        return false;
+    };
+    !rest.is_empty()
+        && rest.len() <= 80
+        && rest.chars().all(|ch| {
+            ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '-' | '_' | '.')
+        })
+}
+
 fn capability_for_mode(mode: &str) -> &'static str {
     match mode {
         "auto" => "agent",
@@ -63,7 +82,7 @@ impl Default for Settings {
             provider: "cursor".into(),
             model: "grok-4.5".into(),
             base_url: Some("https://api.cursor.com/v1".into()),
-            max_iterations: 25,
+            max_iterations: 0,
             command_timeout_secs: 120,
             auto_approve: false,
             permission_mode: default_permission_mode(),
@@ -85,9 +104,6 @@ impl Settings {
         }
         let raw = std::fs::read_to_string(&p)?;
         let mut s: Self = serde_json::from_str(&raw)?;
-        if s.max_iterations == 0 {
-            s.max_iterations = 25;
-        }
         if s.command_timeout_secs == 0 {
             s.command_timeout_secs = 120;
         }
@@ -141,22 +157,54 @@ impl Settings {
             }
             s.base_url = Some("https://api.cursor.com/v1".into());
         }
-        // Keep whatever Cursor/OpenAI model the user selected — do not force grok-only.
+        // Translate legacy display aliases to the Cursor SDK model IDs. The
+        // frontend displays these as GPT 5.6 Sol/Luna, but Cursor receives its
+        // native model identifiers.
+        if s.provider.eq_ignore_ascii_case("cursor") {
+            match s.model.trim() {
+                "gpt-5.6-sol" => s.model = "grok-4.5".into(),
+                "gpt-5.6-luna" => s.model = "composer-2.5".into(),
+                _ => {}
+            }
+        }
+        // Keep whatever Cursor model the user selected — do not force grok-only.
         match (s.provider.as_str(), s.model.as_str()) {
             ("deepseek", "deepseek-chat") => s.model = "deepseek-v4-flash".into(),
             ("deepseek", "deepseek-reasoner") => s.model = "deepseek-v4-pro".into(),
             _ => {}
         }
         if s.provider == "hormachuelos_free" {
-            s.model = "hormachuelos-v1".into();
+            if !is_hormachuelos_model_alias(&s.model) {
+                s.model = "hormachuelos-v1".into();
+            }
             s.base_url = Some("https://hormachuelos.vercel.app/api/v1".into());
         }
         if s.provider == "deepseek" && s.base_url.as_deref() == Some("https://api.deepseek.com/v1")
         {
             s.base_url = Some("https://api.deepseek.com".into());
         }
-        if s.provider == "glm" && s.base_url.as_deref() == Some("https://api.atomeocean.com/v1") {
-            s.base_url = Some("https://open.bigmodel.cn/api/paas/v4".into());
+        if s.provider == "glm" {
+            let legacy = matches!(
+                s.base_url.as_deref(),
+                Some("https://api.atomeocean.com/v1")
+                    | Some("https://open.bigmodel.cn/api/paas/v4")
+                    | None
+            ) || s.base_url.as_deref().is_some_and(|u| u.trim().is_empty());
+            if legacy {
+                s.base_url = Some("https://opencode.ai/zen/v1".into());
+            }
+            let free = [
+                "deepseek-v4-flash-free",
+                "mimo-v2.5-free",
+                "north-mini-code-free",
+                "ling-3.0-flash-free",
+                "laguna-s-2.1-free",
+                "nemotron-3-ultra-free",
+                "big-pickle",
+            ];
+            if !free.iter().any(|m| *m == s.model) {
+                s.model = "deepseek-v4-flash-free".into();
+            }
         }
         if s.provider == "pollinations"
             && s.base_url.as_deref() == Some("https://text.pollinations.ai/openai")
@@ -184,10 +232,6 @@ impl Settings {
         ensure!(
             !self.model.chars().any(char::is_control),
             "Model cannot contain control characters."
-        );
-        ensure!(
-            (1..=100).contains(&self.max_iterations),
-            "Max iterations must be between 1 and 100."
         );
         ensure!(
             (5..=600).contains(&self.command_timeout_secs),
@@ -230,8 +274,8 @@ impl Settings {
         }
         if self.provider == "hormachuelos_free" {
             ensure!(
-                self.model == "hormachuelos-v1",
-                "HORMACHUELOS FREE only supports Hormachuelos v1."
+                is_hormachuelos_model_alias(&self.model),
+                "HORMACHUELOS FREE model aliases must start with 'hormachuelos-'."
             );
             ensure!(
                 self.base_url.as_deref() == Some("https://hormachuelos.vercel.app/api/v1"),
@@ -349,7 +393,7 @@ pub fn clear_website_session() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_provider_id, Settings};
+    use super::{is_hormachuelos_model_alias, validate_provider_id, Settings};
 
     #[test]
     fn rejects_unknown_provider_ids() {
@@ -371,7 +415,22 @@ mod tests {
     }
 
     #[test]
-    fn permits_only_the_pinned_hormachuelos_free_alias() {
+    fn accepts_legacy_iteration_values_without_capping_runs() {
+        let unlimited = Settings {
+            max_iterations: 0,
+            ..Settings::default()
+        };
+        assert!(unlimited.validate().is_ok());
+
+        let old_high_value = Settings {
+            max_iterations: u32::MAX,
+            ..unlimited
+        };
+        assert!(old_high_value.validate().is_ok());
+    }
+
+    #[test]
+    fn permits_server_managed_hormachuelos_free_aliases() {
         let settings = Settings {
             provider: "hormachuelos_free".into(),
             model: "hormachuelos-v1".into(),
@@ -379,6 +438,13 @@ mod tests {
             ..Settings::default()
         };
         assert!(settings.validate().is_ok());
+
+        let v2 = Settings {
+            model: "hormachuelos-v2".into(),
+            ..settings.clone()
+        };
+        assert!(v2.validate().is_ok());
+        assert!(is_hormachuelos_model_alias("hormachuelos-custom_1"));
 
         let wrong_model = Settings {
             model: "deepseek-v4-flash".into(),

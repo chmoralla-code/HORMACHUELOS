@@ -1,4 +1,4 @@
-downloads/**
+downloads/*
 videos/**
 scripts/**
 tests/**
@@ -10,3 +10,5 @@ README.md
 **/*.exe
 **/*.zip
 .tmp/**
+!downloads/Hormachuelos_0.1.8_x64_en-US.msi
+!downloads/Hormachuelos_0.1.8_x64-setup.exe

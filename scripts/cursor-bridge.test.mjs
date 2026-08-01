@@ -5,6 +5,7 @@ import {
   COMPUTER_PAUSE_SENTINEL_ENV,
   boundedHistory,
   buildAgentPrompt,
+  computerApprovalSummary,
   createComputerUseTools,
   helperEnvironment,
   isToolAllowed,
@@ -13,11 +14,16 @@ import {
   resolveSandboxOptions,
   sanitizeComputerToolArguments,
 } from "./cursor-bridge.mjs";
+import { redactToolArguments } from "../src/components/session.ts";
 
 test("model selections preserve the configured provider model id", () => {
   assert.equal(resolveModelSelection("default", "high"), undefined);
   assert.deepEqual(resolveModelSelection("grok-4.5", "max"), {
     id: "grok-4.5",
+    params: [{ id: "effort", value: "high" }],
+  });
+  assert.deepEqual(resolveModelSelection("composer-2.5", "ultra"), {
+    id: "composer-2.5",
     params: [{ id: "effort", value: "high" }],
   });
   assert.equal(resolveModelSelection("gpt-5.6-sol", "medium").id, "gpt-5.6-sol");
@@ -104,14 +110,37 @@ test("computer use keeps read-only modes observational and exposes fast game con
 });
 
 test("computer use redacts persisted text and forwards the emergency pause sentinel", () => {
+  const typedSentinel = "typed-secret-SENTINEL-bridge-28c1";
   const persisted = sanitizeComputerToolArguments("computer_type_text", {
     window_id: "42",
     observation_token: "signed-secret-token",
-    text: "private draft",
+    text: typedSentinel,
   });
   assert.equal(persisted.observation_token, "[fresh observation token]");
-  assert.equal(persisted.text, "[13 characters]");
-  assert.doesNotMatch(JSON.stringify(persisted), /private draft|signed-secret-token/);
+  assert.equal(persisted.text, `[hidden · ${Array.from(typedSentinel).length} characters]`);
+  assert.equal(persisted.characters, Array.from(typedSentinel).length);
+  assert.doesNotMatch(JSON.stringify(persisted), /typed-secret-SENTINEL|signed-secret-token/);
+
+  const approval = sanitizeComputerToolArguments(
+    "computer_type_text",
+    { window_id: "42", text: typedSentinel },
+    { approval: true },
+  );
+  const summary = computerApprovalSummary("computer_type_text", {
+    window_id: "42",
+    text: typedSentinel,
+  });
+  assert.doesNotMatch(JSON.stringify({ approval, summary }), /typed-secret-SENTINEL/);
+
+  const transcriptArguments = redactToolArguments("computer_type_text", {
+    window_id: "42",
+    observation_token: "signed-secret-token",
+    text: typedSentinel,
+  });
+  assert.doesNotMatch(
+    JSON.stringify(transcriptArguments),
+    /typed-secret-SENTINEL|signed-secret-token/,
+  );
 
   const previous = process.env[COMPUTER_PAUSE_SENTINEL_ENV];
   process.env[COMPUTER_PAUSE_SENTINEL_ENV] = "C:\\Temp\\ai-forge-paused";
