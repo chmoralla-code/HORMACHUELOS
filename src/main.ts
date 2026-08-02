@@ -207,6 +207,8 @@ async function openBuildPreview(opts: {
   title?: string;
   sessionId?: string;
   projectRoot?: string | null;
+  /** When false, open a blank preview shell (no auto-picked HTML). Default true. */
+  autoPickEntry?: boolean;
 }) {
   if (!currentProjectPath || !sitePreview) return;
   if (opts.projectRoot && !sameProjectPath(opts.projectRoot, currentProjectPath)) return;
@@ -224,7 +226,8 @@ async function openBuildPreview(opts: {
   if (!files.length) {
     files = [...(await snapshotProjectFiles(projectRoot))];
   }
-  const entry = opts.entryPath || pickPreviewEntry(files);
+  const autoPick = opts.autoPickEntry !== false;
+  const entry = opts.entryPath || (autoPick ? pickPreviewEntry(files) : null);
   const targetSession = sessionForId(targetSessionId);
 
   // A background agent may finish a game or app while the user is reading a
@@ -248,6 +251,7 @@ async function openBuildPreview(opts: {
     files,
     entryPath: entry,
     title: opts.title || "Build preview",
+    autoPickEntry: autoPick,
   });
   // The component emits this itself for regular UI actions. Persist here too so
   // an automatically opened preview is durable even if a view transition raced it.
@@ -960,7 +964,7 @@ function renderWorkspaceMenu() {
     () => {
       if (!currentProjectPath) return;
       if (sitePreview?.isOpen) sitePreview.close();
-      else void openBuildPreview({ title: "Build preview" });
+      else void openBuildPreview({ title: "Build preview", autoPickEntry: false });
     },
     !hasProject,
   );

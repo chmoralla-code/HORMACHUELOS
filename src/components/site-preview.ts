@@ -9,6 +9,8 @@ export type PreviewOpenOptions = {
   entryPath?: string | null;
   files?: string[];
   title?: string;
+  /** When false, open the shell without auto-picking an HTML entry (blank panel). Default true. */
+  autoPickEntry?: boolean;
 };
 
 type SelectedEl = {
@@ -940,30 +942,38 @@ export class SitePreview {
       .map((file) => normalizePreviewEntry(this.projectRoot, file))
       .filter((file): file is string => Boolean(file));
     let entry = normalizePreviewEntry(this.projectRoot, opts.entryPath);
-    if (!entry) {
+    const autoPick = opts.autoPickEntry !== false;
+    if (!entry && autoPick) {
       entry = pickPreviewEntry(files);
     }
     this.showShell(opts.title || "Preview");
     if (!entry) {
-      const artifact = files.find((f) =>
-        /\.(apk|aab|ipa|exe|msi|dmg|wasm)$/i.test(f),
-      );
-      if (artifact) {
-        await this.openPathInTab(artifact, {
-          activate: true,
-          title: tabTitleFromPath(artifact),
-          pushHistory: true,
-        });
-        this.statusEl.textContent = "Build artifact ready · open from Files to install/run";
-        const frame = this.frame;
-        if (frame) {
-          frame.removeAttribute("srcdoc");
-          frame.src = "about:blank";
+      if (autoPick) {
+        const artifact = files.find((f) =>
+          /\.(apk|aab|ipa|exe|msi|dmg|wasm)$/i.test(f),
+        );
+        if (artifact) {
+          await this.openPathInTab(artifact, {
+            activate: true,
+            title: tabTitleFromPath(artifact),
+            pushHistory: true,
+          });
+          this.statusEl.textContent = "Build artifact ready · open from Files to install/run";
+          const frame = this.frame;
+          if (frame) {
+            frame.removeAttribute("srcdoc");
+            frame.src = "about:blank";
+          }
+          this.emitStateChange();
+          return;
         }
-        this.emitStateChange();
-        return;
+        this.statusEl.textContent = "No HTML preview found in this build.";
+      } else {
+        this.destroyAllTabs();
+        this.syncTabStrip();
+        this.updateNavButtons();
+        this.statusEl.textContent = "Preview ready — open a file or wait for a build.";
       }
-      this.statusEl.textContent = "No HTML preview found in this build.";
       this.emitStateChange();
       return;
     }

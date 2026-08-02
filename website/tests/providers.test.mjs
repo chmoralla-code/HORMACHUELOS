@@ -91,7 +91,7 @@ test("HORMACHUELOS FREE never falls back to another provider", async () => {
   }
 });
 
-test("licensed OpenAI · Grok route pins the public alias to xAI Grok 4.5", async () => {
+test("licensed xAI route pins the public alias to Grok 4.5", async () => {
   const restoreManaged = disableManagedConfigsForTest();
   const priorXai = process.env.XAI_API_KEY;
   process.env.XAI_API_KEY = "xai-test-only-hosted-key";

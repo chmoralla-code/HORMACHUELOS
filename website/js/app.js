@@ -16,17 +16,17 @@ const ASSET_BASE =
 
 /** Desktop installer files (uploaded to Supabase after `npm run desktop:build`). */
 const DESKTOP_DOWNLOADS = {
-  version: "0.1.14",
+  version: "0.1.16",
   windows: {
     msi: {
       label: "Windows installer (MSI)",
-      href: "/downloads/Hormachuelos_0.1.14_x64_en-US.msi",
-      file: "Hormachuelos_0.1.14_x64_en-US.msi",
+      href: "/downloads/Hormachuelos_0.1.16_x64_en-US.msi",
+      file: "Hormachuelos_0.1.16_x64_en-US.msi",
     },
     setup: {
       label: "Windows setup (EXE)",
-      href: "/downloads/Hormachuelos_0.1.14_x64-setup.exe",
-      file: "Hormachuelos_0.1.14_x64-setup.exe",
+      href: "/downloads/Hormachuelos_0.1.16_x64-setup.exe",
+      file: "Hormachuelos_0.1.16_x64-setup.exe",
     },
   },
 };
@@ -1485,7 +1485,7 @@ function renderAdmin() {
             <div class="field"><label>Upstream model ID</label><input id="model-upstream" class="field" required maxlength="200" placeholder="grok-4.5" /></div>
             <div class="field"><label>HTTPS base URL</label><input id="model-base" class="field" required type="url" maxlength="400" placeholder="https://provider.example/v1" /></div>
             <div class="field"><label>Server API key</label><input id="model-key" class="field" type="password" autocomplete="new-password" placeholder="Paste once — it will not be shown again" /><p class="muted small" style="margin:6px 0 0">Required for a route to become available. Leave blank only when you are creating the route first and will add its key afterward.</p></div>
-            <p class="muted small" style="margin:0 0 12px">Example: select <code>OpenAI · Grok</code>, use model alias and upstream ID <code>grok-4.5</code>, and set the base URL to <code>https://api.x.ai/v1</code>.</p>
+            <p class="muted small" style="margin:0 0 12px">Example: select <code>xAI</code>, use model alias <code>gpt-5.6-sol</code> with upstream ID <code>grok-4.5</code>, and set the base URL to <code>https://api.x.ai/v1</code>.</p>
             <label class="admin-active" style="margin:8px 0 14px;display:inline-flex"><input type="checkbox" id="model-active" checked /> Active</label>
             <div class="field-error" id="model-error" hidden></div>
             <button class="btn btn-primary" type="submit">Add model alias</button>

@@ -34,10 +34,10 @@ export type ProviderDef = {
 
 export const PROVIDERS: ProviderDef[] = [
   {
-    // Grok 4.5 is available through xAI's OpenAI-compatible API. Keeping the
-    // route explicit means a user's xAI key never gets sent to Cursor.
+    // BYOK xAI remains available for existing installs, but is hidden from the
+    // provider picker. Public OpenAI branding routes through the Cursor alias.
     id: "xai",
-    label: "OpenAI · Grok",
+    label: "xAI",
     logoKey: "grok",
     logoSrc: "./logos/grok.png",
     defaultModel: "grok-4.5",
@@ -46,12 +46,13 @@ export const PROVIDERS: ProviderDef[] = [
     keyRequired: true,
     // Stable built-in alias. The desktop sends the real model id below.
     models: ["grok-4.5"],
+    hidden: true,
   },
   {
-    // Composer remains a Cursor-only model. It uses the Cursor SDK and a
-    // Cursor `crsr_…` credential, never an xAI/Grok API key.
+    // Public OpenAI alias over the Cursor SDK. Sol/Luna are display names for
+    // the pinned Cursor model ids; credentials remain Cursor `crsr_…` keys.
     id: "cursor",
-    label: "Cursor",
+    label: "OpenAI",
     logoKey: "openai",
     logoSrc: "./logos/openai.svg",
     defaultModel: "grok-4.5",
@@ -158,6 +159,7 @@ export const PROVIDERS: ProviderDef[] = [
       "nemotron-3-ultra-free",
       "big-pickle",
     ],
+    hidden: true,
   },
 ];
 
@@ -233,7 +235,8 @@ function providerFromHostedCatalog(entry: HostedProviderCatalogEntry): ProviderD
   return {
     ...builtin,
     label,
-    hidden: false,
+    // Keep intentionally hidden built-ins out of the picker (xAI, OpenCode).
+    hidden: Boolean(builtin.hidden),
     hostedManaged: true,
     defaultModel: approvedModels[0] || builtin.defaultModel,
     defaultBaseUrl: HOSTED_PROXY_BASE_URL,
@@ -304,8 +307,8 @@ const MODEL_DISPLAY_NAMES: Record<string, string> = {
   "hormachuelos-v2": "Hormachuelos v2",
   "deepseek-v4-flash": "DeepSeek V4 Flash",
   "deepseek-v4-pro": "DeepSeek V4 Pro",
-  "grok-4.5": "GPT 5.6 Sol · Grok 4.5",
-  "composer-2.5": "GPT 5.6 Luna · Composer 2.5",
+  "grok-4.5": "GPT 5.6 Sol",
+  "composer-2.5": "GPT 5.6 Luna",
   "gpt-5.6-sol": "GPT 5.6 Sol",
   "gpt-5.6-terra": "GPT 5.6 Terra",
   "gpt-5.6-luna": "GPT 5.6 Luna",
@@ -509,11 +512,11 @@ export function getProviderMeta(id: string) {
 
 /** Default settings matching the Rust Default impl. */
 export function defaultSettings(): Settings {
-  const xai = PROVIDERS.find((p) => p.id === "xai") || PROVIDERS[0];
+  const openai = PROVIDERS.find((p) => p.id === "cursor") || PROVIDERS[0];
   return {
-    provider: xai.id,
-    model: xai.defaultModel,
-    base_url: xai.defaultBaseUrl || null,
+    provider: openai.id,
+    model: openai.defaultModel,
+    base_url: openai.defaultBaseUrl || null,
     // Kept in the wire format for settings written by earlier releases.
     // The agent loop is now intentionally unbounded.
     max_iterations: 0,
@@ -573,10 +576,10 @@ export function normalizeSettings(s: Settings): Settings {
   }
   const meta = getProviderMeta(s.provider);
   if (!meta) {
-    const xai = PROVIDERS.find((p) => p.id === "xai") || PROVIDERS[0];
-    s.provider = xai.id;
-    s.model = xai.defaultModel;
-    s.base_url = xai.defaultBaseUrl || null;
+    const openai = PROVIDERS.find((p) => p.id === "cursor") || PROVIDERS[0];
+    s.provider = openai.id;
+    s.model = openai.defaultModel;
+    s.base_url = openai.defaultBaseUrl || null;
     return s;
   }
   if (!s.model.trim()) {

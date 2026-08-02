@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.14";
-const BUILTIN_MSI_SHA256 = "b8849dfa0082073acd5e60422016a518a77327d932b86a302ed76ed4829cd323";
-const BUILTIN_EXE_SHA256 = "d546fb01194e0a7cef61da299e0a7381af9a84e06341b0ade19e9cd18c4ca40f";
-const BUILTIN_RELEASE_NOTES = "Secure admin management for hosted provider API keys, custom provider aliases, and model aliases; refreshed desktop model catalogs after account linking; stronger project, preview, session, and updater workflows.";
+const BUILTIN_RELEASE_VERSION = "0.1.16";
+const BUILTIN_MSI_SHA256 = "6698e467a84bbdca2e0919a132e717bc133bc8cef87f4fa19121d8079644db0f";
+const BUILTIN_EXE_SHA256 = "a859587a0a4f9a4cf17b6f9992ba3cefe4cdcab80e6dbfcfa74842b50133344b";
+const BUILTIN_RELEASE_NOTES = "• OpenAI provider alias with GPT 5.6 Sol and GPT 5.6 Luna\n• Hide OpenAI · Grok (xAI) and OpenCode from the provider picker\n• Preview opens blank by default instead of auto-loading a project game/HTML";
 
 /**
  * A deployment-bundled release keeps the download/update path available even

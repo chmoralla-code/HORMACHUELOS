@@ -110,11 +110,10 @@ fn should_migrate_cursor_grok_to_xai(
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            // Grok 4.5 is the default OpenAI-compatible coding model. Cursor
-            // remains available as a separate, explicitly selected SDK route.
-            provider: "xai".into(),
+            // Public OpenAI alias over the Cursor SDK (GPT 5.6 Sol by default).
+            provider: "cursor".into(),
             model: "grok-4.5".into(),
-            base_url: Some(XAI_API_BASE_URL.into()),
+            base_url: Some("https://api.cursor.com/v1".into()),
             max_iterations: 0,
             command_timeout_secs: 120,
             auto_approve: false,

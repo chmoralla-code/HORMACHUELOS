@@ -147,8 +147,9 @@ export function hostedProviderDisplayName(providerId) {
   const provider = String(providerId || "").trim().toLowerCase();
   const known = {
     [HORMACHUELOS_FREE_PROVIDER]: "HORMACHUELOS FREE",
-    [XAI_PROVIDER]: "OpenAI · Grok",
+    [XAI_PROVIDER]: "xAI",
     openai: "OpenAI",
+    cursor: "OpenAI",
     deepseek: "DeepSeek",
     openrouter: "OpenRouter",
     glm: "OpenCode",
