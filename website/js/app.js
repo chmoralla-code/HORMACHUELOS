@@ -535,11 +535,11 @@ function renderHome() {
   return page(`
     <section class="hero container">
       <div class="eyebrow ix-reveal" data-delay="0"><span class="dot"></span> Built for PH · GCash ready</div>
-      <h1 class="ix-headline" aria-label="GPT 5.6, Opus 5, Opus 4.8 and more. Pinoy-made AI for builders without bank accounts.">
-        GPT 5.6, Opus 5, Opus 4.8 &amp; more — Pinoy-made AI for builders without bank accounts.
+      <h1 class="ix-headline" aria-label="OpenAI, Claude, DeepSeek, Hormachuelos, Ollama, OpenRouter. All models in one place.">
+        OpenAi, Claude, Deepseek, Hormachuelos, Ollama, Openrouter. All models in one place.
       </h1>
       <p class="lead ix-reveal" data-delay="1" data-ix-hover-words>
-        Hormachuelos is a monochrome AI coding agent with PHP pricing. No foreign card. No USD surprise. Code on your machine — bayad sa GCash.
+        PinoyMade ARTIFICIAL INTELLIGENCE (GUI) software and a website that is easy to use and built for vibe coders that don't have bank accounts.
       </p>
       <div class="hero-cta ix-reveal" data-delay="2">
         <a class="btn btn-primary btn-lg" href="#/pricing">View pricing</a>
