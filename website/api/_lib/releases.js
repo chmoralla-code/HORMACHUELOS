@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.24";
-const BUILTIN_MSI_SHA256 = "b2a5b397a476e9c8fb757de3cd77e9623b46d3462dba9d3a9d9eb06b44b74392";
-const BUILTIN_EXE_SHA256 = "70d698c50f0130e12f11d2d6894c75c2aa6a04a9e409a52c91d511ff7f192119";
-const BUILTIN_RELEASE_NOTES = "• OpenAI no longer requires a local Cursor API key when a Hormachuelos plan is active (uses hosted Hormachuelos v3)\n• Added Hormachuelos v3 (DeepSeek V4 Flash) on the Hormachuelos provider";
+const BUILTIN_RELEASE_VERSION = "0.1.25";
+const BUILTIN_MSI_SHA256 = "c6da5ed48716fe09234373cf31c82e1b8f9ad7754db589f66217d8a3be57a7a2";
+const BUILTIN_EXE_SHA256 = "e104dec1d9b0811c5a47fa458fe9a51784f9c82c1bb3a8c3f94c5645e80c9b8a";
+const BUILTIN_RELEASE_NOTES = "Fix plan label so Starter accounts no longer show as Pro. Prefer website account plan when syncing.";
 
 /**
  * A deployment-bundled release keeps the download/update path available even
