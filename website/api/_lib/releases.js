@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.18";
-const BUILTIN_MSI_SHA256 = "5735ee4f98f57563306ab930741c83a672520e5a3fd7f99fb55976388e6688bc";
-const BUILTIN_EXE_SHA256 = "c7d85ccce7651ef70fecbed68b569735ba579ee03f42660e9cbac8be8f570411";
-const BUILTIN_RELEASE_NOTES = "• Pay-as-you-go plans no longer show or enforce calendar expiry\n• Usage sidebar shows remaining wallet % only\n• Paid licenses stay active until usage is exhausted or Mag-load tops up";
+const BUILTIN_RELEASE_VERSION = "0.1.19";
+const BUILTIN_MSI_SHA256 = "59063215951f818263db59a2c3782fe1b38aa22c0fda1c27e2e2035a9b1246b7";
+const BUILTIN_EXE_SHA256 = "d7f5a14ff7fadc049c28886aadef2eb19725c257d3a4f55eea88159ea1672ff5";
+const BUILTIN_RELEASE_NOTES = "• OpenRouter defaults to Free Models Router (openrouter/free)\n• Free-tier picker keeps openrouter/free alongside :free models";
 
 /**
  * A deployment-bundled release keeps the download/update path available even
