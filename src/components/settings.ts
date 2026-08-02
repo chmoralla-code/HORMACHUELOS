@@ -86,7 +86,7 @@ export const PROVIDERS: ProviderDef[] = [
     keyRequired: false,
     // The signed-in desktop refreshes this catalog from the hosted service.
     // These are safe offline fallbacks, not credentials.
-    models: ["hormachuelos-v1", "hormachuelos-v2"],
+    models: ["hormachuelos-v1", "hormachuelos-v2", "hormachuelos-v3"],
   },
   {
     id: "ollama",
@@ -299,6 +299,7 @@ export function visibleProviders(): ProviderDef[] {
 const MODEL_DISPLAY_NAMES: Record<string, string> = {
   "hormachuelos-v1": "Hormachuelos v1",
   "hormachuelos-v2": "Hormachuelos v2",
+  "hormachuelos-v3": "Hormachuelos v3",
   "deepseek-v4-flash": "DeepSeek V4 Flash",
   "deepseek-v4-pro": "DeepSeek V4 Pro",
   "grok-4.5": "GPT 5.6 Sol",
@@ -1096,7 +1097,9 @@ export class SettingsModal {
           ? "No local xAI key — a signed-in paid plan can use hosted Grok"
           : activeProvider.id === "openrouter"
             ? "No local key needed — Free Models Router uses your Hormachuelos plan"
-            : "No key set — paste a provider key above";
+            : activeProvider.id === "cursor"
+              ? "No local Cursor key needed — an active Hormachuelos plan uses hosted models"
+              : "No key set — paste a provider key above";
       saveBtn.addEventListener("click", async () => {
         const v = keyInput.value.trim();
         if (!v) return;
@@ -1153,7 +1156,9 @@ export class SettingsModal {
         keyRow.appendChild(el("div", { class: "set-hint" }, [
           activeProvider.id === "openrouter"
             ? `Optional BYOK at ${activeProvider.keyUrl}. With a Hormachuelos plan, Free Models Router works without a local key.`
-            : `Get a key at ${activeProvider.keyUrl}`,
+            : activeProvider.id === "cursor"
+              ? `Optional Cursor key at ${activeProvider.keyUrl}. With a Hormachuelos plan, OpenAI works without a local key (uses Hormachuelos v3).`
+              : `Get a key at ${activeProvider.keyUrl}`,
         ]));
       }
     } else {

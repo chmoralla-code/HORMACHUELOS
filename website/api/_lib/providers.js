@@ -78,6 +78,13 @@ const HORMACHUELOS_LEGACY_ROUTES = [
       },
     ],
   },
+  {
+    // DeepSeek V4 Flash on the official DeepSeek API (Hormachuelos v3).
+    alias: "hormachuelos-v3",
+    upstreamModel: "deepseek-v4-flash",
+    baseUrl: "https://api.deepseek.com",
+    env: ["HORMACHUELOS_V3_API_KEY", "DEEPSEEK_API_KEY"],
+  },
 ];
 
 function firstEnvironmentValue(names) {

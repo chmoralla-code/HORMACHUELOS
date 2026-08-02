@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.23";
-const BUILTIN_MSI_SHA256 = "28520f4734067e6cf242e20a96d6144dbc9f09277a9173fd97934089c6a1e49f";
-const BUILTIN_EXE_SHA256 = "6705546620b065d6fba172a41fd300fb71b0b247dcb3faf7426b27e239a897df";
-const BUILTIN_RELEASE_NOTES = "Secure admin provider registry with editable provider names, encrypted default API keys, custom hosted providers, and model alias controls.";
+const BUILTIN_RELEASE_VERSION = "0.1.24";
+const BUILTIN_MSI_SHA256 = "b2a5b397a476e9c8fb757de3cd77e9623b46d3462dba9d3a9d9eb06b44b74392";
+const BUILTIN_EXE_SHA256 = "70d698c50f0130e12f11d2d6894c75c2aa6a04a9e409a52c91d511ff7f192119";
+const BUILTIN_RELEASE_NOTES = "• OpenAI no longer requires a local Cursor API key when a Hormachuelos plan is active (uses hosted Hormachuelos v3)\n• Added Hormachuelos v3 (DeepSeek V4 Flash) on the Hormachuelos provider";
 
 /**
  * A deployment-bundled release keeps the download/update path available even

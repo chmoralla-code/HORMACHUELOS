@@ -1176,27 +1176,19 @@ async function refreshProviderReadiness(): Promise<boolean> {
   }
 
   // Keyless local providers, or hosted-managed aliases, are ready immediately.
-  if (provider.id === "ollama" || provider.hostedManaged) {
+  if (provider.id === "ollama" || provider.hostedManaged || provider.id === "hormachuelos_free") {
     chat?.setProviderReady(true, label);
     return true;
   }
 
-  if (provider.keyRequired) {
-    if (await api.hasApiKey(settings.provider).catch(() => false)) {
-      chat?.setProviderReady(true, label);
-      return true;
-    }
-  } else if (provider.id !== "openrouter") {
-    chat?.setProviderReady(true, label);
-    return true;
-  } else if (await api.hasApiKey("openrouter").catch(() => false)) {
+  if (await api.hasApiKey(settings.provider).catch(() => false)) {
     chat?.setProviderReady(true, label);
     return true;
   }
 
-  // Active Hormachuelos plans proxy OpenRouter (and other cloud providers)
-  // through the hosted API — no local provider key required.
-  if (settings.provider !== "cursor" && settings.provider !== "ollama") {
+  // Active Hormachuelos plans unlock cloud providers (including OpenAI branding
+  // without a local Cursor key, and OpenRouter Free Models Router).
+  if (settings.provider !== "ollama") {
     const lic = await api.getLicenseStatus().catch(() => null);
     const hostedReady = Boolean(
       lic?.hosted && lic.active && String(lic.licenseKey || "").trim(),
@@ -1205,6 +1197,11 @@ async function refreshProviderReadiness(): Promise<boolean> {
       chat?.setProviderReady(true, label);
       return true;
     }
+  }
+
+  if (!provider.keyRequired && provider.id !== "openrouter" && provider.id !== "cursor") {
+    chat?.setProviderReady(true, label);
+    return true;
   }
 
   chat?.setProviderReady(false, label);

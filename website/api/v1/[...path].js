@@ -173,7 +173,9 @@ async function handleCatalog(req, res) {
 
   const catalog = await publicHostedProviderCatalog();
   const available = catalog.filter((provider) =>
-    provider.id === HORMACHUELOS_FREE_PROVIDER ? Boolean(accountEntitlement) : paidAccess,
+    provider.id === HORMACHUELOS_FREE_PROVIDER
+      ? Boolean(accountEntitlement) || paidAccess
+      : paidAccess,
   );
   return json(res, 200, { object: "list", data: available }, req);
 }
@@ -182,8 +184,15 @@ async function handleModels(req, res) {
   if (req.method !== "GET") return json(res, 405, { error: "Method not allowed" }, req);
   const provider = String(req.headers["x-horma-provider"] || "openrouter").toLowerCase();
   if (provider === HORMACHUELOS_FREE_PROVIDER) {
-    const freeLicense = await authenticatedFreeEntitlement(req);
-    if (!freeLicense) return json(res, 401, { error: "Sign in to use HORMACHUELOS FREE." }, req);
+    let freeLicense = await authenticatedFreeEntitlement(req);
+    if (!freeLicense) {
+      const licenseKey = bearerToken(req);
+      const paid = licenseKey ? await getLicenseByKey(licenseKey) : null;
+      if (!isUsablePaidLicense(paid)) {
+        return json(res, 401, { error: "Sign in to use HORMACHUELOS FREE." }, req);
+      }
+      freeLicense = paid;
+    }
     const upstream = await resolveUpstream(provider);
     if (upstream.error) {
       return json(res, 503, { error: "HORMACHUELOS FREE is temporarily unavailable." }, req);
@@ -248,7 +257,16 @@ async function handleChat(req, res) {
   let license;
   if (isHormachuelosFree) {
     license = await authenticatedFreeEntitlement(req);
-    if (!license) return json(res, 401, { error: "Sign in to use HORMACHUELOS FREE." }, req);
+    if (!license) {
+      // Paid plan holders can use Hormachuelos aliases with their HORMA license key
+      // (same Bearer used for other hosted providers) without a separate free meter.
+      const licenseKey = bearerToken(req);
+      const paid = licenseKey ? await getLicenseByKey(licenseKey) : null;
+      if (!isUsablePaidLicense(paid)) {
+        return json(res, 401, { error: "Sign in to use HORMACHUELOS FREE." }, req);
+      }
+      license = paid;
+    }
   } else {
     const licenseKey = bearerToken(req);
     if (!licenseKey) {

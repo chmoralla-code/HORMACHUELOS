@@ -415,49 +415,64 @@ pub async fn run_loop(
     // Cursor model ids are served only by the local Cursor SDK. They are not
     // OpenAI-compatible ids and must never be forwarded to the hosted chat
     // proxy, even when the signed-in account has hosted credits.
+    //
+    // Exception: when no Cursor `crsr_…` key is saved but a Hormachuelos plan
+    // is active, fall through to hosted OpenAI-compatible models so friends
+    // installing the app are not blocked on a personal Cursor key.
+    let mut settings = settings;
     if uses_cursor_sdk(&settings.provider) {
-        let key = crate::config::load_cursor_sdk_api_key(&settings.provider).map_err(|e| {
-            anyhow::anyhow!(
-                "No API key for '{}': {}. Save a Cursor API key (crsr_…) in Settings.",
-                settings.provider,
-                e
-            )
-        })?;
-        let effort = cursor_effort_for_request(
-            &settings.model_effort,
-            &prompt,
-            settings.computer_use_enabled,
-        );
-        let model_display = display_model_name(&settings.model);
-        let provider_display = display_provider_name(&settings.provider);
-        let permission_mode = normalized_permission_mode(&settings.permission_mode);
-        let wrapped_prompt = format!(
-            "{identity}\n\n{policy}{computer_policy}\n\n\
+        match crate::config::load_cursor_sdk_api_key(&settings.provider) {
+            Ok(key) => {
+                let effort = cursor_effort_for_request(
+                    &settings.model_effort,
+                    &prompt,
+                    settings.computer_use_enabled,
+                );
+                let model_display = display_model_name(&settings.model);
+                let provider_display = display_provider_name(&settings.provider);
+                let permission_mode = normalized_permission_mode(&settings.permission_mode);
+                let wrapped_prompt = format!(
+                    "{identity}\n\n{policy}{computer_policy}\n\n\
 IN-APP PREVIEW:\n\
 - Hormachuelos has a built-in Preview panel on the right. Do NOT open websites/games in Chrome or the system browser.\n\
 - After creating or updating HTML (index.html, game pages, etc.), call open_path on that HTML file so the in-app Preview opens.\n\
 - Never use start/cmd/explorer/open_url just to show local HTML — use open_path instead.\n\n\
 Current user request:\n{prompt}",
-            identity = identity_instructions(&model_display, &provider_display),
-            policy = cursor_permission_instructions(&permission_mode),
-            computer_policy = cursor_computer_use_instructions(settings.computer_use_enabled),
-            prompt = prompt,
-        );
-        return crate::cursor_bridge::run_cursor_turn(
-            app,
-            &project_root,
-            &wrapped_prompt,
-            &key,
-            &settings.model,
-            &effort,
-            &permission_mode,
-            settings.computer_use_enabled,
-            &session_id,
-            run,
-            &history,
-            cursor_resume_agent_id,
-        )
-        .await;
+                    identity = identity_instructions(&model_display, &provider_display),
+                    policy = cursor_permission_instructions(&permission_mode),
+                    computer_policy = cursor_computer_use_instructions(settings.computer_use_enabled),
+                    prompt = prompt,
+                );
+                return crate::cursor_bridge::run_cursor_turn(
+                    app,
+                    &project_root,
+                    &wrapped_prompt,
+                    &key,
+                    &settings.model,
+                    &effort,
+                    &permission_mode,
+                    settings.computer_use_enabled,
+                    &session_id,
+                    run,
+                    &history,
+                    cursor_resume_agent_id,
+                )
+                .await;
+            }
+            Err(cursor_err) => {
+                let license = crate::license::LicenseStatus::load().unwrap_or_default();
+                if !crate::license::should_use_hosted(&license) {
+                    return Err(anyhow::anyhow!(
+                        "No API key for OpenAI: {}. Save a Cursor API key (crsr_…) in Settings, or activate a Hormachuelos plan so OpenAI can use hosted models.",
+                        cursor_err
+                    ));
+                }
+                // Hosted fallback: OpenAI branding without a local Cursor key.
+                settings.provider = "hormachuelos_free".into();
+                settings.model = "hormachuelos-v3".into();
+                settings.base_url = Some(crate::license::hosted_chat_base_url());
+            }
+        }
     }
     let mut routed_auth_tool = integration_chat::auth_tool_for_prompt(&prompt);
     let auth_request_routed = routed_auth_tool.is_some();
@@ -465,12 +480,19 @@ Current user request:\n{prompt}",
     let use_hosted = crate::license::should_use_hosted_for_provider(&license, &settings.provider);
     let uses_hormachuelos_free = settings.provider.eq_ignore_ascii_case("hormachuelos_free");
     let (key, base_url_override) = if uses_hormachuelos_free {
-        let session = crate::config::load_website_session().map_err(|_| {
-            anyhow::anyhow!(
-                "Sign in to Hormachuelos before using HORMACHUELOS FREE. Open the account menu and connect this desktop app."
+        let session = crate::config::load_website_session().unwrap_or_default();
+        if !session.trim().is_empty() {
+            (session, Some(crate::license::hosted_chat_base_url()))
+        } else if crate::license::should_use_hosted(&license) {
+            (
+                license.license_key.clone(),
+                Some(crate::license::hosted_chat_base_url()),
             )
-        })?;
-        (session, Some(crate::license::hosted_chat_base_url()))
+        } else {
+            return Err(anyhow::anyhow!(
+                "Sign in to Hormachuelos before using HORMACHUELOS FREE. Open the account menu and connect this desktop app."
+            ));
+        }
     } else if use_hosted {
         (
             license.license_key.clone(),
