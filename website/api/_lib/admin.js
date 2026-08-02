@@ -72,11 +72,12 @@ export function adminFromRequest(req) {
 }
 
 function mapUser(account, license) {
-  // License row is the desktop source of truth (same as /api/auth/me).
-  // Prefer it over a stale accounts.plan so admin + app stay in sync.
-  const plan =
-    (license?.plan && normalizePlan(license.plan)) ||
-    (account.plan ? normalizePlan(account.plan) : null);
+  // Website accounts.plan is what admin sets — keep that as the plan label.
+  const plan = account.plan
+    ? normalizePlan(account.plan)
+    : license?.plan
+      ? normalizePlan(license.plan)
+      : null;
   return {
     id: account.id,
     email: account.email,
@@ -107,22 +108,17 @@ export async function listAdminUsers() {
   }
   const users = [];
   for (const a of accounts) {
-    const lic =
+    let lic =
       (a.license_key && byKey.get(a.license_key)) ||
       byEmail.get(String(a.email).toLowerCase()) ||
       null;
-    // Heal stale accounts.plan so website dashboard + admin stay aligned with
-    // the license row the desktop already uses.
-    if (lic?.plan && a.plan && normalizePlan(a.plan) !== normalizePlan(lic.plan)) {
+    // Keep license.plan aligned with the website account plan (admin source of truth).
+    if (lic?.id && a.plan && normalizePlan(a.plan) !== normalizePlan(lic.plan || "")) {
       try {
-        const healed = await updateAccount(a.id, {
-          plan: normalizePlan(lic.plan),
-          updated_at: new Date().toISOString(),
-        });
-        users.push(mapUser(healed || { ...a, plan: lic.plan }, lic));
-        continue;
+        lic = await updateLicense(lic.id, { plan: normalizePlan(a.plan) });
+        if (lic?.key) byKey.set(lic.key, lic);
       } catch {
-        /* still return license-backed plan below */
+        /* display account plan below even if heal fails */
       }
     }
     users.push(mapUser(a, lic));

@@ -18,6 +18,7 @@ import {
   listOrdersForAccount,
   updateAccount,
   updateDeviceLink,
+  updateLicense,
 } from "./supabase.js";
 import { normalizePlan, planBudget } from "./plans.js";
 import { sendVerificationEmail } from "./resend.js";
@@ -82,15 +83,26 @@ export async function publicAccountWithUsage(row) {
       planRemainingPct: 100,
     };
   }
+  const accountPlan = base.plan ? normalizePlan(base.plan) : "";
+  const licensePlan = license.plan ? normalizePlan(license.plan) : "";
+  // Website account plan wins — admin edits accounts.plan; keep license in sync.
+  if (accountPlan && licensePlan && accountPlan !== licensePlan && license.id) {
+    try {
+      license = await updateLicense(license.id, { plan: accountPlan });
+    } catch {
+      /* still return account plan below */
+    }
+  }
+  const plan = accountPlan || licensePlan || "free";
   const active = Boolean(license.active);
-  const budget = Number(license.token_budget) || planBudget(license.plan);
+  const budget = Number(license.token_budget) || planBudget(plan);
   const used = Number(license.tokens_used) || 0;
   const remaining = Math.max(0, budget - used);
   const planRemainingPct =
     budget > 0 ? Math.max(0, Math.min(100, Math.round((remaining / budget) * 100))) : 0;
   return {
     ...base,
-    plan: normalizePlan(license.plan || base.plan || "free"),
+    plan,
     licenseKey: license.key || base.licenseKey,
     tokenBudget: budget,
     tokensUsed: used,

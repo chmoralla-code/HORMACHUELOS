@@ -1553,7 +1553,7 @@ async function init() {
       try {
         const lic = await api.applyLicenseKey(user.licenseKey);
         applyLicenseSnapshot(lic);
-        // Website /api/auth/me (license row) is the plan source of truth.
+        // Website account plan is the source of truth (admin-edited).
         // Re-apply after local activate so a stale license.json cannot win.
         const mergedPlan = String(user.plan || lic.plan || "free");
         applyWebsitePlanUsage({
