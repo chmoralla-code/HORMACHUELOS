@@ -196,8 +196,13 @@ export async function accountFromRequest(req) {
   const raw = (() => {
     const h = req.headers.authorization || req.headers.Authorization || "";
     const m = String(h).match(/^Bearer\s+(.+)$/i);
-    if (m) return m[1].trim();
-    return String(req.headers["x-horma-session"] || "").trim();
+    const bearer = m ? m[1].trim() : "";
+    // A desktop catalog request may carry a paid license in Authorization and
+    // a website session in X-Horma-Session. Keep the normal bearer session
+    // precedence, but use the explicit session header when Authorization is a
+    // HORMA license rather than accidentally treating it as an account token.
+    if (bearer && !bearer.toUpperCase().startsWith("HORMA-")) return bearer;
+    return String(req.headers["x-horma-session"] || "").trim() || bearer;
   })();
   if (!raw || raw.toUpperCase().startsWith("HORMA-")) return null;
   const session = await getSessionByTokenHash(hashToken(raw));

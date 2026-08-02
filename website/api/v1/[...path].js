@@ -11,6 +11,7 @@ import {
 } from "../_lib/supabase.js";
 import { billableTokens } from "../_lib/plans.js";
 import { resolveHostedModel, resolveUpstream } from "../_lib/providers.js";
+import { publicHostedProviderCatalog } from "../_lib/hosted-model-configs.js";
 import { accountFromRequest } from "../_lib/auth.js";
 
 export const config = {
@@ -151,6 +152,32 @@ async function authenticatedFreeEntitlement(req) {
   return freeEntitlementFor(account);
 }
 
+/**
+ * Return the provider/model aliases that this desktop installation may use.
+ * This is intentionally a catalog only: it never contains upstream model ids,
+ * base URLs, or any server credential. HORMACHUELOS FREE aliases use the
+ * signed-in account path; all other managed provider aliases require a paid
+ * Hormachuelos license just like the existing hosted proxy.
+ */
+async function handleCatalog(req, res) {
+  if (req.method !== "GET") return json(res, 405, { error: "Method not allowed" }, req);
+
+  const accountEntitlement = await authenticatedFreeEntitlement(req);
+  const licenseKey = bearerToken(req);
+  const bearerLicense = licenseKey ? await getLicenseByKey(licenseKey) : null;
+  const paidAccess = isUsablePaidLicense(accountEntitlement) || isUsablePaidLicense(bearerLicense);
+
+  if (!accountEntitlement && !paidAccess) {
+    return json(res, 401, { error: "Sign in or activate a hosted plan to load model aliases." }, req);
+  }
+
+  const catalog = await publicHostedProviderCatalog();
+  const available = catalog.filter((provider) =>
+    provider.id === HORMACHUELOS_FREE_PROVIDER ? Boolean(accountEntitlement) : paidAccess,
+  );
+  return json(res, 200, { object: "list", data: available }, req);
+}
+
 async function handleModels(req, res) {
   if (req.method !== "GET") return json(res, 405, { error: "Method not allowed" }, req);
   const provider = String(req.headers["x-horma-provider"] || "openrouter").toLowerCase();
@@ -176,6 +203,19 @@ async function handleModels(req, res) {
 
   const upstream = await resolveUpstream(provider);
   if (upstream.error) return json(res, 400, { error: upstream.error }, req);
+
+  // Managed providers deliberately expose only their configured aliases.
+  // Do not proxy the upstream /models catalogue: it could reveal models that
+  // the desktop is intentionally not permitted to invoke using a shared key.
+  const configuredModelIds = upstream.modelRoutes?.length
+    ? upstream.modelRoutes.map((route) => route.alias)
+    : Object.keys(upstream.modelAliases || {});
+  if (configuredModelIds.length) {
+    return json(res, 200, {
+      object: "list",
+      data: configuredModelIds.map((id) => ({ id, object: "model", owned_by: provider })),
+    }, req);
+  }
 
   const upstreamRes = await fetch(`${upstream.base}/models`, {
     headers: {
@@ -422,6 +462,7 @@ export default async function handler(req, res) {
   try {
     const parts = pathParts(req);
     const joined = parts.join("/");
+    if (joined === "catalog" || parts[0] === "catalog") return handleCatalog(req, res);
     if (joined === "models" || parts[0] === "models") return handleModels(req, res);
     if (joined === "chat/completions" || (parts[0] === "chat" && parts[1] === "completions")) {
       return handleChat(req, res);

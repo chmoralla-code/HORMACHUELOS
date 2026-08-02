@@ -26,6 +26,29 @@ struct ConnectionTestResult {
     message: String,
 }
 
+/// Public-safe hosted catalog returned by the website. It deliberately has no
+/// upstream base URL or credential fields, so it can be sent to the desktop
+/// picker without exposing administrator-managed provider secrets.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HostedProviderCatalogModel {
+    id: String,
+    label: String,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HostedProviderCatalogEntry {
+    id: String,
+    label: String,
+    models: Vec<HostedProviderCatalogModel>,
+}
+
+#[derive(serde::Deserialize)]
+struct HostedProviderCatalogResponse {
+    data: Vec<HostedProviderCatalogEntry>,
+}
+
 #[tauri::command]
 fn get_project_root(state: tauri::State<'_, state::AppState>) -> Option<String> {
     state.project_root.lock().unwrap().clone()
@@ -106,12 +129,7 @@ async fn set_api_key(provider: String, key: String) -> Result<(), String> {
 #[tauri::command]
 async fn has_api_key(provider: String) -> Result<bool, String> {
     config::validate_provider_id(&provider).map_err(|e| e.to_string())?;
-    if provider.eq_ignore_ascii_case("cursor") {
-        return Ok(config::load_cursor_sdk_api_key("cursor")
-            .map(|key| !key.trim().is_empty())
-            .unwrap_or(false));
-    }
-    Ok(config::has_api_key(&provider))
+    Ok(config::has_provider_api_key(&provider))
 }
 
 #[tauri::command]
@@ -259,7 +277,18 @@ async fn test_provider_connection(
         };
     }
     let is_hormachuelos_free = provider.eq_ignore_ascii_case("hormachuelos_free");
-    let effective_base_url = if is_hormachuelos_free {
+    let license = license::LicenseStatus::load().unwrap_or_default();
+    let use_hosted =
+        !is_hormachuelos_free && license::should_use_hosted_for_provider(&license, &provider);
+    if config::is_custom_hosted_provider_alias(&provider) && !use_hosted {
+        return Ok(ConnectionTestResult {
+            ok: false,
+            latency_ms: started.elapsed().as_millis(),
+            error_code: Some("hosted_plan_required".into()),
+            message: "This provider alias is managed by the Hormachuelos server. Sign in with an active hosted plan to use it.".into(),
+        });
+    }
+    let effective_base_url = if is_hormachuelos_free || use_hosted {
         Some(license::hosted_chat_base_url())
     } else {
         base_url.clone()
@@ -276,8 +305,10 @@ async fn test_provider_connection(
                 });
             }
         }
+    } else if use_hosted {
+        license.license_key.clone()
     } else if llm::provider_needs_key(&provider) {
-        match config::load_api_key(&provider) {
+        match config::load_provider_api_key(&provider) {
             Ok(key) => key,
             Err(_) => {
                 return Ok(ConnectionTestResult {
@@ -379,6 +410,12 @@ async fn list_provider_models(
     }
     let license = license::LicenseStatus::load().unwrap_or_default();
     let use_hosted = license::should_use_hosted_for_provider(&license, &provider);
+    if config::is_custom_hosted_provider_alias(&provider) && !use_hosted {
+        return Err(
+            "This provider alias is managed by the Hormachuelos server. Sign in with an active hosted plan to load its models."
+                .into(),
+        );
+    }
     let (key, base_url) = if use_hosted {
         (license.license_key.clone(), license::hosted_chat_base_url())
     } else {
@@ -389,7 +426,7 @@ async fn list_provider_models(
         let base_url =
             llm::validate_provider_base_url(&provider, base_url).map_err(|e| e.to_string())?;
         let key = if llm::provider_needs_key(&provider) {
-            config::load_api_key(&provider).map_err(|_| {
+            config::load_provider_api_key(&provider).map_err(|_| {
                 "Save an API key for this provider before refreshing models.".to_string()
             })?
         } else {
@@ -403,6 +440,96 @@ async fn list_provider_models(
         _ => llm::openai::fetch_model_ids(&provider, &key, &base_url).await,
     }
     .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn list_hosted_provider_catalog() -> Result<Vec<HostedProviderCatalogEntry>, String> {
+    let session = config::load_website_session().unwrap_or_default();
+    let license = license::LicenseStatus::load().unwrap_or_default();
+    let license_key = if license.hosted && license.active && !license.license_key.trim().is_empty()
+    {
+        license.license_key
+    } else {
+        String::new()
+    };
+    if session.trim().is_empty() && license_key.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|_| "Could not initialize the hosted catalog connection.".to_string())?;
+    let mut request = client
+        .get(format!("{}/catalog", license::hosted_chat_base_url()))
+        .header("Accept", "application/json");
+    if !license_key.trim().is_empty() {
+        request = request.bearer_auth(&license_key);
+    }
+    if !session.trim().is_empty() {
+        request = request.header("X-Horma-Session", session.trim());
+    }
+    let response = request.send().await.map_err(|_| {
+        "Could not load the hosted provider catalog. Check your connection and sign-in status."
+            .to_string()
+    })?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Hosted provider catalog is unavailable (HTTP {}). Refresh your account connection and try again.",
+            response.status().as_u16()
+        ));
+    }
+    let payload = response
+        .json::<HostedProviderCatalogResponse>()
+        .await
+        .map_err(|_| "Hosted provider catalog returned an invalid response.".to_string())?;
+
+    let mut provider_ids = std::collections::HashSet::new();
+    let mut catalog = Vec::new();
+    for entry in payload.data {
+        let id = entry.id.trim().to_ascii_lowercase();
+        if config::validate_provider_id(&id).is_err()
+            || id.eq_ignore_ascii_case("cursor")
+            || id.eq_ignore_ascii_case("ollama")
+            || !provider_ids.insert(id.clone())
+        {
+            continue;
+        }
+        let label = entry.label.trim();
+        if label.is_empty() || label.len() > 120 || label.chars().any(char::is_control) {
+            continue;
+        }
+        let mut model_ids = std::collections::HashSet::new();
+        let mut models = Vec::new();
+        for model in entry.models {
+            let model_id = model.id.trim();
+            let model_label = model.label.trim();
+            if model_id.is_empty()
+                || model_id.len() > 200
+                || model_id.chars().any(char::is_control)
+                || model_label.is_empty()
+                || model_label.len() > 120
+                || model_label.chars().any(char::is_control)
+                || !model_ids.insert(model_id.to_string())
+            {
+                continue;
+            }
+            models.push(HostedProviderCatalogModel {
+                id: model_id.to_string(),
+                label: model_label.to_string(),
+            });
+        }
+        if !models.is_empty() {
+            catalog.push(HostedProviderCatalogEntry {
+                id,
+                label: label.to_string(),
+                models,
+            });
+        }
+    }
+    catalog.sort_by(|left, right| left.label.cmp(&right.label));
+    Ok(catalog)
 }
 
 #[tauri::command]
@@ -844,6 +971,7 @@ pub fn run() {
             app_updater::save_update_backup,
             app_updater::load_update_backup,
             app_updater::clear_update_backup,
+            app_updater::app_install_kind,
             app_updater::install_app_update,
             set_project_root,
             list_recent_projects,
@@ -862,6 +990,7 @@ pub fn run() {
             respond_to_confirm,
             test_provider_connection,
             list_provider_models,
+            list_hosted_provider_catalog,
             create_project_dir,
             list_project_templates,
             list_project_files,

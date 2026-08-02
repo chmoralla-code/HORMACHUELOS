@@ -135,10 +135,11 @@ async function installInsideApp(
   options: UpdateInstallOptions,
   onProgress: (message: string, event?: AppUpdateProgress) => void,
 ): Promise<void> {
-  const installer = [
-    { url: release.exeUrl, sha256: release.exeSha256 },
-    { url: release.msiUrl, sha256: release.msiSha256 },
-  ].find((candidate) => candidate.url && candidate.sha256);
+  const installKind = await api.appInstallKind().catch(() => "unknown" as const);
+  const msi = { url: release.msiUrl, sha256: release.msiSha256 };
+  const nsis = { url: release.exeUrl, sha256: release.exeSha256 };
+  const installer = (installKind === "nsis" ? [nsis, msi] : [msi, nsis])
+    .find((candidate) => candidate.url && candidate.sha256);
   if (!installer?.url || !installer.sha256) {
     if (release.exeUrl || release.msiUrl) {
       throw new Error("This release is missing its installer checksum.");

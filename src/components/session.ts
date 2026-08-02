@@ -11,6 +11,28 @@ export type SessionMessage =
   | { type: "end"; reason: string; at?: number; workMs?: number }
   | { type: "cancelled"; at?: number; workMs?: number };
 
+/**
+ * The preview workspace belongs to a conversation, rather than to the whole
+ * project.  Only file-relative paths are kept here; live iframe DOM is always
+ * recreated when that session becomes visible again.
+ */
+export interface SessionPreviewTab {
+  entryPath: string;
+  title: string;
+  history: string[];
+  historyIndex: number;
+}
+
+export interface SessionPreviewState {
+  version: 1;
+  projectRoot: string;
+  tabs: SessionPreviewTab[];
+  activeTabIndex: number;
+  designMode: boolean;
+  androidMode: boolean;
+  softwareMode: boolean;
+}
+
 export interface Session {
   id: string;
   title: string;
@@ -19,6 +41,8 @@ export interface Session {
   createdAt: number;
   /** Cumulative tokens eaten in this session (all runs). */
   sessionTokens?: number;
+  /** Per-session build preview, restored only while this session is selected. */
+  preview?: SessionPreviewState;
 }
 
 /**
@@ -47,6 +71,10 @@ const PREFIXED_CREDENTIAL =
   /\b(?:gh[pousr]_[a-z0-9_]{16,}|github_pat_[a-z0-9_]{16,}|glpat-[a-z0-9_-]{16,}|vercel_[a-z0-9_-]{16,}|sk-[a-z0-9_-]{16,}|eyJ[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}\.[a-z0-9_-]{8,})\b/gi;
 const CONTEXTUAL_CREDENTIAL =
   /\b((?:access[\s_-]*)?token|api[\s_-]*key|client[\s_-]*secret|secret|password|bearer)\b(\s*(?:is|=|:)?\s*["']?)[a-z0-9._~+/=-]{12,}["']?/gi;
+const SESSION_PREVIEW_MAX_TABS = 12;
+const SESSION_PREVIEW_MAX_HISTORY = 32;
+const SESSION_PREVIEW_PATH_MAX = 768;
+const SESSION_PREVIEW_ROOT_MAX = 2_048;
 
 /** Keep credentials out of local chat history and provider prompts. */
 export function redactChatCredentials(text: string): string {
@@ -135,6 +163,84 @@ function redactSessionMessage(message: SessionMessage): SessionMessage {
   }
 }
 
+/** Keep persisted preview entries relative to their project and bounded in size. */
+function sanitizePreviewPath(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const raw = value.trim().replace(/\\/g, "/");
+  if (
+    !raw ||
+    raw.length > SESSION_PREVIEW_PATH_MAX ||
+    raw.startsWith("/") ||
+    /^[a-z]:/i.test(raw) ||
+    raw.includes("\0")
+  ) {
+    return null;
+  }
+  const parts: string[] = [];
+  for (const part of raw.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      if (!parts.length) return null;
+      parts.pop();
+      continue;
+    }
+    if (part.includes(":")) return null;
+    parts.push(part);
+  }
+  return parts.length ? parts.join("/") : null;
+}
+
+function sanitizeSessionPreview(value: unknown): SessionPreviewState | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  const projectRoot = typeof raw.projectRoot === "string" ? raw.projectRoot.trim() : "";
+  if (!projectRoot || projectRoot.length > SESSION_PREVIEW_ROOT_MAX || projectRoot.includes("\0")) {
+    return undefined;
+  }
+
+  const tabs: SessionPreviewTab[] = [];
+  const seenEntries = new Set<string>();
+  const rawTabs = Array.isArray(raw.tabs) ? raw.tabs.slice(0, SESSION_PREVIEW_MAX_TABS) : [];
+  for (const candidate of rawTabs) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+    const tab = candidate as Record<string, unknown>;
+    const rawHistory = Array.isArray(tab.history)
+      ? tab.history.slice(0, SESSION_PREVIEW_MAX_HISTORY)
+      : [];
+    const history = rawHistory
+      .map(sanitizePreviewPath)
+      .filter((path): path is string => Boolean(path));
+    const entryPath = sanitizePreviewPath(tab.entryPath) || history[0];
+    if (!entryPath || seenEntries.has(entryPath)) continue;
+    seenEntries.add(entryPath);
+    if (!history.length) history.push(entryPath);
+    const requestedIndex = Math.floor(Number(tab.historyIndex) || 0);
+    const historyIndex = Math.max(0, Math.min(history.length - 1, requestedIndex));
+    const title = typeof tab.title === "string" && tab.title.trim()
+      ? redactChatCredentials(tab.title.trim()).slice(0, 160)
+      : entryPath.split("/").pop() || entryPath;
+    tabs.push({
+      entryPath: history[historyIndex] || entryPath,
+      title,
+      history,
+      historyIndex,
+    });
+  }
+
+  const requestedActive = Math.floor(Number(raw.activeTabIndex) || 0);
+  return {
+    version: 1,
+    projectRoot,
+    tabs,
+    activeTabIndex: tabs.length
+      ? Math.max(0, Math.min(tabs.length - 1, requestedActive))
+      : 0,
+    designMode: raw.designMode === true,
+    androidMode: raw.androidMode === true,
+    softwareMode: raw.softwareMode === true,
+  };
+}
+
 type ProjectUsageMap = Record<string, number>;
 
 function loadProjectUsageMap(): ProjectUsageMap {
@@ -218,10 +324,12 @@ export function loadSessions(projectId: string): Session[] {
 }
 
 function safeSessionForStorage(session: Session): Session {
+  const preview = sanitizeSessionPreview(session.preview);
   return {
     ...session,
     title: redactChatCredentials(session.title),
     messages: session.messages.map(redactSessionMessage),
+    preview,
   };
 }
 

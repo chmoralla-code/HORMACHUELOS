@@ -1,6 +1,6 @@
 import { api, type Settings } from "../ipc";
-import { PROVIDERS, effortOptionsForProvider, displayModelName, getProviderMeta, getSettingsSafe, hasStaticModelCatalog, isCursorSdkProvider, isUltraEffort, mergeProviderModelCatalog, normalizeEffortForProvider, uiProviderId, visibleProviders } from "./settings";
-import { clear, el } from "./util";
+import { PROVIDERS, effortOptionsForProvider, displayModelName, getProviderMeta, getSettingsSafe, hasStaticModelCatalog, isUltraEffort, mergeProviderModelCatalog, normalizeEffortForProvider, refreshHostedProviderCatalog, uiProviderId, usesReasoningEffort, visibleProviders } from "./settings";
+import { clear, el, escapeHtml } from "./util";
 import { icon, icons } from "./icons";
 
 export type PermissionMode = "plan" | "auto" | "research" | "full";
@@ -92,6 +92,8 @@ export class ModelBar {
   private providerSelectionGeneration = 0;
   /** Full model catalogs per provider (auto-fetched when key/connection is ready). */
   private discoveredModels: Record<string, string[]> = {};
+  /** Provider ids supplied by the most recent hosted alias catalog. */
+  private hostedCatalogProviderIds = new Set<string>();
 
   constructor(onChange: () => void) {
     this.onChange = onChange;
@@ -105,6 +107,7 @@ export class ModelBar {
   }
 
   async load() {
+    await this.refreshHostedModelCatalog();
     this.settings = await getSettingsSafe();
     this.normalizeMode();
     this.syncCapabilityDefault();
@@ -115,6 +118,7 @@ export class ModelBar {
 
   async refresh() {
     try {
+      await this.refreshHostedModelCatalog();
       this.settings = await getSettingsSafe();
       this.normalizeMode();
       this.syncCapabilityDefault();
@@ -123,6 +127,28 @@ export class ModelBar {
       void this.ensureModelsLoaded(this.settings.provider);
     } catch (e) {
       console.error("modelbar refresh failed", e);
+    }
+  }
+
+  /** Load administrator-managed aliases before rendering the provider picker. */
+  private async refreshHostedModelCatalog() {
+    try {
+      const catalog = await refreshHostedProviderCatalog();
+      const nextProviderIds = new Set(catalog.map((provider) => provider.id));
+      for (const providerId of this.hostedCatalogProviderIds) {
+        if (!nextProviderIds.has(providerId)) delete this.discoveredModels[providerId];
+      }
+      for (const provider of catalog) {
+        const models = mergeProviderModelCatalog(
+          provider.id,
+          provider.models.map((model) => model.id),
+        );
+        if (models.length) this.discoveredModels[provider.id] = models;
+      }
+      this.hostedCatalogProviderIds = nextProviderIds;
+    } catch {
+      // Keep the last known picker and built-in providers when the account is
+      // offline, unsigned, or the hosted catalog is temporarily unavailable.
     }
   }
 
@@ -317,8 +343,8 @@ export class ModelBar {
     }, 0);
   }
 
-  private shortModel(id: string): string {
-    return displayModelName(id);
+  private shortModel(id: string, providerId?: string): string {
+    return displayModelName(id, providerId);
   }
 
   private chipBtn(
@@ -338,7 +364,7 @@ export class ModelBar {
       "aria-label": aria,
       "aria-haspopup": "listbox",
       "aria-expanded": "false",
-      html: `${logo}<span class="chip-label">${label}</span><span class="chip-caret" aria-hidden="true">▾</span>`,
+      html: `${logo}<span class="chip-label">${escapeHtml(label)}</span><span class="chip-caret" aria-hidden="true">▾</span>`,
     }) as HTMLButtonElement;
   }
 
@@ -417,9 +443,9 @@ export class ModelBar {
     // Model chip (shows provider logo + model display name)
     const modelWrap = el("div", { class: "chip-wrap" });
     const modelBtn = this.chipBtn(
-      this.shortModel(this.settings.model),
-      `${provider.label} · ${this.shortModel(this.settings.model)}`,
-      `Model: ${this.shortModel(this.settings.model)}`,
+      this.shortModel(this.settings.model, uiProvId),
+      `${provider.label} · ${this.shortModel(this.settings.model, uiProvId)}`,
+      `Model: ${this.shortModel(this.settings.model, uiProvId)}`,
       "chip-model",
       provider.logoSrc,
     );
@@ -443,7 +469,7 @@ export class ModelBar {
           "aria-selected": String(p.id === provider.id),
           html:
             `<img class="chip-menu-logo" src="${p.logoSrc}" alt="" width="16" height="16" draggable="false" />` +
-            `<span>${p.label}</span>`,
+            `<span>${escapeHtml(p.label)}</span>`,
         }) as HTMLButtonElement;
         item.addEventListener("click", (e) => {
           e.preventDefault();
@@ -468,8 +494,8 @@ export class ModelBar {
           type: "button",
           role: "option",
           "aria-selected": String(m === this.settings.model),
-          title: displayModelName(m),
-        }, [this.shortModel(m)]) as HTMLButtonElement;
+          title: displayModelName(m, uiProvId),
+        }, [this.shortModel(m, uiProvId)]) as HTMLButtonElement;
         item.addEventListener("click", async (e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -493,8 +519,9 @@ export class ModelBar {
     modelWrap.appendChild(modelBtn);
     this.providerRail.appendChild(modelWrap);
 
-    // OpenAI (Cursor SDK) shows Effort instead of capability chips.
-    if (isCursorSdkProvider(provider.id)) {
+    // Cursor and native Grok expose an effort control. For Grok this maps to
+    // xAI's supported reasoning_effort values (low / medium / high).
+    if (usesReasoningEffort(provider.id)) {
       const effortOpts = effortOptionsForProvider(provider.id);
       const effort = normalizeEffortForProvider(provider.id, this.settings.model_effort);
       const effortMeta = effortOpts.find((e) => e.id === effort) || effortOpts[effortOpts.length - 1];

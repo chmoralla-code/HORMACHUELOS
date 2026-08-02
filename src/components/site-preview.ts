@@ -1,5 +1,6 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { api, type ProjectNode } from "../ipc";
+import type { SessionPreviewState, SessionPreviewTab } from "./session";
 import { clear, el } from "./util";
 import { icon } from "./icons";
 
@@ -274,6 +275,103 @@ export function isPreviewableBuild(files: string[], tech: string[] = []): boolea
   );
 }
 
+function samePreviewProject(a: string, b: string): boolean {
+  return decodePath(a).replace(/\/+$/, "").toLowerCase() ===
+    decodePath(b).replace(/\/+$/, "").toLowerCase();
+}
+
+function cleanPreviewHistory(projectRoot: string, values: unknown): string[] {
+  if (!Array.isArray(values)) return [];
+  const seen = new Set<string>();
+  const history: string[] = [];
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const path = normalizePreviewEntry(projectRoot, value);
+    if (!path || seen.has(path)) continue;
+    seen.add(path);
+    history.push(path);
+  }
+  return history;
+}
+
+function cleanPreviewTabs(
+  projectRoot: string,
+  tabs: SessionPreviewTab[] | undefined,
+): SessionPreviewTab[] {
+  if (!tabs?.length) return [];
+  const seenEntries = new Set<string>();
+  const clean: SessionPreviewTab[] = [];
+  for (const raw of tabs) {
+    const history = cleanPreviewHistory(projectRoot, raw.history);
+    const requestedIndex = Math.floor(Number(raw.historyIndex) || 0);
+    const historyIndex = history.length
+      ? Math.max(0, Math.min(history.length - 1, requestedIndex))
+      : 0;
+    const entryPath =
+      normalizePreviewEntry(projectRoot, raw.entryPath) || history[historyIndex] || null;
+    if (!entryPath || seenEntries.has(entryPath)) continue;
+    if (!history.length) history.push(entryPath);
+    if (!history.includes(entryPath)) history.push(entryPath);
+    const normalizedIndex = Math.max(0, Math.min(history.length - 1, historyIndex));
+    seenEntries.add(entryPath);
+    clean.push({
+      entryPath: history[normalizedIndex] || entryPath,
+      title: raw.title?.trim().slice(0, 160) || tabTitleFromPath(entryPath),
+      history,
+      historyIndex: normalizedIndex,
+    });
+  }
+  return clean;
+}
+
+/**
+ * Create a serializable preview state without mounting a preview iframe. This
+ * is used for builds completed by a background session, so they never replace
+ * the preview currently visible in another session.
+ */
+export function mergePreviewSessionState(
+  current: SessionPreviewState | undefined,
+  opts: PreviewOpenOptions,
+): SessionPreviewState {
+  const projectRoot = opts.projectRoot;
+  const useCurrent = !!current && samePreviewProject(current.projectRoot, projectRoot);
+  const tabs = cleanPreviewTabs(projectRoot, useCurrent ? current.tabs : undefined);
+  let activeTabIndex = useCurrent
+    ? Math.max(0, Math.min(tabs.length - 1, Number(current!.activeTabIndex) || 0))
+    : 0;
+  const files = (opts.files || [])
+    .map((file) => normalizePreviewEntry(projectRoot, file))
+    .filter((file): file is string => Boolean(file));
+  let entry = normalizePreviewEntry(projectRoot, opts.entryPath);
+  if (!entry) entry = pickPreviewEntry(files);
+  if (!entry) {
+    entry = files.find((file) => /\.(apk|aab|ipa|exe|msi|dmg|wasm)$/i.test(file)) || null;
+  }
+  if (entry) {
+    const existingIndex = tabs.findIndex((tab) => tab.entryPath === entry);
+    if (existingIndex >= 0) {
+      activeTabIndex = existingIndex;
+    } else {
+      tabs.push({
+        entryPath: entry,
+        title: opts.title || tabTitleFromPath(entry),
+        history: [entry],
+        historyIndex: 0,
+      });
+      activeTabIndex = tabs.length - 1;
+    }
+  }
+  return {
+    version: 1,
+    projectRoot,
+    tabs,
+    activeTabIndex: tabs.length ? activeTabIndex : 0,
+    designMode: useCurrent && current!.designMode === true,
+    androidMode: useCurrent && current!.androidMode === true,
+    softwareMode: useCurrent && current!.softwareMode === true,
+  };
+}
+
 type PreviewTab = {
   id: string;
   entryPath: string;
@@ -342,9 +440,14 @@ export class SitePreview {
   private activeTabId = "";
   private selected: SelectedEl | null = null;
   private onDescribe: ((prompt: string) => void) | null = null;
+  private onStateChange: ((state: SessionPreviewState | null) => void) | null = null;
   private closing = false;
   private closeTimer: number | null = null;
   private closeGeneration = 0;
+  /** Cancels stale asynchronous restores when a different session is selected. */
+  private viewGeneration = 0;
+  /** Suppress persistence callbacks while rebuilding an already-saved preview. */
+  private stateRestoreDepth = 0;
   private resizing = false;
   private resizeCleanup: (() => void) | null = null;
 
@@ -658,8 +761,150 @@ export class SitePreview {
     this.onDescribe = cb;
   }
 
+  /** Called after a user changes the visible preview for the selected session. */
+  setStateChangeHandler(cb: (state: SessionPreviewState | null) => void) {
+    this.onStateChange = cb;
+  }
+
   get isOpen(): boolean {
     return !this.root.hidden && this.root.classList.contains("is-open");
+  }
+
+  get isRestoring(): boolean {
+    return this.stateRestoreDepth > 0;
+  }
+
+  /** Capture safe, serializable state for the currently displayed session. */
+  captureSessionState(): SessionPreviewState | null {
+    if (!this.isOpen || !this.projectRoot) return null;
+    const activeTabIndex = Math.max(0, this.tabs.findIndex((tab) => tab.id === this.activeTabId));
+    return {
+      version: 1,
+      projectRoot: this.projectRoot,
+      tabs: this.tabs.map((tab) => ({
+        entryPath: tab.entryPath,
+        title: tab.title,
+        history: [...tab.history],
+        historyIndex: tab.historyIndex,
+      })),
+      activeTabIndex,
+      designMode: this.designMode,
+      androidMode: this.androidMode,
+      softwareMode: this.softwareMode,
+    };
+  }
+
+  /** Hide and destroy the rendered preview without changing the session's saved state. */
+  clearSessionView() {
+    this.viewGeneration += 1;
+    this.stateRestoreDepth += 1;
+    try {
+      this.teardownSessionView();
+    } finally {
+      this.stateRestoreDepth -= 1;
+    }
+  }
+
+  /**
+   * Rebuild just one session's preview. Iframes are intentionally recreated so
+   * a game's live DOM, timers, and user input never leak into another session.
+   */
+  async restoreSessionState(state: SessionPreviewState | null | undefined): Promise<void> {
+    const generation = ++this.viewGeneration;
+    this.stateRestoreDepth += 1;
+    try {
+      this.teardownSessionView();
+      const projectRoot = state?.projectRoot?.trim();
+      if (!projectRoot) return;
+
+      const tabs = cleanPreviewTabs(projectRoot, state?.tabs);
+      this.projectRoot = projectRoot;
+      this.designMode = state?.designMode === true;
+      this.androidMode = state?.androidMode === true;
+      this.softwareMode = !this.androidMode && state?.softwareMode === true;
+      this.syncModeUi();
+      this.showShell("Preview");
+
+      for (const savedTab of tabs) {
+        if (generation !== this.viewGeneration) return;
+        const id = `preview-tab-${++previewTabSeq}`;
+        const frame = this.createFrame(id);
+        const tab: PreviewTab = {
+          id,
+          entryPath: savedTab.entryPath,
+          title: savedTab.title || tabTitleFromPath(savedTab.entryPath),
+          history: [...savedTab.history],
+          historyIndex: savedTab.historyIndex,
+          frame,
+          tabEl: null as unknown as HTMLButtonElement,
+        };
+        tab.tabEl = this.renderTabButton(tab);
+        this.tabs.push(tab);
+        await this.reloadTab(tab);
+      }
+      if (generation !== this.viewGeneration) return;
+
+      if (!this.tabs.length) {
+        this.statusEl.textContent = "No HTML preview found in this build.";
+        return;
+      }
+      const activeIndex = Math.max(
+        0,
+        Math.min(this.tabs.length - 1, Math.floor(Number(state?.activeTabIndex) || 0)),
+      );
+      this.activeTabId = this.tabs[activeIndex].id;
+      this.selected = null;
+      this.syncModeUi();
+      this.syncTabStrip();
+      if (this.designMode) this.injectDesignMode();
+      this.statusEl.textContent = /\.(apk|aab|ipa|exe|msi|dmg|wasm)$/i.test(this.entryPath)
+        ? "Build artifact ready · open from Files to install/run"
+        : this.readyStatus();
+    } finally {
+      this.stateRestoreDepth -= 1;
+    }
+  }
+
+  private emitStateChange(force = false) {
+    if (this.stateRestoreDepth > 0 && !force) return;
+    this.onStateChange?.(this.captureSessionState());
+  }
+
+  private syncModeUi() {
+    this.root.classList.toggle("is-android", this.androidMode);
+    this.root.classList.toggle("is-software", this.softwareMode);
+    this.designBtn.classList.toggle("is-active", this.designMode);
+    this.designBtn.setAttribute("aria-pressed", String(this.designMode));
+    this.androidBtn.classList.toggle("is-active", this.androidMode);
+    this.androidBtn.setAttribute("aria-pressed", String(this.androidMode));
+    this.softwareBtn.classList.toggle("is-active", this.softwareMode);
+    this.softwareBtn.setAttribute("aria-pressed", String(this.softwareMode));
+    this.editBar.hidden = !this.designMode;
+    for (const tab of this.tabs) {
+      tab.frame.title = this.androidMode
+        ? "Website preview in Android device mode"
+        : this.softwareMode
+          ? "Website preview in desktop software window"
+          : "Website preview";
+    }
+  }
+
+  private teardownSessionView() {
+    this.cancelCloseTeardown();
+    this.clearDesignMode();
+    this.designMode = false;
+    this.androidMode = false;
+    this.softwareMode = false;
+    this.syncModeUi();
+    this.root.classList.remove("is-open", "is-closing");
+    this.root.hidden = true;
+    document.body.classList.remove("preview-open");
+    document.querySelector(".workbench")?.classList.remove("preview-open");
+    this.destroyAllTabs();
+    this.projectRoot = "";
+    this.selected = null;
+    this.editInput.value = "";
+    this.statusEl.textContent = "";
   }
 
   private get activeTab(): PreviewTab | null {
@@ -684,11 +929,13 @@ export class SitePreview {
   }
 
   async open(opts: PreviewOpenOptions) {
+    const generation = ++this.viewGeneration;
     this.cancelCloseTeardown();
     this.projectRoot = opts.projectRoot;
     let files = opts.files?.length
       ? opts.files
       : await this.listProjectFilesSafe();
+    if (generation !== this.viewGeneration) return;
     files = files
       .map((file) => normalizePreviewEntry(this.projectRoot, file))
       .filter((file): file is string => Boolean(file));
@@ -713,9 +960,11 @@ export class SitePreview {
           frame.removeAttribute("srcdoc");
           frame.src = "about:blank";
         }
+        this.emitStateChange();
         return;
       }
       this.statusEl.textContent = "No HTML preview found in this build.";
+      this.emitStateChange();
       return;
     }
     this.statusEl.textContent = opts.title || "Loading preview…";
@@ -723,6 +972,7 @@ export class SitePreview {
     if (existing) {
       this.activateTab(existing.id);
       await this.reload();
+      if (generation === this.viewGeneration) this.emitStateChange();
       return;
     }
     await this.openPathInTab(entry!, {
@@ -730,10 +980,12 @@ export class SitePreview {
       title: opts.title || tabTitleFromPath(entry!),
       pushHistory: true,
     });
+    if (generation === this.viewGeneration) this.emitStateChange();
   }
 
   async openTab(entryPath: string, opts?: { title?: string }) {
     if (!this.projectRoot) return;
+    const generation = ++this.viewGeneration;
     const entry = normalizePreviewEntry(this.projectRoot, entryPath);
     if (!entry) return;
     this.showShell(opts?.title || "Preview");
@@ -741,6 +993,7 @@ export class SitePreview {
     if (existing) {
       this.activateTab(existing.id);
       await this.reload();
+      if (generation === this.viewGeneration) this.emitStateChange();
       return;
     }
     await this.openPathInTab(entry, {
@@ -748,18 +1001,23 @@ export class SitePreview {
       title: opts?.title || tabTitleFromPath(entry),
       pushHistory: true,
     });
+    if (generation === this.viewGeneration) this.emitStateChange();
   }
 
   close() {
     if (this.root.hidden || this.closing) return;
+    this.viewGeneration += 1;
     this.closing = true;
     const generation = ++this.closeGeneration;
-    this.setDesignMode(false);
+    this.clearDesignMode();
+    this.designMode = false;
+    this.syncModeUi();
     this.root.classList.remove("is-open");
     this.root.classList.add("is-closing");
     document.body.classList.remove("preview-open");
     const workbench = document.querySelector(".workbench");
     workbench?.classList.remove("preview-open");
+    this.emitStateChange(true);
     this.closeTimer = window.setTimeout(() => {
       this.closeTimer = null;
       if (!this.closing || generation !== this.closeGeneration) return;
@@ -878,6 +1136,7 @@ export class SitePreview {
     this.selected = null;
     this.syncTabStrip();
     if (this.entryPath) this.statusEl.textContent = this.readyStatus();
+    this.emitStateChange();
   }
 
   private closeTab(tabId: string) {
@@ -897,6 +1156,7 @@ export class SitePreview {
       if (this.designMode) this.injectDesignMode();
     } else {
       this.syncTabStrip();
+      this.emitStateChange();
     }
   }
 
@@ -949,9 +1209,11 @@ export class SitePreview {
 
   private async openNewTab() {
     if (!this.projectRoot) return;
+    const generation = ++this.viewGeneration;
     const files = (await this.listProjectFilesSafe())
       .map((file) => normalizePreviewEntry(this.projectRoot, file))
       .filter((file): file is string => Boolean(file));
+    if (generation !== this.viewGeneration) return;
     const openPaths = new Set(this.tabs.map((tab) => tab.entryPath));
     const candidates = files.filter((f) => HTML_EXT.test(f) && !openPaths.has(f));
     const entry = pickPreviewEntry(candidates) || pickPreviewEntry(files) || this.entryPath;
@@ -961,6 +1223,7 @@ export class SitePreview {
       title: tabTitleFromPath(entry),
       pushHistory: true,
     });
+    if (generation === this.viewGeneration) this.emitStateChange();
   }
 
   private async navigateOmnibox() {
@@ -984,9 +1247,11 @@ export class SitePreview {
       this.pushHistory(tab, next);
       this.syncTabStrip();
       await this.reloadTab(tab);
+      this.emitStateChange();
       return;
     }
     await this.openPathInTab(next, { activate: true, pushHistory: true });
+    this.emitStateChange();
   }
 
   private async goBack() {
@@ -999,6 +1264,7 @@ export class SitePreview {
     tab.tabEl.title = tab.entryPath;
     this.syncTabStrip();
     await this.reloadTab(tab);
+    this.emitStateChange();
   }
 
   private async goForward() {
@@ -1011,6 +1277,7 @@ export class SitePreview {
     tab.tabEl.title = tab.entryPath;
     this.syncTabStrip();
     await this.reloadTab(tab);
+    this.emitStateChange();
   }
 
   async reload() {
@@ -1047,44 +1314,36 @@ export class SitePreview {
   }
 
   setDesignMode(on: boolean) {
+    if (this.designMode === on) return;
+    if (!on) this.clearDesignMode();
     this.designMode = on;
-    this.designBtn.classList.toggle("is-active", on);
-    this.designBtn.setAttribute("aria-pressed", String(on));
-    this.editBar.hidden = !on;
+    this.syncModeUi();
     if (on) {
       this.injectDesignMode();
       this.statusEl.textContent = this.readyStatus();
     } else {
-      this.clearDesignMode();
       this.selected = null;
       this.statusEl.textContent = this.readyStatus();
     }
+    this.emitStateChange();
   }
 
   setAndroidMode(on: boolean) {
-    if (on && this.softwareMode) this.setSoftwareMode(false);
+    if (this.androidMode === on && (!on || !this.softwareMode)) return;
     this.androidMode = on;
-    this.root.classList.toggle("is-android", on);
-    this.androidBtn.classList.toggle("is-active", on);
-    this.androidBtn.setAttribute("aria-pressed", String(on));
-    const frame = this.frame;
-    if (frame) {
-      frame.title = on ? "Website preview in Android device mode" : "Website preview";
-    }
+    if (on) this.softwareMode = false;
+    this.syncModeUi();
     if (this.entryPath) this.statusEl.textContent = this.readyStatus();
+    this.emitStateChange();
   }
 
   setSoftwareMode(on: boolean) {
-    if (on && this.androidMode) this.setAndroidMode(false);
+    if (this.softwareMode === on && (!on || !this.androidMode)) return;
     this.softwareMode = on;
-    this.root.classList.toggle("is-software", on);
-    this.softwareBtn.classList.toggle("is-active", on);
-    this.softwareBtn.setAttribute("aria-pressed", String(on));
-    const frame = this.frame;
-    if (frame) {
-      frame.title = on ? "Website preview in desktop software window" : "Website preview";
-    }
+    if (on) this.androidMode = false;
+    this.syncModeUi();
     if (this.entryPath) this.statusEl.textContent = this.readyStatus();
+    this.emitStateChange();
   }
 
   private readyStatus(assetMode = false): string {

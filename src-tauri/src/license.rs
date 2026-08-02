@@ -765,6 +765,7 @@ mod tests {
         let status = hosted_pro_status();
         assert!(should_use_hosted_for_provider(&status, "deepseek"));
         assert!(should_use_hosted_for_provider(&status, "openrouter"));
+        assert!(should_use_hosted_for_provider(&status, "xai"));
     }
 
     #[test]

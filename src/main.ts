@@ -6,7 +6,12 @@ import { SettingsModal, displayModelName, displayProviderName, getProviderMeta, 
 import { ModelBar } from "./components/modelbar";
 import { ProjectPicker } from "./components/picker";
 import { WorkspacePanel } from "./components/workspace";
-import { SitePreview, isPreviewableBuild, pickPreviewEntry } from "./components/site-preview";
+import {
+  SitePreview,
+  isPreviewableBuild,
+  mergePreviewSessionState,
+  pickPreviewEntry,
+} from "./components/site-preview";
 import { mountComputerUseHud, updateComputerUseHud, clearComputerUseHud } from "./components/computer-use-hud";
 import {
   ensureWebsiteSession,
@@ -205,21 +210,50 @@ async function openBuildPreview(opts: {
 }) {
   if (!currentProjectPath || !sitePreview) return;
   if (opts.projectRoot && !sameProjectPath(opts.projectRoot, currentProjectPath)) return;
+  const projectRoot = opts.projectRoot || currentProjectPath;
+  const targetSessionId = opts.sessionId || activeSessionId || undefined;
   if (opts.sessionId) {
-    if (previewOpenedForRun.has(opts.sessionId) && sitePreview.isOpen) return;
+    const storedPreview = sessionForId(opts.sessionId)?.preview;
+    const targetAlreadyOpen = opts.sessionId === activeSessionId
+      ? sitePreview.isOpen
+      : Boolean(storedPreview && sameProjectPath(storedPreview.projectRoot, projectRoot));
+    if (previewOpenedForRun.has(opts.sessionId) && targetAlreadyOpen) return;
     previewOpenedForRun.add(opts.sessionId);
   }
   let files = opts.files || [];
   if (!files.length) {
-    files = [...(await snapshotProjectFiles(opts.projectRoot || currentProjectPath))];
+    files = [...(await snapshotProjectFiles(projectRoot))];
   }
   const entry = opts.entryPath || pickPreviewEntry(files);
+  const targetSession = sessionForId(targetSessionId);
+
+  // A background agent may finish a game or app while the user is reading a
+  // different session. Store its preview on its own session, but never mount it
+  // into the currently visible session's iframe panel.
+  if (targetSessionId && targetSessionId !== activeSessionId) {
+    if (!targetSession || !sameProjectPath(targetSession.projectId, projectRoot)) return;
+    targetSession.preview = mergePreviewSessionState(targetSession.preview, {
+      projectRoot,
+      files,
+      entryPath: entry,
+      title: opts.title || "Build preview",
+    });
+    sessionRegistry.set(targetSession.id, targetSession);
+    saveSession(targetSession);
+    return;
+  }
+
   await sitePreview.open({
-    projectRoot: currentProjectPath,
+    projectRoot,
     files,
     entryPath: entry,
     title: opts.title || "Build preview",
   });
+  // The component emits this itself for regular UI actions. Persist here too so
+  // an automatically opened preview is durable even if a view transition raced it.
+  if (targetSessionId && targetSessionId === activeSessionId) {
+    persistPreviewForSession(targetSessionId, sitePreview.captureSessionState());
+  }
 }
 
 async function maybeOpenBuildPreview(sessionId: string | undefined, reason: string) {
@@ -230,7 +264,11 @@ async function maybeOpenBuildPreview(sessionId: string | undefined, reason: stri
     runBaselineFiles.delete(sessionId);
     return;
   }
-  if (previewOpenedForRun.has(sessionId) && sitePreview?.isOpen) {
+  const storedPreview = sessionForId(sessionId)?.preview;
+  const sessionPreviewOpen = sessionId === activeSessionId
+    ? sitePreview?.isOpen
+    : Boolean(storedPreview && sameProjectPath(storedPreview.projectRoot, runProjectPath || currentProjectPath));
+  if (previewOpenedForRun.has(sessionId) && sessionPreviewOpen) {
     runTouchedFiles.delete(sessionId);
     runBaselineFiles.delete(sessionId);
     return;
@@ -282,10 +320,69 @@ function updateGlobalRunStatus() {
   else sidebar.setStatus(`${n} runs`, true);
 }
 
+function sessionForId(id: string | null | undefined): Session | undefined {
+  if (!id) return undefined;
+  return sessionRegistry.get(id) || sessions.find((session) => session.id === id);
+}
+
+function syncVisiblePreviewIntoSession(session: Session) {
+  if (!sitePreview || sitePreview.isRestoring) return;
+  const preview = sitePreview.captureSessionState();
+  if (preview && sameProjectPath(preview.projectRoot, session.projectId)) {
+    session.preview = preview;
+  } else {
+    delete session.preview;
+  }
+}
+
+function persistPreviewForSession(
+  sessionId: string | null | undefined,
+  preview: ReturnType<SitePreview["captureSessionState"]>,
+) {
+  const session = sessionForId(sessionId);
+  if (!session) return;
+  if (preview && !sameProjectPath(preview.projectRoot, session.projectId)) return;
+  if (preview) session.preview = preview;
+  else delete session.preview;
+  sessionRegistry.set(session.id, session);
+  saveSession(session);
+}
+
+function restoreActiveSessionPreview() {
+  if (!sitePreview) return;
+  const sessionId = activeSessionId;
+  const session = sessionForId(sessionId);
+  const preview = session?.preview;
+  if (
+    !sessionId ||
+    !session ||
+    !currentProjectPath ||
+    !preview ||
+    !sameProjectPath(session.projectId, currentProjectPath) ||
+    !sameProjectPath(preview.projectRoot, currentProjectPath)
+  ) {
+    sitePreview.clearSessionView();
+    renderWorkspaceMenu();
+    return;
+  }
+  void sitePreview.restoreSessionState(preview).then(
+    () => {
+      if (activeSessionId === sessionId) renderWorkspaceMenu();
+    },
+    (error) => {
+      if (activeSessionId !== sessionId) return;
+      sitePreview.clearSessionView();
+      renderWorkspaceMenu();
+      reportError(`Could not restore this session's preview: ${String(error)}`);
+    },
+  );
+}
+
 function persistCurrentSession(deferred = false) {
   if (!activeSessionId || !currentProjectPath) return;
-  const s = sessions.find((x) => x.id === activeSessionId);
+  const s = sessionForId(activeSessionId);
   if (!s) return;
+  syncVisiblePreviewIntoSession(s);
   sessionRegistry.set(s.id, s);
   s.messages = chat.getMessages();
   if (deferred) scheduleSessionSave(s);
@@ -299,6 +396,7 @@ function prepareForAppUpdate() {
   if (activeSessionId && currentProjectPath) {
     const session = sessions.find((candidate) => candidate.id === activeSessionId);
     if (session) {
+      syncVisiblePreviewIntoSession(session);
       sessionRegistry.set(session.id, session);
       session.messages = chat.getMessages();
       saveSessionForUpdate(session);
@@ -478,9 +576,10 @@ function applyUsageToSession(
 }
 
 function persistSessionById(id: string, deferred = false) {
-  const s = sessionRegistry.get(id) || sessions.find((x) => x.id === id);
+  const s = sessionForId(id);
   if (!s) return;
   if (id === activeSessionId) {
+    syncVisiblePreviewIntoSession(s);
     s.messages = chat.getMessages();
   }
   sessionRegistry.set(s.id, s);
@@ -506,6 +605,7 @@ function createNewSession() {
   sessions.unshift(s);
   sessionRegistry.set(s.id, s);
   activeSessionId = s.id;
+  restoreActiveSessionPreview();
   chat.startSession("");
   // Clear the empty user message that startSession pushes for a blank session
   chat.messages = [];
@@ -525,6 +625,7 @@ function switchSession(id: string) {
   // Keep background runs alive — just switch the visible transcript
   persistCurrentSession();
   activeSessionId = id;
+  restoreActiveSessionPreview();
   if (s.messages.length === 0) {
     chat.messages = [];
     chat.renderEmpty();
@@ -572,6 +673,7 @@ function removeSession(id: string) {
       chat.messages = [];
       chat.renderEmpty();
       chat.setRunning(false);
+      sitePreview?.clearSessionView();
       refreshSidebar();
     }
   } else {
@@ -655,6 +757,7 @@ function doRemoveAllSessions() {
   // Keep project token usage — do not reset the meter to 100%
   sessions = [];
   activeSessionId = null;
+  sitePreview?.clearSessionView();
   chat.messages = [];
   chat.renderEmpty();
   chat.setRunning(false);
@@ -691,6 +794,7 @@ function loadProjectSessions() {
   chat.setRunning(!!activeSessionId && runningSessions.has(activeSessionId), { processQueue: false });
   // Shared budget across every session in this project
   syncUsageBar();
+  restoreActiveSessionPreview();
 }
 
 function showFatalError(msg: string) {
@@ -981,6 +1085,7 @@ async function createProject(path: string, templateId?: string) {
   activateProjectWorkspace(canonicalPath);
   sessions = [];
   activeSessionId = null;
+  sitePreview?.clearSessionView();
   chat.messages = [];
   chat.renderEmpty();
   chat.setRunning(false, { processQueue: false });
@@ -1338,6 +1443,12 @@ async function init() {
   sitePreview.setDescribeHandler((prompt) => {
     void sendPrompt(prompt);
   });
+  sitePreview.setStateChangeHandler((preview) => {
+    // The preview component only emits user-driven changes, never a restore of
+    // another session. Keep the serialized preview alongside the active chat.
+    persistPreviewForSession(activeSessionId, preview);
+    renderWorkspaceMenu();
+  });
   chat = new Chat({
     onSend: sendPrompt,
     onStop: () => {
@@ -1449,6 +1560,12 @@ async function init() {
       document.body.appendChild(gate);
     });
     await syncHostedPlan(websiteUser);
+    // A just-linked browser account may unlock administrator-managed provider
+    // aliases. Refresh the picker immediately instead of requiring a restart.
+    if (typeof modelBar !== "undefined") {
+      await modelBar.refresh().catch(() => {});
+      await refreshProviderReadiness().catch(() => false);
+    }
   }
 
   sidebar = new Sidebar({

@@ -32,6 +32,18 @@ export type ConnectionTestResult = {
   message: string;
 };
 
+/** Safe, server-issued hosted provider catalog. It never contains API keys or upstream URLs. */
+export type HostedProviderCatalogModel = {
+  id: string;
+  label: string;
+};
+
+export type HostedProviderCatalogEntry = {
+  id: string;
+  label: string;
+  models: HostedProviderCatalogModel[];
+};
+
 export type ComputerUseStatus = {
   supported: boolean;
   paused: boolean;
@@ -136,6 +148,8 @@ export const api = {
     invoke("test_provider_connection", { provider, model, baseUrl }),
   listProviderModels: (provider: string, baseUrl: string | null): Promise<string[]> =>
     invoke("list_provider_models", { provider, baseUrl }),
+  listHostedProviderCatalog: (): Promise<HostedProviderCatalogEntry[]> =>
+    invoke("list_hosted_provider_catalog"),
   createProjectDir: (path: string, templateId?: string): Promise<void> =>
     invoke("create_project_dir", { path, templateId: templateId ?? null }),
   listProjectTemplates: (): Promise<ProjectTemplate[]> => invoke("list_project_templates"),
@@ -170,6 +184,8 @@ export const api = {
   openProjectInExplorer: (relativePath: string | null = null): Promise<void> =>
     invoke("open_project_in_explorer", { relativePath }),
   appVersion: (): Promise<string> => invoke("app_version"),
+  /** Match in-app updates to the installer family already present on Windows. */
+  appInstallKind: (): Promise<"msi" | "nsis" | "unknown"> => invoke("app_install_kind"),
   /** Persist WebView state outside its cache before an installer replaces the app. */
   saveUpdateBackup: (stateJson: string): Promise<void> =>
     invoke("save_update_backup", { stateJson }),

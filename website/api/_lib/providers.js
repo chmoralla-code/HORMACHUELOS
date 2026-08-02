@@ -1,7 +1,9 @@
 /** Map Hormachuelos provider ids to OpenAI-compatible upstreams. */
 import {
+  activeAllHostedModelRoutes,
   activeHostedModelRoutes,
   HORMACHUELOS_FREE_PROVIDER,
+  XAI_PROVIDER,
 } from "./hosted-model-configs.js";
 
 const PROVIDERS = {
@@ -20,6 +22,17 @@ const PROVIDERS = {
   openai: {
     base: "https://api.openai.com/v1",
     env: ["OPENAI_API_KEY"],
+  },
+  // Grok 4.5 is available through xAI's OpenAI-compatible Chat Completions
+  // endpoint. Pin the public alias so a desktop client cannot spend the
+  // server key on arbitrary xAI models.
+  [XAI_PROVIDER]: {
+    base: "https://api.x.ai/v1",
+    env: ["XAI_API_KEY", "GROK_API_KEY"],
+    noFallback: true,
+    modelAliases: {
+      "grok-4.5": "grok-4.5",
+    },
   },
   glm: {
     base: "https://open.bigmodel.cn/api/paas/v4",
@@ -171,14 +184,28 @@ function environmentUpstream(providerId) {
   };
 }
 
+/** Build the common route shape used by every admin-managed provider alias. */
+function managedUpstream(providerId, routes) {
+  return {
+    provider: providerId,
+    requested: providerId,
+    base: "",
+    apiKey: "",
+    headers: {},
+    modelAliases: Object.fromEntries(routes.map((route) => [route.alias, route.upstreamModel])),
+    modelRoutes: routes,
+    viaOpenRouter: false,
+  };
+}
+
 /**
- * Resolve the server-side route. HORMACHUELOS FREE aliases are read from the
- * encrypted admin-managed records first, then fall back safely for old builds.
+ * Resolve the server-side route. An encrypted admin-managed route wins for
+ * every built-in provider and every custom provider alias. HORMACHUELOS FREE
+ * retains its legacy environment fallback so previously installed apps keep
+ * their V1/V2 aliases while the dashboard is being configured.
  */
 export async function resolveUpstream(providerId) {
   const id = String(providerId || "openrouter").toLowerCase();
-  if (id !== HORMACHUELOS_FREE_PROVIDER) return environmentUpstream(id);
-
   const legacy = environmentUpstream(id);
   try {
     const managedRoutes = await activeHostedModelRoutes(id);
@@ -187,7 +214,7 @@ export async function resolveUpstream(providerId) {
     // alias was added. A configured managed row wins; the legacy v1 route
     // fills only aliases that do not yet have an admin-managed key.
     const routesByAlias = new Map(managedRoutes.map((route) => [route.alias, route]));
-    if (!legacy.error) {
+    if (id === HORMACHUELOS_FREE_PROVIDER && !legacy.error) {
       const legacyRoutes = legacy.modelRoutes?.length
         ? legacy.modelRoutes
         : Object.entries(legacy.modelAliases || {}).map(([alias, upstreamModel]) => ({
@@ -224,16 +251,7 @@ export async function resolveUpstream(providerId) {
     }
     const routes = [...routesByAlias.values()];
     if (routes.length) {
-      return {
-        provider: id,
-        requested: id,
-        base: "",
-        apiKey: "",
-        headers: {},
-        modelAliases: Object.fromEntries(routes.map((route) => [route.alias, route.upstreamModel])),
-        modelRoutes: routes,
-        viaOpenRouter: false,
-      };
+      return managedUpstream(id, routes);
     }
   } catch (error) {
     // A database migration may be pending during rollout. Keep the previous
@@ -265,7 +283,7 @@ export function resolveHostedModel(upstream, requestedModel) {
   }
   const upstreamModel = upstream.modelAliases?.[requested];
   if (!upstreamModel) {
-    return { error: "This Hormachuelos model is not currently available." };
+    return { error: "This hosted model is not currently available." };
   }
   return {
     requestedModel: requested,
@@ -278,7 +296,14 @@ export function resolveHostedModel(upstream, requestedModel) {
 
 export async function hostedProvidersStatus() {
   const out = {};
-  for (const id of Object.keys(PROVIDERS)) {
+  const ids = new Set(Object.keys(PROVIDERS));
+  try {
+    for (const route of await activeAllHostedModelRoutes()) ids.add(route.providerId);
+  } catch {
+    // The normal resolver below still reports environment-backed providers
+    // when a database migration is temporarily unavailable.
+  }
+  for (const id of ids) {
     const resolved = await resolveUpstream(id);
     out[id] = { ok: !resolved.error, viaOpenRouter: Boolean(resolved.viaOpenRouter) };
   }

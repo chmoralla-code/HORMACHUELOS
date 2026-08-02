@@ -24,11 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.11";
-const BUILTIN_MSI_SHA256 = "834e2a11509eead4117247735a11fd2999bd9c622c15ecfe554a070aeed0427a";
-const BUILTIN_EXE_SHA256 = "c92177a6de6f544d55d8bc145e3cb0b36398412708f30282134e028eef34b728";
-const BUILTIN_RELEASE_NOTES =
-  "Keeps Projects, Sessions, and Usage readable in compact sidebars; moves setup controls into Workspace actions; and improves the in-app update and restart flow.";
+const BUILTIN_RELEASE_VERSION = "0.1.14";
+const BUILTIN_MSI_SHA256 = "b8849dfa0082073acd5e60422016a518a77327d932b86a302ed76ed4829cd323";
+const BUILTIN_EXE_SHA256 = "d546fb01194e0a7cef61da299e0a7381af9a84e06341b0ade19e9cd18c4ca40f";
+const BUILTIN_RELEASE_NOTES = "Secure admin management for hosted provider API keys, custom provider aliases, and model aliases; refreshed desktop model catalogs after account linking; stronger project, preview, session, and updater workflows.";
 
 /**
  * A deployment-bundled release keeps the download/update path available even

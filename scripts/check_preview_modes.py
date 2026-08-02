@@ -19,6 +19,7 @@ def main() -> None:
         body = page.locator("body")
         providers = (body.get_attribute("data-providers") or "").split(",")
         assert providers == [
+            "xai",
             "cursor",
             "hormachuelos_free",
             "ollama",
@@ -26,7 +27,7 @@ def main() -> None:
             "openrouter",
             "glm",
         ], f"unexpected visible provider catalog: {providers}"
-        assert body.get_attribute("data-cursor-models") == "grok-4.5"
+        assert body.get_attribute("data-cursor-models") == "grok-4.5,composer-2.5"
         assert body.get_attribute("data-hormachuelos-free-models") == "hormachuelos-v1,hormachuelos-v2"
         assert body.get_attribute("data-tool-animation") == "lightningToolSpawnBlue"
         assert body.get_attribute("data-agentic-animation") == "lightningFadeInOutBlue"
@@ -106,6 +107,56 @@ def main() -> None:
         assert "is-open" in (preview.get_attribute("class") or "")
         assert page.locator("iframe").count() == 1
         page.frame_locator("iframe").locator("#target").wait_for(state="visible")
+
+        # Session previews are isolated.  A Snake/game preview staged for a
+        # background session must not replace the currently rendered session.
+        session_a = page.evaluate("() => window.__preview.captureSessionState()")
+        assert session_a is not None
+        assert session_a["tabs"][0]["entryPath"] == "index.html"
+        assert session_a["softwareMode"] is True
+
+        background_session = page.evaluate(
+            "args => window.__mergePreviewSessionState(args.current, args.opts)",
+            {
+                "current": None,
+                "opts": {
+                    "projectRoot": r"C:\preview-fixture",
+                    "entryPath": "snake.html",
+                    "files": ["index.html", "snake.html"],
+                    "title": "Snake game",
+                },
+            },
+        )
+        assert [tab["entryPath"] for tab in background_session["tabs"]] == ["snake.html"]
+        # Staging state is pure: it does not steal the active session's iframe.
+        assert page.locator(".site-preview-omnibox").input_value() == "index.html"
+        assert page.locator("iframe").count() == 1
+
+        page.evaluate("() => window.__preview.clearSessionView()")
+        preview.wait_for(state="hidden")
+        assert page.locator("iframe").count() == 0
+
+        # Switching into the background session renders its game and nothing
+        # from Session A; switching back returns only Session A's page.
+        page.evaluate(
+            "state => window.__preview.restoreSessionState(state)",
+            background_session,
+        )
+        preview.wait_for(state="visible")
+        page.frame_locator("iframe").locator("#target").wait_for(state="visible")
+        assert page.locator(".site-preview-omnibox").input_value() == "snake.html"
+        assert page.locator("iframe").count() == 1
+        assert "is-software" not in (preview.get_attribute("class") or "")
+
+        page.evaluate(
+            "state => window.__preview.restoreSessionState(state)",
+            session_a,
+        )
+        page.frame_locator("iframe").locator("#target").wait_for(state="visible")
+        assert page.locator(".site-preview-omnibox").input_value() == "index.html"
+        assert page.locator("iframe").count() == 1
+        assert "snake.html" not in (page.locator(".site-preview-tabs").inner_text() or "")
+        assert "is-software" in (preview.get_attribute("class") or "")
 
         page.get_by_role("button", name="Close preview").click()
         preview.wait_for(state="hidden")

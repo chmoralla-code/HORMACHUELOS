@@ -120,9 +120,9 @@ def main() -> None:
         page.wait_for_function("document.body.dataset.installedVersion === '0.1.5'")
         assert page.locator("body").get_attribute("data-installed-url") == (
             "https://hormachuelos.vercel.app/downloads/"
-            "Hormachuelos_0.1.5_x64-setup.exe"
+            "Hormachuelos_0.1.5_x64_en-US.msi"
         )
-        assert page.locator("body").get_attribute("data-installed-sha256") == "a" * 64
+        assert page.locator("body").get_attribute("data-installed-sha256") == "b" * 64
         backup = json.loads(page.locator("body").get_attribute("data-update-backup"))
         assert backup["entries"]["ai-forge:test-update-state"] == "preserved"
         expect(install_dialog.locator(".update-install-status")).to_contain_text("restart automatically")

@@ -25,6 +25,7 @@
 
       window.__updateMode = "available";
       api.appVersion = async () => "0.1.4";
+      api.appInstallKind = async () => "msi";
       api.openExternalUrl = async (url) => {
         document.body.dataset.openedUrl = url;
       };

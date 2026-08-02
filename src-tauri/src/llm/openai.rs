@@ -40,18 +40,39 @@ fn encode_message(message: &ChatMessage) -> Value {
     encoded
 }
 
-fn build_request_body(model: &str, messages: &[ChatMessage], tools: &[Value]) -> Value {
+fn normalized_xai_reasoning_effort(value: Option<&str>) -> &'static str {
+    match value.unwrap_or("high").trim().to_ascii_lowercase().as_str() {
+        "light" | "low" => "low",
+        "medium" => "medium",
+        // xAI currently accepts low, medium, and high. UI-only xHigh/Ultra
+        // intentionally map to high rather than producing a 400 response.
+        _ => "high",
+    }
+}
+
+fn build_request_body(
+    model: &str,
+    messages: &[ChatMessage],
+    tools: &[Value],
+    provider_kind: &str,
+    reasoning_effort: Option<&str>,
+) -> Value {
     let mut body = json!({
         "model": model,
         "messages": messages.iter().map(encode_message).collect::<Vec<_>>(),
     });
     let normalized_model = model.to_ascii_lowercase();
+    let is_xai_grok = provider_kind.eq_ignore_ascii_case("xai") && normalized_model == "grok-4.5";
     let is_reasoning_model = normalized_model.starts_with("gpt-5")
         || normalized_model.starts_with("o1")
         || normalized_model.starts_with("o3")
-        || normalized_model.starts_with("o4");
+        || normalized_model.starts_with("o4")
+        || is_xai_grok;
     if !is_reasoning_model {
         body["temperature"] = json!(0.2);
+    }
+    if is_xai_grok {
+        body["reasoning_effort"] = json!(normalized_xai_reasoning_effort(reasoning_effort));
     }
     if !tools.is_empty() {
         body["tools"] = Value::Array(tools.to_vec());
@@ -498,6 +519,7 @@ pub struct OpenAi {
     base_url: String,
     model: String,
     provider_kind: String,
+    reasoning_effort: Option<String>,
 }
 
 impl OpenAi {
@@ -509,6 +531,7 @@ impl OpenAi {
             "deepseek" => "https://api.deepseek.com",
             "glm" => "https://opencode.ai/zen/v1",
             "cursor" => "https://api.cursor.com/v1",
+            "xai" => crate::config::XAI_API_BASE_URL,
             "hormachuelos_free" => "https://hormachuelos.vercel.app/api/v1",
             _ => "https://api.openai.com/v1",
         };
@@ -529,7 +552,15 @@ impl OpenAi {
                 .to_string(),
             model: model.to_string(),
             provider_kind: provider_kind.to_string(),
+            reasoning_effort: None,
         }
+    }
+
+    pub fn with_reasoning_effort(mut self, effort: Option<&str>) -> Self {
+        if self.provider_kind.eq_ignore_ascii_case("xai") {
+            self.reasoning_effort = Some(normalized_xai_reasoning_effort(effort).into());
+        }
+        self
     }
 
     fn skip_auth(&self) -> bool {
@@ -542,8 +573,8 @@ impl OpenAi {
 
     fn is_hosted_proxy(&self) -> bool {
         self.api_key.to_ascii_uppercase().starts_with("HORMA-")
-            || self.base_url.contains("hormachuelos")
-            || self.base_url.contains("/api/v1")
+            || self.provider_kind.eq_ignore_ascii_case("hormachuelos_free")
+            || self.base_url.contains("hormachuelos.vercel.app")
     }
 }
 
@@ -557,7 +588,13 @@ impl LlmProvider for OpenAi {
         on_content: Option<ContentSink>,
         on_tool_call: Option<ToolCallSink>,
     ) -> Result<LlmResponse> {
-        let mut body = build_request_body(&self.model, messages, tools);
+        let mut body = build_request_body(
+            &self.model,
+            messages,
+            tools,
+            &self.provider_kind,
+            self.reasoning_effort.as_deref(),
+        );
         body["stream"] = Value::Bool(true);
 
         for attempt in 0..3 {
@@ -672,7 +709,7 @@ mod tests {
             reasoning_content: Some("I should inspect the file first.".into()),
         }];
 
-        let body = build_request_body("deepseek-v4-pro", &messages, &[]);
+        let body = build_request_body("deepseek-v4-pro", &messages, &[], "deepseek", None);
         let assistant = &body["messages"][0];
 
         assert_eq!(assistant["content"], Value::Null);
@@ -701,9 +738,26 @@ mod tests {
             reasoning_content: None,
         }];
 
-        let body = build_request_body("gpt-5.6-sol", &messages, &[]);
+        let body = build_request_body("gpt-5.6-sol", &messages, &[], "openai", None);
 
         assert!(body.get("temperature").is_none());
+    }
+
+    #[test]
+    fn xai_grok_uses_supported_reasoning_fields_and_never_marks_the_direct_url_hosted() {
+        let messages = vec![ChatMessage::user("Test the integration.")];
+        let body = build_request_body("grok-4.5", &messages, &[], "xai", Some("ultra"));
+
+        assert!(body.get("temperature").is_none());
+        assert_eq!(body["reasoning_effort"], "high");
+
+        let direct = OpenAi::new(
+            "xai-example",
+            Some("https://api.x.ai/v1"),
+            "grok-4.5",
+            "xai",
+        );
+        assert!(!direct.is_hosted_proxy());
     }
 
     #[test]

@@ -91,6 +91,32 @@ test("HORMACHUELOS FREE never falls back to another provider", async () => {
   }
 });
 
+test("licensed OpenAI · Grok route pins the public alias to xAI Grok 4.5", async () => {
+  const restoreManaged = disableManagedConfigsForTest();
+  const priorXai = process.env.XAI_API_KEY;
+  process.env.XAI_API_KEY = "xai-test-only-hosted-key";
+  try {
+    const upstream = await resolveUpstream("xai");
+    assert.equal(upstream.provider, "xai");
+    assert.equal(upstream.base, "https://api.x.ai/v1");
+
+    const model = resolveHostedModel(upstream, "grok-4.5");
+    assert.equal(model.requestedModel, "grok-4.5");
+    assert.equal(model.upstreamModel, "grok-4.5");
+    assert.equal(model.base, "https://api.x.ai/v1");
+    assert.equal(model.apiKey, process.env.XAI_API_KEY);
+    assert.match(resolveHostedModel(upstream, "another-model").error, /not currently available/i);
+
+    const status = (await hostedProvidersStatus()).xai;
+    assert.deepEqual(status, { ok: true, viaOpenRouter: false });
+    assert.equal(JSON.stringify(status).includes(process.env.XAI_API_KEY), false);
+  } finally {
+    if (priorXai == null) delete process.env.XAI_API_KEY;
+    else process.env.XAI_API_KEY = priorXai;
+    restoreManaged();
+  }
+});
+
 test("HORMACHUELOS V2 uses the dedicated OpenCode Go route", async () => {
   const restoreManaged = disableManagedConfigsForTest();
   const priorNeuralWatt = process.env.NEURALWATT_API_KEY;

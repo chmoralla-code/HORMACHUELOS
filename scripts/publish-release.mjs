@@ -102,7 +102,7 @@ function setCargoVersion(path, version) {
   console.log(`updated ${path}`);
 }
 
-function bumpVersions(version) {
+function bumpVersions(version, notes = "") {
   setJsonVersion(join(ROOT, "package.json"), version);
   setLockfileVersion(join(ROOT, "package-lock.json"), version);
   setJsonVersion(join(ROOT, "src-tauri", "tauri.conf.json"), version);
@@ -135,6 +135,12 @@ function bumpVersions(version) {
       /const BUILTIN_RELEASE_VERSION = "[^"]+";/,
       `const BUILTIN_RELEASE_VERSION = "${version}";`,
     );
+    if (notes.trim()) {
+      src = src.replace(
+        /const BUILTIN_RELEASE_NOTES\s*=\s*"[^"]*";/,
+        `const BUILTIN_RELEASE_NOTES = ${JSON.stringify(notes.trim())};`,
+      );
+    }
     writeFileSync(releasesJs, src);
     console.log(`updated ${releasesJs}`);
   }
@@ -325,7 +331,7 @@ async function main() {
 
   if (!opts.skipPublish) await assertChecksumAwareReleaseApi();
 
-  bumpVersions(opts.version);
+  bumpVersions(opts.version, opts.notes);
 
   if (!opts.skipBuild) {
     run("npm", ["run", "desktop:build"]);

@@ -16,17 +16,17 @@ const ASSET_BASE =
 
 /** Desktop installer files (uploaded to Supabase after `npm run desktop:build`). */
 const DESKTOP_DOWNLOADS = {
-  version: "0.1.11",
+  version: "0.1.14",
   windows: {
     msi: {
       label: "Windows installer (MSI)",
-      href: "/downloads/Hormachuelos_0.1.11_x64_en-US.msi",
-      file: "Hormachuelos_0.1.11_x64_en-US.msi",
+      href: "/downloads/Hormachuelos_0.1.14_x64_en-US.msi",
+      file: "Hormachuelos_0.1.14_x64_en-US.msi",
     },
     setup: {
       label: "Windows setup (EXE)",
-      href: "/downloads/Hormachuelos_0.1.11_x64-setup.exe",
-      file: "Hormachuelos_0.1.11_x64-setup.exe",
+      href: "/downloads/Hormachuelos_0.1.14_x64-setup.exe",
+      file: "Hormachuelos_0.1.14_x64-setup.exe",
     },
   },
 };
@@ -1414,49 +1414,90 @@ function renderAdmin() {
     root.innerHTML = `<p class="muted">Loading hosted models…</p>`;
     try {
       const data = await apiAdmin("/api/admin/models");
-      const configs = data.configs || [];
+      const configs = Array.isArray(data.configs) ? data.configs : [];
+      const providerOptions = Array.isArray(data.providerOptions) ? data.providerOptions : [];
+      const providerLabels = new Map(
+        providerOptions.map((provider) => [provider.id, provider.label]),
+      );
+      const providerLabel = (id) => {
+        const normalized = String(id || "").trim().toLowerCase();
+        return providerLabels.get(normalized) || normalized
+          .split(/[-_]+/)
+          .filter(Boolean)
+          .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+          .join(" ") || "Hosted provider";
+      };
+      const knownProviderIds = new Set(providerOptions.map((provider) => provider.id));
+      for (const config of configs) knownProviderIds.add(config.providerId);
+      const formProviderOptions = [...knownProviderIds]
+        .sort((left, right) => providerLabel(left).localeCompare(providerLabel(right)))
+        .map((id) => `<option value="${escapeHtml(id)}">${escapeHtml(providerLabel(id))} · ${escapeHtml(id)}</option>`)
+        .join("");
+      const groupedConfigs = new Map();
+      for (const config of configs) {
+        const rows = groupedConfigs.get(config.providerId) || [];
+        rows.push(config);
+        groupedConfigs.set(config.providerId, rows);
+      }
       const storageWarning = data.credentialStorageReady
         ? ""
         : `<div class="alert warn">Credential encryption is not configured on the server. Set <code>HORMACHUELOS_MODEL_CONFIG_KEY</code> before saving a model key.</div>`;
+      const tables = [...groupedConfigs.entries()]
+        .sort(([left], [right]) => providerLabel(left).localeCompare(providerLabel(right)))
+        .map(([providerId, rows]) => `
+          <section class="card" style="margin-bottom:16px">
+            <div style="display:flex;gap:12px;align-items:baseline;justify-content:space-between;flex-wrap:wrap">
+              <div><h3 style="margin:0">${escapeHtml(providerLabel(providerId))}</h3><p class="muted small mono" style="margin:4px 0 0">provider alias: ${escapeHtml(providerId)}</p></div>
+              <span class="muted small">${rows.length} model route${rows.length === 1 ? "" : "s"}</span>
+            </div>
+            <div class="admin-table-wrap" style="margin-top:12px">
+              <table class="admin-table">
+                <thead><tr><th>Provider alias</th><th>Model alias &amp; name</th><th>Upstream model</th><th>Base URL</th><th>Server key</th><th>Active</th><th></th></tr></thead>
+                <tbody>
+                  ${rows
+                    .slice()
+                    .sort((left, right) => String(left.displayName).localeCompare(String(right.displayName)))
+                    .map((model) => `<tr data-model-id="${escapeHtml(model.id)}">
+                      <td><input class="field admin-model-provider" value="${escapeHtml(model.providerId)}" aria-label="Provider alias" /></td>
+                      <td><input class="field admin-model-alias mono" value="${escapeHtml(model.alias)}" aria-label="Model alias" /><input class="field admin-model-name" value="${escapeHtml(model.displayName)}" aria-label="Model display name" style="margin-top:6px" /></td>
+                      <td><input class="field admin-model-upstream" value="${escapeHtml(model.upstreamModel)}" aria-label="Upstream model ID" /></td>
+                      <td><input class="field admin-model-base" type="url" value="${escapeHtml(model.baseUrl)}" aria-label="HTTPS base URL" /></td>
+                      <td><input class="field admin-model-key" type="password" autocomplete="new-password" placeholder="${model.keyConfigured ? "•••••••• (leave blank to keep)" : "No key saved"}" aria-label="Replacement server API key" /><span class="muted small">${model.keyConfigured ? "Key configured" : "No key configured"}</span></td>
+                      <td><label class="admin-active"><input type="checkbox" class="admin-model-active" ${model.active ? "checked" : ""} /> Active</label></td>
+                      <td><button type="button" class="btn btn-sm btn-primary admin-model-save">Save</button><button type="button" class="btn btn-sm admin-model-clear" ${model.keyConfigured ? "" : "disabled"}>Clear key</button><button type="button" class="btn btn-sm danger admin-model-delete">Delete</button></td>
+                    </tr>`)
+                    .join("")}
+                </tbody>
+              </table>
+            </div>
+          </section>`)
+        .join("");
       root.innerHTML = `
         <div class="card" style="margin-bottom:16px">
-          <h3 style="margin-top:0">Hosted HORMACHUELOS models</h3>
-          <p class="muted small">Keys are encrypted on the server and are never sent to the desktop app. Saving a key here updates the hosted route used by every compatible signed-in app version.</p>
+          <h3 style="margin-top:0">Hosted provider and model aliases</h3>
+          <p class="muted small">Create a provider alias, then add one or more model aliases beneath it. Each route keeps its upstream API key encrypted on the server; keys are never returned to the desktop app or ordinary users.</p>
           ${storageWarning}
           <form id="hosted-model-form" class="admin-release-form">
-            <div class="field"><label>Alias</label><input id="model-alias" class="field" required placeholder="hormachuelos-v3" pattern="[a-z0-9][a-z0-9._-]*" /></div>
-            <div class="field"><label>Display name</label><input id="model-name" class="field" required placeholder="Hormachuelos v3" /></div>
-            <div class="field"><label>Upstream model ID</label><input id="model-upstream" class="field" required placeholder="deepseek-v4-flash" /></div>
-            <div class="field"><label>HTTPS base URL</label><input id="model-base" class="field" required type="url" placeholder="https://provider.example/v1" /></div>
-            <div class="field"><label>Provider API key</label><input id="model-key" class="field" required type="password" autocomplete="new-password" placeholder="Paste once — it will not be shown again" /></div>
+            <div class="field"><label>Provider alias</label><select id="model-provider" class="field">${formProviderOptions}<option value="__custom__">Create a custom provider alias…</option></select></div>
+            <div class="field" id="model-provider-custom-wrap" hidden><label>New provider alias</label><input id="model-provider-custom" class="field mono" maxlength="49" placeholder="my-provider" pattern="[a-z][a-z0-9_-]*" /><p class="muted small" style="margin:6px 0 0">Use lowercase letters, numbers, dashes, or underscores. This identifier is the provider alias shown in the app.</p></div>
+            <div class="field"><label>Model alias</label><input id="model-alias" class="field mono" required maxlength="81" placeholder="my-model-fast" pattern="[a-z0-9][a-z0-9._-]*" /></div>
+            <div class="field"><label>Model display name</label><input id="model-name" class="field" required maxlength="120" placeholder="My Model Fast" /></div>
+            <div class="field"><label>Upstream model ID</label><input id="model-upstream" class="field" required maxlength="200" placeholder="grok-4.5" /></div>
+            <div class="field"><label>HTTPS base URL</label><input id="model-base" class="field" required type="url" maxlength="400" placeholder="https://provider.example/v1" /></div>
+            <div class="field"><label>Server API key</label><input id="model-key" class="field" type="password" autocomplete="new-password" placeholder="Paste once — it will not be shown again" /><p class="muted small" style="margin:6px 0 0">Required for a route to become available. Leave blank only when you are creating the route first and will add its key afterward.</p></div>
+            <p class="muted small" style="margin:0 0 12px">Example: select <code>OpenAI · Grok</code>, use model alias and upstream ID <code>grok-4.5</code>, and set the base URL to <code>https://api.x.ai/v1</code>.</p>
             <label class="admin-active" style="margin:8px 0 14px;display:inline-flex"><input type="checkbox" id="model-active" checked /> Active</label>
             <div class="field-error" id="model-error" hidden></div>
-            <button class="btn btn-primary" type="submit">Add hosted model</button>
+            <button class="btn btn-primary" type="submit">Add model alias</button>
           </form>
         </div>
-        <div class="admin-table-wrap">
-          <table class="admin-table">
-            <thead><tr><th>Alias</th><th>Upstream model</th><th>Base URL</th><th>Server key</th><th>Active</th><th></th></tr></thead>
-            <tbody>
-              ${configs.length
-                ? configs.map((m) => `<tr data-model-id="${escapeHtml(m.id)}" data-provider="${escapeHtml(m.providerId)}">
-                    <td><strong>${escapeHtml(m.displayName)}</strong><span class="muted small mono">${escapeHtml(m.alias)}</span></td>
-                    <td><input class="field admin-model-upstream" value="${escapeHtml(m.upstreamModel)}" /></td>
-                    <td><input class="field admin-model-base" type="url" value="${escapeHtml(m.baseUrl)}" /></td>
-                    <td><input class="field admin-model-key" type="password" autocomplete="new-password" placeholder="${m.keyConfigured ? "•••••••• (leave blank to keep)" : "No key saved"}" /><span class="muted small">${m.keyConfigured ? "Key configured" : "No key configured"}</span></td>
-                    <td><label class="admin-active"><input type="checkbox" class="admin-model-active" ${m.active ? "checked" : ""} /> Active</label></td>
-                    <td><button type="button" class="btn btn-sm btn-primary admin-model-save">Save</button><button type="button" class="btn btn-sm admin-model-clear" ${m.keyConfigured ? "" : "disabled"}>Clear key</button></td>
-                  </tr>`).join("")
-                : `<tr><td colspan="6" class="muted">No hosted models yet. Add one above.</td></tr>`}
-            </tbody>
-          </table>
-        </div>`;
+        ${tables || `<div class="card muted">No hosted model aliases yet. Add the first provider route above.</div>`}`;
 
       const fieldsFor = (row) => ({
         id: row.getAttribute("data-model-id"),
-        providerId: row.getAttribute("data-provider"),
-        alias: row.querySelector(".mono").textContent.trim(),
-        displayName: row.querySelector("strong").textContent.trim(),
+        providerId: row.querySelector(".admin-model-provider").value.trim(),
+        alias: row.querySelector(".admin-model-alias").value.trim(),
+        displayName: row.querySelector(".admin-model-name").value.trim(),
         upstreamModel: row.querySelector(".admin-model-upstream").value.trim(),
         baseUrl: row.querySelector(".admin-model-base").value.trim(),
         active: row.querySelector(".admin-model-active").checked,
@@ -1496,7 +1537,35 @@ function renderAdmin() {
             btn.disabled = false;
           }
         });
+        row.querySelector(".admin-model-delete").addEventListener("click", async () => {
+          const modelName = row.querySelector(".admin-model-name").value.trim() || "this model alias";
+          if (!confirm(`Delete ${modelName}? This removes its server-side route and stops it from appearing in the desktop app.`)) return;
+          const btn = row.querySelector(".admin-model-delete");
+          btn.disabled = true;
+          try {
+            await apiAdmin("/api/admin/models", {
+              method: "DELETE",
+              body: { id: row.getAttribute("data-model-id") },
+            });
+            toast("Hosted model alias deleted");
+            await paintAdmin("models");
+          } catch (ex) {
+            toast(String(ex.message || ex));
+            btn.disabled = false;
+          }
+        });
       });
+
+      const providerSelect = root.querySelector("#model-provider");
+      const customProviderWrap = root.querySelector("#model-provider-custom-wrap");
+      const customProviderInput = root.querySelector("#model-provider-custom");
+      const syncCustomProvider = () => {
+        const isCustom = providerSelect.value === "__custom__";
+        customProviderWrap.hidden = !isCustom;
+        customProviderInput.required = isCustom;
+      };
+      providerSelect.addEventListener("change", syncCustomProvider);
+      syncCustomProvider();
 
       root.querySelector("#hosted-model-form").addEventListener("submit", async (event) => {
         event.preventDefault();
@@ -1506,10 +1575,13 @@ function renderAdmin() {
         btn.disabled = true;
         btn.textContent = "Saving…";
         try {
+          const providerId = providerSelect.value === "__custom__"
+            ? customProviderInput.value.trim()
+            : providerSelect.value;
           await apiAdmin("/api/admin/models", {
             method: "POST",
             body: {
-              providerId: "hormachuelos_free",
+              providerId,
               alias: root.querySelector("#model-alias").value.trim(),
               displayName: root.querySelector("#model-name").value.trim(),
               upstreamModel: root.querySelector("#model-upstream").value.trim(),
@@ -1524,7 +1596,7 @@ function renderAdmin() {
           error.hidden = false;
           error.textContent = String(ex.message || ex);
           btn.disabled = false;
-          btn.textContent = "Add hosted model";
+          btn.textContent = "Add model alias";
         }
       });
     } catch (ex) {

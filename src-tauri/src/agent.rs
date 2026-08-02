@@ -1,8 +1,8 @@
 use crate::config::Settings;
 use crate::integration_chat;
 use crate::llm::{
-    build_provider, provider_needs_key, ChatMessage, ContentSink, LlmResponse, ReasoningSink,
-    ToolCall, ToolCallSink,
+    provider_needs_key, ChatMessage, ContentSink, LlmResponse, ReasoningSink, ToolCall,
+    ToolCallSink,
 };
 use crate::state::SessionRun;
 use crate::tools::{self, ToolRunContext};
@@ -476,8 +476,13 @@ Current user request:\n{prompt}",
             license.license_key.clone(),
             Some(crate::license::hosted_chat_base_url()),
         )
+    } else if crate::config::is_custom_hosted_provider_alias(&settings.provider) {
+        return Err(anyhow::anyhow!(
+            "'{}' is managed by your Hormachuelos administrator. Sign in with an active hosted plan before using this provider alias.",
+            settings.provider
+        ));
     } else if provider_needs_key(&settings.provider) {
-        let key = crate::config::load_api_key(&settings.provider).map_err(|e| {
+        let key = crate::config::load_provider_api_key(&settings.provider).map_err(|e| {
             anyhow::anyhow!(
                 "No API key for '{}': {}. Set it in Settings, or activate a hosted plan from hormachuelos.vercel.app.",
                 settings.provider,
@@ -489,11 +494,12 @@ Current user request:\n{prompt}",
         (String::new(), settings.base_url.clone())
     };
 
-    let provider = build_provider(
+    let provider = crate::llm::build_provider_with_effort(
         &settings.provider,
         &key,
         base_url_override.as_deref(),
         &settings.model,
+        Some(&settings.model_effort),
     )?;
     let tool_schemas =
         tools::schemas(settings.computer_use_enabled && crate::computer_use::status().supported);
@@ -1589,6 +1595,7 @@ fn display_provider_name(provider_id: &str) -> String {
         "ollama" => "Ollama".into(),
         "deepseek" => "DeepSeek".into(),
         "cursor" => "Cursor SDK".into(),
+        "xai" => "xAI".into(),
         "hormachuelos_free" => "HORMACHUELOS FREE".into(),
         "openai" => "OpenAI".into(),
         "glm" => "GLM".into(),
@@ -1747,6 +1754,7 @@ mod tests {
         assert_eq!(display_model_name("composer-2.5"), "composer-2.5");
         assert_eq!(display_model_name("vendor/model:free"), "vendor/model:free");
         assert_eq!(display_provider_name("cursor"), "Cursor SDK");
+        assert_eq!(display_provider_name("xai"), "xAI");
         assert_eq!(display_provider_name("glm"), "GLM");
         assert_eq!(display_model_name("hormachuelos-v1"), "Hormachuelos v1");
         assert_eq!(display_model_name("hormachuelos-v2"), "Hormachuelos v2");

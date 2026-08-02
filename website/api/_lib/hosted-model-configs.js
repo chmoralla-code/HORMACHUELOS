@@ -14,8 +14,30 @@ import {
 } from "./secret-box.js";
 
 export const HORMACHUELOS_FREE_PROVIDER = "hormachuelos_free";
+export const XAI_PROVIDER = "xai";
 
-const ALLOWED_PROVIDERS = new Set([HORMACHUELOS_FREE_PROVIDER]);
+/**
+ * Built-in provider ids that can be managed from the admin dashboard. They
+ * are all forwarded through the OpenAI-compatible hosted proxy when an admin
+ * route is configured for them. A custom provider alias uses the same safe
+ * route format, so it never needs to be added to a desktop build first.
+ */
+export const BUILTIN_HOSTED_PROVIDERS = Object.freeze([
+  HORMACHUELOS_FREE_PROVIDER,
+  XAI_PROVIDER,
+  "openai",
+  "deepseek",
+  "openrouter",
+  "glm",
+  "pollinations",
+  "anthropic",
+  "gemini",
+]);
+
+// Cursor uses its local SDK and Ollama is intentionally local-only. Neither
+// can be safely represented as a server-side OpenAI-compatible route.
+const LOCAL_ONLY_PROVIDERS = new Set(["cursor", "ollama"]);
+const PROVIDER_ALIAS_RE = /^[a-z][a-z0-9_-]{0,48}$/;
 const ALIAS_RE = /^[a-z0-9][a-z0-9._-]{0,80}$/;
 let routeCache = null;
 let routeCacheAt = 0;
@@ -58,12 +80,27 @@ function validHostedBaseUrl(value) {
   return url.toString().replace(/\/$/, "");
 }
 
-function normalizeProvider(value) {
+export function isHostedProviderAlias(value) {
+  const provider = String(value || "").trim().toLowerCase();
+  return PROVIDER_ALIAS_RE.test(provider) && !LOCAL_ONLY_PROVIDERS.has(provider);
+}
+
+/** Normalize a built-in id or a new dashboard-created provider alias. */
+export function normalizeHostedProviderAlias(value) {
   const provider = String(value || HORMACHUELOS_FREE_PROVIDER).trim().toLowerCase();
-  if (!ALLOWED_PROVIDERS.has(provider)) {
-    throw Object.assign(new Error("Unsupported hosted provider."), { status: 400 });
+  if (!isHostedProviderAlias(provider)) {
+    throw Object.assign(
+      new Error(
+        "Provider alias must use lowercase letters, numbers, dashes, or underscores (and cannot be cursor or ollama).",
+      ),
+      { status: 400 },
+    );
   }
   return provider;
+}
+
+function normalizeProvider(value) {
+  return normalizeHostedProviderAlias(value);
 }
 
 function normalizeAlias(value) {
@@ -105,6 +142,33 @@ export function publicHostedModelConfig(row) {
   };
 }
 
+/** Friendly names are derived from the stable provider alias, not a secret. */
+export function hostedProviderDisplayName(providerId) {
+  const provider = String(providerId || "").trim().toLowerCase();
+  const known = {
+    [HORMACHUELOS_FREE_PROVIDER]: "HORMACHUELOS FREE",
+    [XAI_PROVIDER]: "OpenAI · Grok",
+    openai: "OpenAI",
+    deepseek: "DeepSeek",
+    openrouter: "OpenRouter",
+    glm: "OpenCode",
+    pollinations: "Pollinations",
+    anthropic: "Anthropic",
+    gemini: "Gemini",
+  };
+  if (known[provider]) return known[provider];
+  return provider
+    .split(/[-_]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ") || "Hosted provider";
+}
+
+/** Options shown by the dashboard before it has any custom provider rows. */
+export function hostedProviderOptions() {
+  return BUILTIN_HOSTED_PROVIDERS.map((id) => ({ id, label: hostedProviderDisplayName(id) }));
+}
+
 export function invalidateHostedModelRouteCache() {
   routeCache = null;
   routeCacheAt = 0;
@@ -114,6 +178,7 @@ export async function adminListHostedModelConfigs() {
   const rows = await listHostedModelConfigs();
   return {
     credentialStorageReady: hostedModelCredentialStorageReady(),
+    providerOptions: hostedProviderOptions(),
     configs: rows.map(publicHostedModelConfig),
   };
 }
@@ -165,12 +230,11 @@ export async function adminDeleteHostedModelConfig(id) {
 }
 
 /**
- * Load decryptable, active model routes for the hosted proxy.
- * This result stays server-side: `apiKey` is never passed through the admin API
- * or returned from `/api/v1/models`.
+ * Load all decryptable, active model routes for the hosted proxy. This stays
+ * server-side: `apiKey` is never returned from the admin API or public
+ * catalog. A bad record fails closed while unrelated routes continue working.
  */
-export async function activeHostedModelRoutes(providerId = HORMACHUELOS_FREE_PROVIDER) {
-  const provider = normalizeProvider(providerId);
+export async function activeAllHostedModelRoutes() {
   if (!supabaseConfigured()) return [];
   const now = Date.now();
   if (!routeCache || now - routeCacheAt > CACHE_MS) {
@@ -198,5 +262,38 @@ export async function activeHostedModelRoutes(providerId = HORMACHUELOS_FREE_PRO
     routeCache = routes;
     routeCacheAt = now;
   }
-  return routeCache.filter((route) => route.providerId === provider);
+  return routeCache;
+}
+
+/** Load active routes belonging to one built-in or custom provider alias. */
+export async function activeHostedModelRoutes(providerId = HORMACHUELOS_FREE_PROVIDER) {
+  const provider = normalizeProvider(providerId);
+  return (await activeAllHostedModelRoutes()).filter((route) => route.providerId === provider);
+}
+
+/**
+ * Public-safe catalog for the desktop picker. It intentionally omits upstream
+ * model ids, base URLs, encrypted values, and API keys.
+ */
+export function publicHostedProviderCatalogFromRoutes(routes) {
+  const grouped = new Map();
+  for (const route of Array.isArray(routes) ? routes : []) {
+    const current = grouped.get(route.providerId) || [];
+    current.push(route);
+    grouped.set(route.providerId, current);
+  }
+  return [...grouped.entries()]
+    .sort(([left], [right]) => hostedProviderDisplayName(left).localeCompare(hostedProviderDisplayName(right)))
+    .map(([id, routes]) => ({
+      id,
+      label: hostedProviderDisplayName(id),
+      models: routes
+        .slice()
+        .sort((left, right) => left.displayName.localeCompare(right.displayName))
+        .map((route) => ({ id: route.alias, label: route.displayName })),
+    }));
+}
+
+export async function publicHostedProviderCatalog() {
+  return publicHostedProviderCatalogFromRoutes(await activeAllHostedModelRoutes());
 }
