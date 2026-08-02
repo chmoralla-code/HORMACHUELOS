@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.21";
-const BUILTIN_MSI_SHA256 = "d04a2cb9a219a4e0ec624df7444c9b3721f95e5583ddcfd7150f5cbbd5b976e7";
-const BUILTIN_EXE_SHA256 = "5a82632f25e3c9deb665e9824e7a70346dba033dec1264f363725f2c04524865";
-const BUILTIN_RELEASE_NOTES = "• OpenRouter Free Models Router no longer requires a local API key with a Hormachuelos plan\n• Model chip shows Free Models Router instead of a raw id";
+const BUILTIN_RELEASE_VERSION = "0.1.22";
+const BUILTIN_MSI_SHA256 = "cdabc9599d3288ea76fe4eb548a8f980a37cb5dc0b52c066b1e782766c2a228f";
+const BUILTIN_EXE_SHA256 = "1ce14ae7845325b0af9bde4e6556d91f0b2f2852f1036ce16577d5f2a31f0ea9";
+const BUILTIN_RELEASE_NOTES = "Cleaner AI reply formatting with readable completion summaries, plus session-bound controls that lock provider, model, and effort while work is in progress.";
 
 /**
  * A deployment-bundled release keeps the download/update path available even

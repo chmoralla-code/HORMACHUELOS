@@ -56,6 +56,11 @@ let activeSessionId: string | null = null;
 const sessionRegistry = new Map<string, Session>();
 /** Session ids with an in-flight agent run (multiple can run at once). */
 const runningSessions = new Set<string>();
+/** Exact provider/model profile captured when each in-flight run starts. */
+const runModelProfiles = new Map<
+  string,
+  { provider: string; model: string; effort?: string }
+>();
 /** Each run keeps its original workspace even when the visible project changes. */
 const runProjectPaths = new Map<string, string>();
 /** Files created/edited during a run — used to auto-open the build preview. */
@@ -318,10 +323,35 @@ function refreshSidebar() {
 }
 
 function updateGlobalRunStatus() {
+  syncActiveSessionModelLock();
   const n = runningSessions.size;
   if (n === 0) sidebar.setStatus("Ready", false);
   else if (n === 1) sidebar.setStatus("Running", true);
   else sidebar.setStatus(`${n} runs`, true);
+}
+
+/**
+ * The model selector is global UI, but a run belongs to one session. While the
+ * selected session is busy, display and lock the model that actually started
+ * that run. Other idle sessions remain free to choose their own next model.
+ */
+function syncActiveSessionModelLock() {
+  if (typeof modelBar === "undefined" || typeof chat === "undefined") return;
+  const profile = activeSessionId ? runModelProfiles.get(activeSessionId) || null : null;
+  modelBar.setActiveSessionRunProfile(profile);
+  if (profile) {
+    chat.setReplyProfile({
+      provider: profile.provider,
+      model: profile.model,
+      effort: profile.effort,
+    });
+  } else if (modelBar.settings) {
+    chat.setReplyProfile({
+      provider: modelBar.settings.provider,
+      model: modelBar.settings.model,
+      effort: modelBar.settings.model_effort,
+    });
+  }
 }
 
 function sessionForId(id: string | null | undefined): Session | undefined {
@@ -637,6 +667,7 @@ function switchSession(id: string) {
     chat.loadSession(s.messages);
   }
   chat.setRunning(runningSessions.has(id));
+  syncActiveSessionModelLock();
   // Restore a tool-approval prompt if this run is waiting in the background
   const conf = pendingConfirms.get(id);
   if (conf) {
@@ -665,6 +696,7 @@ function removeSession(id: string) {
   if (runningSessions.has(id)) {
     api.agentStop(id).catch(() => {});
     runningSessions.delete(id);
+    runModelProfiles.delete(id);
   }
   deleteSession(id);
   sessionRegistry.delete(id);
@@ -755,6 +787,7 @@ function doRemoveAllSessions() {
   for (const id of ids.filter((id) => runningSessions.has(id))) {
     api.agentStop(id).catch(() => {});
     runningSessions.delete(id);
+    runModelProfiles.delete(id);
   }
   deleteAllSessions(currentProjectPath!);
   for (const id of ids) sessionRegistry.delete(id);
@@ -796,6 +829,7 @@ function loadProjectSessions() {
   // Project switching is allowed during a run. Reflect only the selected
   // session's activity instead of leaving the previous project in the UI.
   chat.setRunning(!!activeSessionId && runningSessions.has(activeSessionId), { processQueue: false });
+  syncActiveSessionModelLock();
   // Shared budget across every session in this project
   syncUsageBar();
   restoreActiveSessionPreview();
@@ -1261,7 +1295,15 @@ async function sendPrompt(prompt: string) {
   const sessionId = activeSessionId!;
   // Maximize memory: send prior turns in this session (user, AI, tools, decisions)
   const history = buildLlmHistory(chat.getMessages(), prompt);
+  if (modelBar.settings) {
+    runModelProfiles.set(sessionId, {
+      provider: modelBar.settings.provider,
+      model: modelBar.settings.model,
+      effort: modelBar.settings.model_effort,
+    });
+  }
   runningSessions.add(sessionId);
+  syncActiveSessionModelLock();
   runProjectPaths.set(sessionId, projectRoot);
   runTouchedFiles.set(sessionId, new Set());
   previewOpenedForRun.delete(sessionId);
@@ -1305,6 +1347,8 @@ async function sendPrompt(prompt: string) {
     // Only drop the busy flag here — after backend finish_run. Early deletes on
     // cancelled/done events race a follow-up send ("session already running").
     runningSessions.delete(sessionId);
+    runModelProfiles.delete(sessionId);
+    syncActiveSessionModelLock();
     const allowQueue = !isUsageExhausted();
     if (!allowQueue) {
       chat.clearPendingQueue();
@@ -1691,8 +1735,7 @@ async function init() {
   modelBar = new ModelBar(() => {
     refreshHeader().catch(() => {});
     void refreshProviderReadiness();
-    const s = modelBar.settings;
-    if (s) chat.setReplyProfile({ provider: s.provider, model: s.model, effort: s.model_effort });
+    syncActiveSessionModelLock();
   });
   await modelBar.load().catch((e) => console.error("modelbar load failed", e));
   await refreshProviderReadiness().catch(() => false);
@@ -1709,6 +1752,7 @@ async function init() {
       effort: modelBar.settings.model_effort,
     });
   }
+  syncActiveSessionModelLock();
   window.addEventListener("horma:ultra-effort", () => {
     chat.applyUltraChrome();
   });

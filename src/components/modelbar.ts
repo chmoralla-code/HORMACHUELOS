@@ -94,6 +94,12 @@ export class ModelBar {
   private discoveredModels: Record<string, string[]> = {};
   /** Provider ids supplied by the most recent hosted alias catalog. */
   private hostedCatalogProviderIds = new Set<string>();
+  /**
+   * The model that actually owns the visible in-flight run. Keeping this
+   * separate from global Settings lets a user work in another session without
+   * making a busy session look like it changed providers halfway through.
+   */
+  private activeRunProfile: { provider: string; model: string; effort?: string } | null = null;
 
   constructor(onChange: () => void) {
     this.onChange = onChange;
@@ -128,6 +134,46 @@ export class ModelBar {
     } catch (e) {
       console.error("modelbar refresh failed", e);
     }
+  }
+
+  /** Lock provider/model/effort controls while the visible session is running. */
+  setActiveSessionRunProfile(profile: { provider: string; model: string; effort?: string } | null) {
+    const next = profile
+      ? {
+          provider: String(profile.provider || "").trim(),
+          model: String(profile.model || "").trim(),
+          effort: String(profile.effort || "").trim(),
+        }
+      : null;
+    const current = this.activeRunProfile;
+    if (
+      current?.provider === next?.provider &&
+      current?.model === next?.model &&
+      current?.effort === next?.effort
+    ) {
+      return;
+    }
+    this.activeRunProfile = next;
+    // Invalidate a slow provider-discovery selection that began before the
+    // session became busy. It must not save a different model mid-run.
+    this.providerSelectionGeneration += 1;
+    this.closeMenus();
+    if (typeof this.settings !== "undefined") this.renderProviderRail();
+  }
+
+  private modelSelectionLocked(): boolean {
+    return this.activeRunProfile !== null;
+  }
+
+  private modelLockMessage(): string {
+    return "Model is locked while this session is working. Stop or wait for it to finish before switching.";
+  }
+
+  private allowModelSelection(): boolean {
+    if (!this.modelSelectionLocked()) return true;
+    this.closeMenus();
+    this.setStatus(this.modelLockMessage());
+    return false;
   }
 
   /** Load administrator-managed aliases before rendering the provider picker. */
@@ -247,6 +293,7 @@ export class ModelBar {
   }
 
   private async saveEffort(id: string) {
+    if (!this.allowModelSelection()) return;
     const next = normalizeEffortForProvider(this.settings.provider, id);
     const prev = normalizeEffortForProvider(this.settings.provider, this.settings.model_effort);
     this.settings.model_effort = next;
@@ -373,8 +420,11 @@ export class ModelBar {
     clear(this.providerRail);
 
     const mode = this.getMode();
+    const lockedProfile = this.activeRunProfile;
+    const displaySettings = lockedProfile || this.settings;
+    const modelIsLocked = this.modelSelectionLocked();
     const modeMeta = MODES.find((m) => m.id === mode) || MODES[0];
-    const uiProvId = uiProviderId(this.settings.provider, this.settings.model);
+    const uiProvId = uiProviderId(displaySettings.provider, displaySettings.model);
     const provider = PROVIDERS.find((p) => p.id === uiProvId) || visibleProviders()[0] || PROVIDERS[0];
     const meta = getProviderMeta(uiProvId) || provider;
 
@@ -441,15 +491,25 @@ export class ModelBar {
     // Model chip (shows provider logo + model display name)
     const modelWrap = el("div", { class: "chip-wrap" });
     const modelBtn = this.chipBtn(
-      this.shortModel(this.settings.model, uiProvId),
-      `${provider.label} · ${this.shortModel(this.settings.model, uiProvId)}`,
-      `Model: ${this.shortModel(this.settings.model, uiProvId)}`,
-      "chip-model",
+      this.shortModel(displaySettings.model, uiProvId),
+      modelIsLocked
+        ? `${provider.label} · ${this.shortModel(displaySettings.model, uiProvId)} · ${this.modelLockMessage()}`
+        : `${provider.label} · ${this.shortModel(displaySettings.model, uiProvId)}`,
+      modelIsLocked
+        ? `Model locked: ${this.shortModel(displaySettings.model, uiProvId)}`
+        : `Model: ${this.shortModel(displaySettings.model, uiProvId)}`,
+      "chip-model" + (modelIsLocked ? " chip-model-locked" : ""),
       provider.logoSrc,
     );
+    if (modelIsLocked) {
+      modelBtn.disabled = true;
+      modelBtn.setAttribute("aria-disabled", "true");
+      modelBtn.setAttribute("data-model-locked", "true");
+    }
     modelBtn.addEventListener("click", (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
+      if (!this.allowModelSelection()) return;
       if (modelBtn.classList.contains("menu-open")) {
         this.closeMenus();
         return;
@@ -497,6 +557,7 @@ export class ModelBar {
         item.addEventListener("click", async (e) => {
           e.preventDefault();
           e.stopPropagation();
+          if (!this.allowModelSelection()) return;
           this.closeMenus();
           this.settings.model = m;
           try {
@@ -521,7 +582,10 @@ export class ModelBar {
     // xAI's supported reasoning_effort values (low / medium / high).
     if (usesReasoningEffort(provider.id)) {
       const effortOpts = effortOptionsForProvider(provider.id);
-      const effort = normalizeEffortForProvider(provider.id, this.settings.model_effort);
+      const effort = normalizeEffortForProvider(
+        provider.id,
+        lockedProfile?.effort || this.settings.model_effort,
+      );
       const effortMeta = effortOpts.find((e) => e.id === effort) || effortOpts[effortOpts.length - 1];
       const effortWrap = el("div", { class: "chip-wrap" });
       const isUltra = isUltraEffort(effort);
@@ -538,9 +602,16 @@ export class ModelBar {
           label.textContent = "Ultra";
         }
       }
+      if (modelIsLocked) {
+        effortBtn.disabled = true;
+        effortBtn.classList.add("chip-model-locked");
+        effortBtn.setAttribute("aria-disabled", "true");
+        effortBtn.title = this.modelLockMessage();
+      }
       effortBtn.addEventListener("click", (ev) => {
         ev.preventDefault();
         ev.stopPropagation();
+        if (!this.allowModelSelection()) return;
         if (effortBtn.classList.contains("menu-open")) {
           this.closeMenus();
           return;
@@ -606,6 +677,16 @@ export class ModelBar {
       });
       capWrap.appendChild(capBtn);
       this.providerRail.appendChild(capWrap);
+    }
+
+    if (modelIsLocked) {
+      this.providerRail.appendChild(
+        el("span", {
+          class: "chip-lock-note",
+          role: "status",
+          title: this.modelLockMessage(),
+        }, ["Model locked"]),
+      );
     }
 
     this.statusEl = el("span", { class: "mode-status chip-status" });
@@ -766,6 +847,7 @@ export class ModelBar {
   }
 
   private async selectProvider(id: string) {
+    if (!this.allowModelSelection()) return;
     const p = PROVIDERS.find((x) => x.id === id);
     if (!p) return;
     const selectionGeneration = ++this.providerSelectionGeneration;

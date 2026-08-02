@@ -3,7 +3,7 @@ import { privateTypingStatus } from "./computer-use-hud";
 import { icon } from "./icons";
 import { redactToolArguments, type SessionMessage } from "./session";
 import { ToolArgsStreamDecoder, type ToolArgField } from "./tool-args-stream";
-import { clear, div, el, escapeHtml, formatChatTime, renderMarkdown, setShimmerText } from "./util";
+import { clear, div, el, escapeHtml, formatChatTime, normalizeAssistantMarkdown, renderMarkdown, setShimmerText } from "./util";
 
 type ToolCardEl = { head: HTMLElement; body: HTMLElement; card: HTMLElement };
 type PendingTool = { id: string; name: string; arguments: any };
@@ -3193,6 +3193,25 @@ export class Chat {
     this.scrollToBottom();
   }
 
+  /**
+   * Streaming providers can finish a response with a raw completion payload.
+   * Keep the persisted transcript as readable as the live renderer once the
+   * agent reaches a terminal event.
+   */
+  private normalizeLatestAssistantReply() {
+    const lastAssistant = [...this.messages]
+      .reverse()
+      .find((message): message is Extract<SessionMessage, { type: "assistant" }> => message.type === "assistant");
+    if (!lastAssistant) return;
+    const normalized = normalizeAssistantMarkdown(lastAssistant.text);
+    if (!normalized || normalized === lastAssistant.text) return;
+    lastAssistant.text = normalized;
+    if (this.pendingAssistant) {
+      (this.pendingAssistant as any).__raw = normalized;
+      this.scheduleAssistantPaint(this.pendingAssistant);
+    }
+  }
+
   appendDone(data: {
     summary: string;
     title: string;
@@ -3203,6 +3222,8 @@ export class Chat {
     at?: number;
     workMs?: number;
   }) {
+    this.normalizeLatestAssistantReply();
+    this.flushAssistantPaints();
     this.finalizeThinking();
     this.sealPendingTools("done");
     this.pendingAssistant = null;
@@ -3336,6 +3357,8 @@ export class Chat {
   }
 
   appendEnd(reason: string, at?: number, workMs?: number) {
+    this.normalizeLatestAssistantReply();
+    this.flushAssistantPaints();
     this.finalizeThinking();
     this.sealPendingTools("done");
     // Stamp the last AI chat once the agent is done replying

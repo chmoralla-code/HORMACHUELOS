@@ -237,12 +237,206 @@ function renderMarkdownTables(text: string): string {
   return output.join("\n");
 }
 
+type CompletionField = "title" | "description" | "summary" | "features" | "technology" | "files" | "nextSteps";
+
+function completionField(line: string): { field: CompletionField; value: string } | null {
+  const match = line.match(
+    /^\s*(?:[-*]\s*)?(title|description|summary|result|features?|tech(?:nology|nologies)?|files?|next\s*steps?)\s*:\s*(.*?)\s*$/i,
+  );
+  if (!match) return null;
+  const label = match[1].replace(/\s+/g, "").toLowerCase();
+  const field: CompletionField =
+    label === "title"
+      ? "title"
+      : label === "description"
+        ? "description"
+        : label === "summary" || label === "result"
+          ? "summary"
+          : label.startsWith("feature")
+            ? "features"
+            : label.startsWith("tech")
+              ? "technology"
+              : label.startsWith("file")
+                ? "files"
+                : "nextSteps";
+  return { field, value: match[2].trim() };
+}
+
+function splitInlineCompletionItems(value: string): string[] {
+  return value
+    .split(/\s*(?:[,;]|\s+·\s+)\s*/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function normalizeCompletionBlock(lines: string[]): string[] {
+  const fields = lines.map(completionField).filter(Boolean);
+  // Two labelled fields is enough to distinguish an agent's structured delivery
+  // from an ordinary sentence that happens to contain a colon.
+  if (fields.length < 2) return lines;
+
+  const output: string[] = [];
+  const separate = () => {
+    if (output.length && output[output.length - 1] !== "") output.push("");
+  };
+
+  for (const line of lines) {
+    const entry = completionField(line);
+    if (!entry) {
+      // Models occasionally type a literal "done" before trying to call the
+      // structured completion tool. It adds no user-facing information.
+      if (/^\s*(?:done|complete(?:d)?)\s*[.!]?\s*$/i.test(line)) continue;
+      output.push(line);
+      continue;
+    }
+
+    const value = entry.value;
+    switch (entry.field) {
+      case "title":
+        separate();
+        output.push(`## ${value || "Result"}`);
+        output.push("");
+        break;
+      case "description":
+      case "summary":
+        if (value) {
+          separate();
+          output.push(value);
+          output.push("");
+        }
+        break;
+      case "features":
+      case "nextSteps": {
+        separate();
+        output.push(entry.field === "features" ? "### Highlights" : "### Next steps");
+        const items = splitInlineCompletionItems(value);
+        if (items.length) output.push(...items.map((item) => `- ${item}`));
+        output.push("");
+        break;
+      }
+      case "technology":
+        separate();
+        output.push("### Technology");
+        if (value) output.push(value);
+        output.push("");
+        break;
+      case "files": {
+        separate();
+        output.push("### Files");
+        const files = splitInlineCompletionItems(value);
+        if (files.length) {
+          output.push(
+            ...files.map((file) => `- \`${file.replace(/^`+|`+$/g, "")}\``),
+          );
+        }
+        output.push("");
+        break;
+      }
+    }
+  }
+
+  return output.join("\n").replace(/\n{3,}/g, "\n\n").split("\n");
+}
+
+function trimStructuredPunctuation(value: string): string {
+  return value
+    .trim()
+    .replace(/^[\s`"'\[\]{}(),]+|[\s`"'\[\]{}(),]+$/g, "")
+    .trim();
+}
+
+function standalonePathSeparator(value: string): string {
+  const candidate = trimStructuredPunctuation(value);
+  return /^[./\\]+$/.test(candidate) ? candidate : "";
+}
+
+function looksLikePathPart(value: string): boolean {
+  return /^[a-z0-9_@][a-z0-9_@.-]{0,127}$/i.test(value);
+}
+
+function looksLikePathValue(value: string): boolean {
+  return /^[a-z0-9_@][a-z0-9_@./\\-]{0,255}$/i.test(value);
+}
+
+function isStructuredPunctuationOnly(value: string): boolean {
+  return /^[\s`"'\[\]{}(),;]+$/.test(value);
+}
+
+/**
+ * A few low-cost/free tool-capable models stream function arguments through
+ * their prose channel one token per line. Rejoin only clear file-path shapes
+ * (for example `index`, `.`, `html`), leaving normal prose and all code fences
+ * untouched.
+ */
+function repairFragmentedPaths(lines: string[]): string[] {
+  const output: string[] = [];
+  for (let index = 0; index < lines.length;) {
+    const raw = lines[index];
+    const first = trimStructuredPunctuation(raw);
+    let candidate = first;
+    let cursor = index;
+    let joins = 0;
+
+    while (looksLikePathValue(candidate) && cursor + 2 < lines.length) {
+      const separator = standalonePathSeparator(lines[cursor + 1]);
+      const next = trimStructuredPunctuation(lines[cursor + 2]);
+      if (!separator || !looksLikePathPart(next)) break;
+      candidate += separator + next;
+      cursor += 2;
+      joins += 1;
+    }
+
+    if (joins > 0 && (/[\\/]/.test(candidate) || /\.[a-z0-9]{1,12}$/i.test(candidate))) {
+      const indent = raw.match(/^\s*/)?.[0] || "";
+      output.push(indent + candidate);
+      index = cursor + 1;
+      continue;
+    }
+
+    // A comma/backtick-only line left beside a repaired argument is never
+    // readable user prose. Drop it rather than leaving a vertical punctuation
+    // trail in the final answer.
+    if (isStructuredPunctuationOnly(raw)) {
+      index += 1;
+      continue;
+    }
+    output.push(raw);
+    index += 1;
+  }
+  return output;
+}
+
+function normalizePlainAssistantMarkdown(src: string): string {
+  const withoutToolMarkup = src
+    .replace(/<\s*(?:tool_call|function_call|tool_use)\b[^>]*>[\s\S]*?<\/\s*(?:tool_call|function_call|tool_use)\s*>/gi, "")
+    .replace(/^\s*<\/?\s*(?:tool_call|function_call|tool_use)\b[^>]*>\s*$/gim, "");
+  const lines = repairFragmentedPaths(withoutToolMarkup.split("\n"));
+  return normalizeCompletionBlock(lines).join("\n");
+}
+
+/**
+ * Make an assistant response pleasant to scan without changing meaningful
+ * Markdown. This deliberately skips fenced code blocks, where exact content
+ * matters more than presentation.
+ */
+export function normalizeAssistantMarkdown(src: string): string {
+  if (!src) return "";
+  const normalized = src.replace(/\r\n?/g, "\n").replace(/\u00a0/g, " ");
+  return normalized
+    .split(/(```[\s\S]*?```)/g)
+    .map((segment, index) => (index % 2 === 1 ? segment : normalizePlainAssistantMarkdown(segment)))
+    .join("")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 /**
  * Safe subset markdown → HTML.
  * Escapes all HTML first, then applies only controlled substitutions (no raw HTML passthrough).
  */
 export function renderMarkdown(src: string): string {
   if (!src) return "";
+  src = normalizeAssistantMarkdown(src);
   // Extract fenced code blocks first (protect from other transforms)
   const fences: string[] = [];
   let text = src.replace(/```([\w-]*)\r?\n?([\s\S]*?)```/g, (_m, lang: string, code: string) => {

@@ -1,5 +1,7 @@
 // Session storage and types — persisted to localStorage per project.
 
+import { normalizeAssistantMarkdown } from "./util";
+
 export type SessionMessage =
   | { type: "user"; text: string; at?: number }
   | { type: "thinking"; iteration: number; text: string; at?: number }
@@ -43,6 +45,17 @@ export interface Session {
   sessionTokens?: number;
   /** Per-session build preview, restored only while this session is selected. */
   preview?: SessionPreviewState;
+}
+
+/** Keep a background session's saved reply as tidy as the live chat renderer. */
+function normalizeLatestAssistantMessage(messages: SessionMessage[]): void {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.type !== "assistant") continue;
+    const normalized = normalizeAssistantMarkdown(message.text);
+    if (normalized) message.text = normalized;
+    return;
+  }
 }
 
 /**
@@ -686,12 +699,15 @@ export function recordAgentEvent(
         features: (e.payload.features || []).map(redactChatCredentials),
         at,
       });
+      normalizeLatestAssistantMessage(messages);
       break;
     case "end":
       messages.push({ type: "end", reason: e.payload.reason, at });
+      normalizeLatestAssistantMessage(messages);
       break;
     case "cancelled":
       messages.push({ type: "cancelled", at });
+      normalizeLatestAssistantMessage(messages);
       break;
     case "question":
       messages.push({

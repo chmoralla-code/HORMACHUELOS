@@ -1327,23 +1327,40 @@
 .msg-enter { /* uses slow toolSpawn via shared rule below */ }
 
 /* Markdown in assistant messages */
-.msg-body.md p { margin: 0 0 0.65em; }
+.msg.assistant .msg-body.md {
+  max-width: 900px;
+  text-wrap: pretty;
+  overflow-wrap: anywhere;
+}
+.msg-body.md p { margin: 0 0 0.72em; }
 .msg-body.md p:last-child { margin-bottom: 0; }
 .msg-body.md h1, .msg-body.md h2, .msg-body.md h3,
 .msg-body.md h4, .msg-body.md h5, .msg-body.md h6 {
-  margin: 0.85em 0 0.4em;
+  margin: 1em 0 0.42em;
   font-weight: 600;
   color: var(--fg-0);
   line-height: 1.3;
 }
 .msg-body.md h1 { font-size: 1.25em; }
-.msg-body.md h2 { font-size: 1.12em; }
-.msg-body.md h3 { font-size: 1.05em; }
-.msg-body.md ul.md-list, .msg-body.md ol.md-list {
-  margin: 0.4em 0 0.7em;
-  padding-left: 1.35em;
+.msg-body.md h2 {
+  font-size: 1.12em;
+  padding: 0.55em 0 0.38em;
+  border-bottom: 1px solid rgba(215, 230, 255, 0.15);
+  letter-spacing: 0.01em;
 }
-.msg-body.md li { margin: 0.2em 0; }
+.msg-body.md h2:first-child { margin-top: 0; }
+.msg-body.md h3 {
+  font-size: 0.82em;
+  margin-top: 1.25em;
+  color: rgba(173, 207, 255, 0.88);
+  letter-spacing: 0.075em;
+  text-transform: uppercase;
+}
+.msg-body.md ul.md-list, .msg-body.md ol.md-list {
+  margin: 0.5em 0 0.9em;
+  padding-left: 1.5em;
+}
+.msg-body.md li { margin: 0.28em 0; padding-left: 0.1em; }
 .msg-body.md code.md-inline {
   font-family: var(--font-mono);
   font-size: 0.86em;
@@ -2980,6 +2997,36 @@
   background: rgba(255, 255, 255, 0.1);
   border-color: rgba(255, 255, 255, 0.2);
   color: #fff;
+}
+.chip-btn:disabled,
+.chip-btn.chip-model-locked {
+  cursor: not-allowed;
+  color: rgba(210, 224, 242, 0.62);
+  background: rgba(125, 156, 191, 0.07);
+  border-color: rgba(139, 180, 223, 0.22);
+  box-shadow: inset 0 0 0 1px rgba(104, 163, 219, 0.035);
+  opacity: 0.78;
+}
+.chip-btn.chip-model-locked .chip-caret { display: none; }
+.chip-btn.chip-model-locked::after {
+  content: "locked";
+  margin-left: 1px;
+  color: rgba(151, 202, 255, 0.8);
+  font-family: var(--font-mono);
+  font-size: 8px;
+  letter-spacing: 0.045em;
+  text-transform: uppercase;
+}
+.chip-lock-note {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 5px;
+  color: rgba(151, 202, 255, 0.82);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.035em;
+  white-space: nowrap;
 }
 .chip-btn.chip-icon {
   width: 28px;
