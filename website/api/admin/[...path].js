@@ -20,6 +20,12 @@ import {
   adminSaveHostedProviderConfig,
   adminSaveHostedModelConfig,
 } from "../_lib/hosted-model-configs.js";
+import {
+  approvePaymentOrder,
+  getAdminPaymentOrder,
+  listAdminPaymentOrders,
+  rejectPaymentOrder,
+} from "../_lib/payments.js";
 
 function actionOf(req) {
   const q = req.query?.path;
@@ -57,7 +63,13 @@ export default async function handler(req, res) {
       );
     }
 
-    if (action === "users" || action === "releases" || action === "providers" || action === "models") {
+    if (
+      action === "users" ||
+      action === "releases" ||
+      action === "providers" ||
+      action === "models" ||
+      action === "payments"
+    ) {
       if (!supabaseConfigured()) {
         return json(res, 503, { error: "Admin service not configured" }, req);
       }
@@ -145,6 +157,36 @@ export default async function handler(req, res) {
         if (!body.id) return json(res, 400, { error: "Missing model configuration id" }, req);
         await adminDeleteHostedModelConfig(body.id);
         return json(res, 200, { ok: true }, req);
+      }
+    }
+
+    if (action === "payments") {
+      if (req.method === "GET") {
+        const payments = await listAdminPaymentOrders();
+        return json(res, 200, { ok: true, payments }, req);
+      }
+      if (req.method === "PATCH") {
+        const body = await readJson(req);
+        const orderId = body.orderId || body.order_id || body.id;
+        if (!orderId) return json(res, 400, { error: "Missing payment request ID" }, req);
+        const actionName = String(body.action || "").trim().toLowerCase();
+        if (actionName === "approve") {
+          await approvePaymentOrder(orderId, {
+            actor: "admin:dashboard",
+            requirePassedScan: false,
+          });
+          const payment = await getAdminPaymentOrder(orderId);
+          return json(res, 200, { ok: true, payment }, req);
+        }
+        if (actionName === "reject") {
+          await rejectPaymentOrder(orderId, {
+            actor: "admin:dashboard",
+            reason: body.reason,
+          });
+          const payment = await getAdminPaymentOrder(orderId);
+          return json(res, 200, { ok: true, payment }, req);
+        }
+        return json(res, 400, { error: "Payment action must be approve or reject." }, req);
       }
     }
 

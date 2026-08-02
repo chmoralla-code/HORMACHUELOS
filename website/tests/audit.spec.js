@@ -224,43 +224,121 @@ test.describe("Pricing & checkout", () => {
     }
   });
 
-  test("checkout requires auth then completes GCash demo", async ({ page }) => {
-    const email = uniqueEmail();
-    await page.goto("/#/pricing");
-    await page.getByRole("button", { name: /Choose Pro/i }).first().click();
-    await page.waitForTimeout(400);
-    let hash = await page.evaluate(() => location.hash);
-    if (!hash.includes("signup") && !hash.includes("login") && !hash.includes("checkout")) {
-      note("major", "checkout", "Choose plan did not navigate to signup/checkout", hash);
-    }
-    // If redirected to signup
-    if (hash.includes("signup")) {
-      await page.fill("#su-name", "Buyer");
-      await page.fill("#su-email", email);
-      await page.fill("#su-password", "buyme123");
-      await page.click('button[type="submit"]');
-      await page.waitForTimeout(500);
-      hash = await page.evaluate(() => location.hash);
-    }
+  test("checkout shows the server-priced GCash QR before a proof upload", async ({ page }) => {
+    let uploadedRequest = null;
+    await page.addInitScript(() => {
+      localStorage.setItem(
+        "horma:user",
+        JSON.stringify({ id: "qa-user", email: "buyer@example.test", name: "Buyer", emailVerified: true }),
+      );
+      localStorage.setItem("horma:token", "qa-session-token");
+    });
+    await page.route("**/api/auth/me", async (route) => {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          ok: true,
+          user: { id: "qa-user", email: "buyer@example.test", name: "Buyer", emailVerified: true },
+          orders: [],
+          paymentRequests: [],
+        }),
+      });
+    });
+    await page.route("**/api/payments/create", async (route) => {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          ok: true,
+          order: {
+            id: "7fcf40f7-59ee-4a4e-9d29-53c576c690d9",
+            planId: "pro",
+            planName: "Pro",
+            period: "payg",
+            amountPhp: 999,
+            status: "awaiting_proof",
+            scanStatus: "not_started",
+          },
+          payment: {
+            planId: "pro",
+            planName: "Pro",
+            amountPhp: 999,
+            qrPath: "/images/gcash/gcash-999.png",
+            receiverLabel: "CH*****O M.",
+          },
+        }),
+      });
+    });
+    await page.route("**/api/payments/upload-intent", async (route) => {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          ok: true,
+          order: {
+            id: "7fcf40f7-59ee-4a4e-9d29-53c576c690d9",
+            planId: "pro",
+            planName: "Pro",
+            period: "payg",
+            amountPhp: 999,
+            status: "upload_ready",
+            scanStatus: "upload_ready",
+          },
+          uploadUrl: "https://payment-upload.test/proof.png?token=scoped-upload-token",
+        }),
+      });
+    });
+    await page.route("https://payment-upload.test/**", async (route) => {
+      uploadedRequest = {
+        method: route.request().method(),
+        headers: await route.request().allHeaders(),
+        url: route.request().url(),
+      };
+      await route.fulfill({ status: 200 });
+    });
+    await page.route("**/api/payments/submit", async (route) => {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          ok: true,
+          autoApproved: true,
+          order: {
+            id: "7fcf40f7-59ee-4a4e-9d29-53c576c690d9",
+            planId: "pro",
+            planName: "Pro",
+            period: "payg",
+            amountPhp: 999,
+            status: "approved",
+            scanStatus: "passed",
+            scanConfidence: 0.98,
+            scanSummary: "Receipt passed the configured checks.",
+          },
+        }),
+      });
+    });
 
-    // Should land on checkout (next param)
-    if (!hash.includes("checkout")) {
-      // navigate manually if next failed
-      note("major", "checkout", "After signup from pricing, next did not open checkout", hash);
-      await page.goto("/#/checkout?plan=pro&period=monthly");
-    }
-
-    await expect(page.locator("#main")).toContainText(/Checkout|Order summary|GCash/i);
-    await page.locator('input[value="GCash"]').check();
+    await page.goto("/#/checkout?plan=pro&period=payg");
+    await expect(page.locator("#main")).toContainText(/Checkout|GCash/i);
+    await expect(page.locator("#payment-proof-stage")).toBeHidden();
     await page.click("#pay-btn");
-    await page.waitForTimeout(1200);
-    hash = await page.evaluate(() => location.hash);
-    expect(hash).toMatch(/success/i);
-    await expect(page.locator("#main")).toContainText(/You're in|Payment|plan/i);
-    await page.screenshot({ path: path.join(OUT, "04-success.png"), fullPage: true });
-
-    await page.goto("/#/dashboard");
-    await expect(page.locator("#main")).toContainText(/Pro|Active|order/i);
+    await expect(page.locator("#payment-proof-stage")).toBeVisible();
+    await expect(page.locator("#gcash-amount")).toContainText(/999/);
+    await expect(page.locator("#gcash-qr")).toHaveAttribute("src", /gcash-999\.png/);
+    await expect(page.locator("#submit-payment-proof")).toBeDisabled();
+    await page.screenshot({ path: path.join(OUT, "04-gcash-proof-checkout.png"), fullPage: true });
+    await page.setInputFiles("#payment-proof-input", {
+      name: "receipt.png",
+      mimeType: "image/png",
+      buffer: Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLyaQAAAABJRU5ErkJggg==",
+        "base64",
+      ),
+    });
+    await expect(page.locator("#submit-payment-proof")).toBeEnabled();
+    await page.click("#submit-payment-proof");
+    await expect(page.locator("#payment-result")).toContainText(/Payment approved/i);
+    expect(uploadedRequest?.method).toBe("PUT");
+    expect(uploadedRequest?.url).toContain("token=scoped-upload-token");
+    expect(uploadedRequest?.headers?.["content-type"]).toContain("image/png");
+    expect(uploadedRequest?.headers?.["x-upsert"]).toBe("false");
   });
 });
 

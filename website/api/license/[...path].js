@@ -17,11 +17,13 @@ function actionOf(req) {
   return m ? m[1].toLowerCase() : "";
 }
 
-function issueSecretOk(req, body) {
+function issueSecretOk(req) {
   const expected = process.env.LICENSE_ISSUE_SECRET || "";
-  if (!expected) return true;
+  // License issuance is an internal server action. Never leave a public
+  // fallback that allows a browser to mint a paid license without payment.
+  if (!expected) return false;
   const header = req.headers["x-horma-issue-secret"] || "";
-  return header === expected || body?.issueSecret === expected;
+  return header === expected;
 }
 
 function toStatus(row) {
@@ -65,7 +67,7 @@ export default async function handler(req, res) {
   try {
     if (action === "issue" && req.method === "POST") {
       const body = await readJson(req);
-      if (!issueSecretOk(req, body)) return json(res, 401, { error: "Unauthorized" }, req);
+      if (!issueSecretOk(req)) return json(res, 401, { error: "Unauthorized" }, req);
       const plan = normalizePlan(body.planId || body.plan || "starter");
       const email = String(body.email || "").trim().toLowerCase();
       const prefix = licensePrefix(plan);
