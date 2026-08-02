@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.20";
-const BUILTIN_MSI_SHA256 = "80f0302a71839a86151bb22073d14752b6e67f85a6b7b637d11a6c0aac0b0e71";
-const BUILTIN_EXE_SHA256 = "9b73c848c233d26e625f7df4ef3dddf2b320cce95dbf46d2e8af70bb0d0076c0";
-const BUILTIN_RELEASE_NOTES = "• OpenRouter shows only Free Models Router (openrouter/free)\n• Removed other OpenRouter model choices from the picker";
+const BUILTIN_RELEASE_VERSION = "0.1.21";
+const BUILTIN_MSI_SHA256 = "d04a2cb9a219a4e0ec624df7444c9b3721f95e5583ddcfd7150f5cbbd5b976e7";
+const BUILTIN_EXE_SHA256 = "5a82632f25e3c9deb665e9824e7a70346dba033dec1264f363725f2c04524865";
+const BUILTIN_RELEASE_NOTES = "• OpenRouter Free Models Router no longer requires a local API key with a Hormachuelos plan\n• Model chip shows Free Models Router instead of a raw id";
 
 /**
  * A deployment-bundled release keeps the download/update path available even

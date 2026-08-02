@@ -127,8 +127,9 @@ export const PROVIDERS: ProviderDef[] = [
     defaultModel: "openrouter/free",
     defaultBaseUrl: "https://openrouter.ai/api/v1",
     keyUrl: "https://openrouter.ai/keys",
-    keyRequired: true,
-    // Pinned to Free Models Router only — no other OpenRouter catalog IDs.
+    // Free Models Router uses the Hormachuelos hosted OpenRouter key when a
+    // plan is active. A local key is optional BYOK only.
+    keyRequired: false,
     models: ["openrouter/free"],
   },
   {
@@ -222,14 +223,16 @@ function providerFromHostedCatalog(entry: HostedProviderCatalogEntry): ProviderD
   // expose exactly the aliases approved by the administrator.
   const approvedModels = id === "hormachuelos_free"
     ? uniqueModels([...builtin.models, ...models])
-    : models;
+    : id === "openrouter"
+      ? ["openrouter/free"]
+      : models;
   return {
     ...builtin,
     label,
     // Keep intentionally hidden built-ins out of the picker (xAI, OpenCode).
     hidden: Boolean(builtin.hidden),
     hostedManaged: true,
-    defaultModel: approvedModels[0] || builtin.defaultModel,
+    defaultModel: id === "openrouter" ? "openrouter/free" : (approvedModels[0] || builtin.defaultModel),
     defaultBaseUrl: HOSTED_PROXY_BASE_URL,
     keyUrl: "",
     keyRequired: false,
@@ -461,6 +464,12 @@ export function displayModelName(id: string, providerId?: string): string {
   if (providerId) {
     const hostedName = HOSTED_MODEL_DISPLAY_NAMES.get(hostedModelNameKey(providerId, raw));
     if (hostedName) return hostedName;
+  }
+  if (
+    (providerId === "openrouter" || !providerId) &&
+    (raw === "openrouter/free" || raw.toLowerCase() === "free")
+  ) {
+    return "Free Models Router";
   }
   if (MODEL_DISPLAY_NAMES[raw]) return MODEL_DISPLAY_NAMES[raw];
   const short = raw.includes("/") ? raw.split("/").pop()! : raw;
@@ -720,7 +729,10 @@ export class SettingsModal {
     }).catch(() => null);
     if (!this.modalSessionActive) return;
     for (const p of PROVIDERS) {
-      if (p.keyRequired) {
+      if (p.id === "openrouter") {
+        // Optional BYOK — hosted plans do not need a local OpenRouter key.
+        this.keyStates[p.id] = await api.hasApiKey(p.id).catch(() => false);
+      } else if (p.keyRequired) {
         let has = await api.hasApiKey(p.id).catch(() => false);
         this.keyStates[p.id] = has;
       } else {
@@ -1032,6 +1044,8 @@ export class SettingsModal {
       this.modelDiscoveryMessages[discoveryProvider.id] ||
       (uiIdForKeys === "hormachuelos_free"
         ? "Hormachuelos models are included for signed-in users. No provider key is stored on this computer."
+        : uiIdForKeys === "openrouter"
+        ? "Free Models Router only. An active Hormachuelos plan uses the hosted OpenRouter key — a local key is optional."
         : uiIdForKeys === "xai" && !this.keyStates[uiIdForKeys]
         ? "Paste an xAI key for BYOK, or use a signed-in paid plan with hosted Grok enabled by your administrator."
         : discoveryProvider.hostedManaged
@@ -1061,13 +1075,15 @@ export class SettingsModal {
     body.appendChild(this.section("API Key"));
     const activeProvider = PROVIDERS.find((p) => p.id === this.settings.provider)!;
     const keyRow = el("div", { class: "set-row" });
-    if (activeProvider.keyRequired) {
+    const showKeyField = activeProvider.keyRequired || activeProvider.id === "openrouter";
+    if (showKeyField) {
       const keyLabel = el("label", { class: "label" });
       const providerKeyId = this.nextFieldId();
       keyLabel.setAttribute("for", providerKeyId);
       keyLabel.innerHTML =
         `<img class="provider-card-logo sm" src="${activeProvider.logoSrc}" alt="" width="14" height="14" draggable="false" />` +
-        `&nbsp;${escapeHtml(activeProvider.label)} API key`;
+        `&nbsp;${escapeHtml(activeProvider.label)} API key` +
+        (activeProvider.id === "openrouter" ? " (optional)" : "");
       keyRow.appendChild(keyLabel);
       const inputRow = el("div", { class: "set-key-row" });
       const keyInput = el("input", { id: providerKeyId, class: "field", type: "password", placeholder: "Paste API key", value: "", autocomplete: "off" }) as HTMLInputElement;
@@ -1078,7 +1094,9 @@ export class SettingsModal {
         ? "Key saved in OS keychain"
         : activeProvider.id === "xai"
           ? "No local xAI key — a signed-in paid plan can use hosted Grok"
-          : "No key set — paste a provider key above";
+          : activeProvider.id === "openrouter"
+            ? "No local key needed — Free Models Router uses your Hormachuelos plan"
+            : "No key set — paste a provider key above";
       saveBtn.addEventListener("click", async () => {
         const v = keyInput.value.trim();
         if (!v) return;
@@ -1132,7 +1150,11 @@ export class SettingsModal {
         keyRow.appendChild(clearBtn2);
       }
       if (activeProvider.keyUrl) {
-        keyRow.appendChild(el("div", { class: "set-hint" }, [`Get a key at ${activeProvider.keyUrl}`]));
+        keyRow.appendChild(el("div", { class: "set-hint" }, [
+          activeProvider.id === "openrouter"
+            ? `Optional BYOK at ${activeProvider.keyUrl}. With a Hormachuelos plan, Free Models Router works without a local key.`
+            : `Get a key at ${activeProvider.keyUrl}`,
+        ]));
       }
     } else {
       const note = el("div", { class: "set-hint", style: "padding:8px 10px;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--fg-2)" });

@@ -122,6 +122,10 @@ export type LicenseStatus = {
   blockedBy?: string;
   /** Dev bypass — limits not enforced (debug builds). */
   limitsDisabled?: boolean;
+  /** True when entitlement was verified against the hosted API. */
+  hosted?: boolean;
+  /** Server-issued HORMA-… key used as Bearer for the hosted proxy. */
+  licenseKey?: string;
 };
 
 export const api = {

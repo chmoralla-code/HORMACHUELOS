@@ -1135,12 +1135,46 @@ function openSettings(integrationId?: string) {
 async function refreshProviderReadiness(): Promise<boolean> {
   const settings = await getSettingsSafe();
   const provider = getProviderMeta(settings.provider);
-  let ready = !provider?.keyRequired;
-  if (provider?.keyRequired) {
-    ready = await api.hasApiKey(settings.provider).catch(() => false);
+  const label = displayProviderName(settings.provider);
+  if (!provider) {
+    chat?.setProviderReady(false, label);
+    return false;
   }
-  chat?.setProviderReady(ready, displayProviderName(settings.provider));
-  return ready;
+
+  // Keyless local providers, or hosted-managed aliases, are ready immediately.
+  if (provider.id === "ollama" || provider.hostedManaged) {
+    chat?.setProviderReady(true, label);
+    return true;
+  }
+
+  if (provider.keyRequired) {
+    if (await api.hasApiKey(settings.provider).catch(() => false)) {
+      chat?.setProviderReady(true, label);
+      return true;
+    }
+  } else if (provider.id !== "openrouter") {
+    chat?.setProviderReady(true, label);
+    return true;
+  } else if (await api.hasApiKey("openrouter").catch(() => false)) {
+    chat?.setProviderReady(true, label);
+    return true;
+  }
+
+  // Active Hormachuelos plans proxy OpenRouter (and other cloud providers)
+  // through the hosted API — no local provider key required.
+  if (settings.provider !== "cursor" && settings.provider !== "ollama") {
+    const lic = await api.getLicenseStatus().catch(() => null);
+    const hostedReady = Boolean(
+      lic?.hosted && lic.active && String(lic.licenseKey || "").trim(),
+    );
+    if (hostedReady) {
+      chat?.setProviderReady(true, label);
+      return true;
+    }
+  }
+
+  chat?.setProviderReady(false, label);
+  return false;
 }
 
 async function openGCashTopUp() {
