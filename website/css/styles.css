@@ -899,6 +899,287 @@ button, input, select, textarea {
   font-family: inherit;
 }
 
+/* Provider registry — dense enough for operations, calm enough for review. */
+.admin-provider-intro {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(230px, 0.6fr);
+  gap: 24px;
+  align-items: stretch;
+  margin-bottom: 16px;
+  overflow: hidden;
+  background:
+    linear-gradient(130deg, rgba(255, 255, 255, 0.045), transparent 48%),
+    var(--bg-1);
+}
+
+.admin-provider-intro h2,
+.admin-add-provider-card h3,
+.admin-provider-card h3,
+.admin-model-section h4 {
+  margin: 0;
+  letter-spacing: -0.025em;
+}
+
+.admin-provider-intro > div:first-child > p:last-child {
+  max-width: 68ch;
+  margin: 10px 0 0;
+}
+
+.admin-eyebrow {
+  margin: 0 0 6px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+}
+
+.admin-security-note {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 15px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.admin-security-note > span {
+  color: var(--text-2);
+  line-height: 1.5;
+}
+
+.admin-security-note p {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+
+.admin-add-provider-card {
+  margin-bottom: 16px;
+  border-color: var(--line-strong);
+}
+
+.admin-provider-list {
+  display: grid;
+  gap: 14px;
+}
+
+.admin-provider-card {
+  border: 1px solid var(--line);
+  border-radius: 15px;
+  overflow: hidden;
+  background: var(--bg-1);
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.14);
+}
+
+.admin-provider-head,
+.admin-model-section-head {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.admin-provider-head {
+  padding: 18px 18px 14px;
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.035), transparent 52%);
+}
+
+.admin-provider-head h3 {
+  font-size: 1.06rem;
+}
+
+.admin-provider-head .muted {
+  margin: 3px 0 0;
+}
+
+.admin-provider-status {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  text-align: right;
+}
+
+.admin-state {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.03em;
+}
+
+.admin-state.is-active {
+  border-color: rgba(200, 216, 200, 0.34);
+  color: var(--ok);
+  background: rgba(200, 216, 200, 0.06);
+}
+
+.admin-state.is-paused {
+  border-color: rgba(201, 160, 160, 0.28);
+  color: var(--danger);
+  background: rgba(201, 160, 160, 0.045);
+}
+
+.admin-provider-grid,
+.admin-model-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 14px;
+  padding: 16px 18px 0;
+}
+
+.admin-provider-grid .field,
+.admin-model-grid .field {
+  margin: 0;
+}
+
+.admin-provider-grid .field label,
+.admin-model-grid .field label {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--text-2);
+  font-size: 0.77rem;
+  font-weight: 600;
+}
+
+.admin-provider-grid .field p,
+.admin-model-grid .field p {
+  margin: 5px 0 0;
+  line-height: 1.35;
+}
+
+.admin-provider-grid .field .field,
+.admin-model-grid .field .field {
+  width: 100%;
+}
+
+.admin-provider-endpoint {
+  grid-column: span 2;
+}
+
+.admin-key-field {
+  position: relative;
+}
+
+.admin-key-field::after {
+  content: "server only";
+  position: absolute;
+  top: 0;
+  right: 0;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.admin-toggle-field {
+  align-self: end;
+  min-height: 42px;
+  padding-bottom: 4px;
+}
+
+.admin-provider-actions,
+.admin-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 16px 18px 18px;
+}
+
+.admin-provider-actions {
+  border-bottom: 1px solid var(--line);
+}
+
+.admin-model-section {
+  padding: 18px;
+  background: rgba(0, 0, 0, 0.11);
+}
+
+.admin-model-section-head {
+  margin-bottom: 12px;
+}
+
+.admin-model-section h4 {
+  font-size: 0.96rem;
+}
+
+.admin-model-list {
+  display: grid;
+  gap: 10px;
+}
+
+.admin-model-row {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-2);
+}
+
+.admin-model-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 14px 0;
+  font-size: 0.88rem;
+}
+
+.admin-model-row .admin-model-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  padding: 12px 14px 0;
+}
+
+.admin-model-row .admin-row-actions {
+  padding: 14px;
+}
+
+.admin-empty-models {
+  padding: 14px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.admin-add-model {
+  margin-top: 12px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.018);
+}
+
+.admin-add-model summary {
+  padding: 11px 14px;
+  cursor: pointer;
+  color: var(--text-2);
+  font-size: 0.86rem;
+  font-weight: 600;
+}
+
+.admin-add-model[open] summary {
+  border-bottom: 1px solid var(--line);
+}
+
+.admin-add-model .admin-model-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  padding: 14px 14px 0;
+}
+
+.admin-add-model .admin-row-actions {
+  padding: 14px;
+}
+
 .update-notes {
   line-height: 1.55;
   white-space: normal;
@@ -1301,6 +1582,18 @@ button, input, select, textarea {
     grid-template-columns: 1fr;
   }
 
+  .admin-provider-intro,
+  .admin-provider-grid,
+  .admin-model-grid,
+  .admin-model-row .admin-model-grid,
+  .admin-add-model .admin-model-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-provider-endpoint {
+    grid-column: auto;
+  }
+
   .pricing-grid { max-width: 400px; margin-inline: auto; }
   .nav { display: none; }
   .nav.open {
@@ -1321,6 +1614,29 @@ button, input, select, textarea {
 @media (max-width: 520px) {
   .hero { padding: 48px 0 40px; }
   .header-actions .btn-sm { padding: 0 10px; }
+
+  .admin-provider-head,
+  .admin-model-section-head {
+    flex-direction: column;
+  }
+
+  .admin-provider-status {
+    justify-content: flex-start;
+    text-align: left;
+  }
+
+  .admin-provider-grid,
+  .admin-model-grid,
+  .admin-model-row .admin-model-grid,
+  .admin-add-model .admin-model-grid {
+    padding-inline: 14px;
+  }
+
+  .admin-provider-actions,
+  .admin-row-actions,
+  .admin-model-section {
+    padding-inline: 14px;
+  }
 }
 
 /* ——— Interactive text ——— */

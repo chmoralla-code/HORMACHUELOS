@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.22";
-const BUILTIN_MSI_SHA256 = "cdabc9599d3288ea76fe4eb548a8f980a37cb5dc0b52c066b1e782766c2a228f";
-const BUILTIN_EXE_SHA256 = "1ce14ae7845325b0af9bde4e6556d91f0b2f2852f1036ce16577d5f2a31f0ea9";
-const BUILTIN_RELEASE_NOTES = "Cleaner AI reply formatting with readable completion summaries, plus session-bound controls that lock provider, model, and effort while work is in progress.";
+const BUILTIN_RELEASE_VERSION = "0.1.23";
+const BUILTIN_MSI_SHA256 = "28520f4734067e6cf242e20a96d6144dbc9f09277a9173fd97934089c6a1e49f";
+const BUILTIN_EXE_SHA256 = "6705546620b065d6fba172a41fd300fb71b0b247dcb3faf7426b27e239a897df";
+const BUILTIN_RELEASE_NOTES = "Secure admin provider registry with editable provider names, encrypted default API keys, custom hosted providers, and model alias controls.";
 
 /**
  * A deployment-bundled release keeps the download/update path available even

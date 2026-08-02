@@ -6,9 +6,12 @@ import {
   encryptHostedModelCredential,
 } from "../api/_lib/secret-box.js";
 import {
+  PROVIDER_PROFILE_ALIAS,
   normalizeHostedProviderAlias,
   publicHostedModelConfig,
+  publicHostedProviderConfig,
   publicHostedProviderCatalogFromRoutes,
+  isHostedProviderProfileRow,
 } from "../api/_lib/hosted-model-configs.js";
 
 test("hosted model credentials are encrypted at rest and decrypt only server-side", () => {
@@ -44,6 +47,42 @@ test("admin model responses disclose configuration state but never a credential"
   assert.equal(Object.hasOwn(safe, "api_key_ciphertext"), false);
 });
 
+test("provider profiles keep encrypted keys write-only while exposing editable aliases", () => {
+  const raw = {
+    id: "provider-id",
+    provider_id: "my-neuralwatt",
+    alias: PROVIDER_PROFILE_ALIAS,
+    display_name: "My NeuralWatt",
+    base_url: "https://provider.example/v1",
+    api_key_ciphertext: "horma-secret-v1.private-provider-value",
+    active: true,
+  };
+  const safe = publicHostedProviderConfig(raw, { modelCount: 2 });
+  assert.equal(isHostedProviderProfileRow(raw), true);
+  assert.equal(safe.providerId, "my-neuralwatt");
+  assert.equal(safe.displayName, "My NeuralWatt");
+  assert.equal(safe.keyConfigured, true);
+  assert.equal(safe.modelCount, 2);
+  const encoded = JSON.stringify(safe);
+  assert.equal(encoded.includes("private-provider-value"), false);
+  assert.equal(Object.hasOwn(safe, "apiKey"), false);
+  assert.equal(Object.hasOwn(safe, "api_key_ciphertext"), false);
+
+  const builtInDraft = publicHostedProviderConfig(null, { providerId: "xai" });
+  assert.deepEqual(builtInDraft, {
+    id: null,
+    providerId: "xai",
+    displayName: "xAI",
+    baseUrl: "https://api.x.ai/v1",
+    active: true,
+    keyConfigured: false,
+    profileConfigured: false,
+    modelCount: 0,
+    createdAt: null,
+    updatedAt: null,
+  });
+});
+
 test("custom provider aliases are validated and the desktop catalog remains credential-free", () => {
   assert.equal(normalizeHostedProviderAlias("my-neuralwatt"), "my-neuralwatt");
   assert.throws(() => normalizeHostedProviderAlias("cursor"), /provider alias/i);
@@ -51,6 +90,7 @@ test("custom provider aliases are validated and the desktop catalog remains cred
   const catalog = publicHostedProviderCatalogFromRoutes([
     {
       providerId: "my-neuralwatt",
+      providerDisplayName: "NeuralWatt Studio",
       alias: "deepseek-v4-flash",
       displayName: "DeepSeek V4 Flash",
       upstreamModel: "vendor/private-upstream-id",
@@ -60,7 +100,7 @@ test("custom provider aliases are validated and the desktop catalog remains cred
   ]);
   assert.deepEqual(catalog, [{
     id: "my-neuralwatt",
-    label: "My Neuralwatt",
+    label: "NeuralWatt Studio",
     models: [{ id: "deepseek-v4-flash", label: "DeepSeek V4 Flash" }],
   }]);
   const encoded = JSON.stringify(catalog);

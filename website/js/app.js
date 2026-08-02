@@ -16,17 +16,17 @@ const ASSET_BASE =
 
 /** Desktop installer files (uploaded to Supabase after `npm run desktop:build`). */
 const DESKTOP_DOWNLOADS = {
-  version: "0.1.22",
+  version: "0.1.23",
   windows: {
     msi: {
       label: "Windows installer (MSI)",
-      href: "/downloads/Hormachuelos_0.1.22_x64_en-US.msi",
-      file: "Hormachuelos_0.1.22_x64_en-US.msi",
+      href: "/downloads/Hormachuelos_0.1.23_x64_en-US.msi",
+      file: "Hormachuelos_0.1.23_x64_en-US.msi",
     },
     setup: {
       label: "Windows setup (EXE)",
-      href: "/downloads/Hormachuelos_0.1.22_x64-setup.exe",
-      file: "Hormachuelos_0.1.22_x64-setup.exe",
+      href: "/downloads/Hormachuelos_0.1.23_x64-setup.exe",
+      file: "Hormachuelos_0.1.23_x64-setup.exe",
     },
   },
 };
@@ -1197,7 +1197,7 @@ function renderAdmin() {
       <div class="dash-head">
         <div>
           <h1>Admin</h1>
-          <p class="muted small">Manage registered users, plans, and hosted usage limits.</p>
+          <p class="muted small">Manage users, plans, secure provider credentials, aliases, and software releases.</p>
         </div>
         <div id="admin-actions" style="display:flex;gap:8px;flex-wrap:wrap"></div>
       </div>
@@ -1402,6 +1402,316 @@ function renderAdmin() {
   }
 
   async function paintModels() {
+    root.innerHTML = `<p class="muted">Loading provider registry…</p>`;
+    try {
+      const data = await apiAdmin("/api/admin/providers");
+      const providers = Array.isArray(data.providers) ? data.providers : [];
+      const configs = Array.isArray(data.configs) ? data.configs : [];
+      const modelsByProvider = new Map();
+      for (const config of configs) {
+        const providerId = String(config.providerId || "").trim().toLowerCase();
+        const items = modelsByProvider.get(providerId) || [];
+        items.push(config);
+        modelsByProvider.set(providerId, items);
+      }
+
+      const storageWarning = data.credentialStorageReady
+        ? ""
+        : `<div class="alert warn">Credential encryption is not configured on the server. Set <code>HORMACHUELOS_MODEL_CONFIG_KEY</code> before saving a provider or model API key.</div>`;
+
+      const modelRow = (model, provider) => {
+        const inheritedEndpoint = !String(model.baseUrl || "").trim();
+        const keyStatus = model.keyConfigured
+          ? "Route-specific key saved"
+          : provider.keyConfigured
+            ? "Uses the provider default key"
+            : "No key configured";
+        return `<div class="admin-model-row" data-model-id="${escapeHtml(model.id)}" data-provider-id="${escapeHtml(provider.providerId)}">
+          <div class="admin-model-row-head">
+            <strong>${escapeHtml(model.displayName || model.alias)}</strong>
+            <span class="admin-state ${model.active ? "is-active" : "is-paused"}">${model.active ? "Active" : "Paused"}</span>
+          </div>
+          <div class="admin-model-grid">
+            <div class="field"><label>Model alias shown in app</label><input class="field admin-model-alias mono" value="${escapeHtml(model.alias)}" maxlength="81" pattern="[a-z0-9][a-z0-9._-]*" required /></div>
+            <div class="field"><label>Model display name</label><input class="field admin-model-name" value="${escapeHtml(model.displayName)}" maxlength="120" required /></div>
+            <div class="field"><label>Upstream model ID</label><input class="field admin-model-upstream mono" value="${escapeHtml(model.upstreamModel)}" maxlength="200" required /></div>
+            <div class="field"><label>Endpoint override <span class="muted">(optional)</span></label><input class="field admin-model-base mono" type="url" value="${escapeHtml(model.baseUrl || "")}" maxlength="400" placeholder="${inheritedEndpoint ? "Uses provider endpoint" : "https://provider.example/v1"}" /><p class="muted small">${inheritedEndpoint ? "Inherited from provider" : "This model overrides the provider endpoint"}</p></div>
+            <div class="field admin-key-field"><label>Route API key override <span class="muted">(optional)</span></label><input class="field admin-model-key" type="password" autocomplete="new-password" placeholder="${model.keyConfigured ? "•••••••• (leave blank to keep)" : "Use provider key"}" /><p class="muted small">${keyStatus}</p></div>
+            <label class="admin-active admin-toggle-field"><input type="checkbox" class="admin-model-active" ${model.active ? "checked" : ""} /> Model active</label>
+          </div>
+          <div class="admin-row-actions">
+            <button type="button" class="btn btn-sm btn-primary admin-model-save">Save alias</button>
+            <button type="button" class="btn btn-sm admin-model-clear" ${model.keyConfigured ? "" : "disabled"}>Clear route key</button>
+            <button type="button" class="btn btn-sm danger admin-model-delete">Delete alias</button>
+          </div>
+        </div>`;
+      };
+
+      const addModelForm = (provider) => `<details class="admin-add-model">
+        <summary>Add a model alias to this provider</summary>
+        <form class="admin-model-add-form" data-provider-id="${escapeHtml(provider.providerId)}">
+          <div class="admin-model-grid">
+            <div class="field"><label>Model alias shown in app</label><input class="field new-model-alias mono" required maxlength="81" placeholder="my-model-fast" pattern="[a-z0-9][a-z0-9._-]*" /></div>
+            <div class="field"><label>Model display name</label><input class="field new-model-name" required maxlength="120" placeholder="My Model Fast" /></div>
+            <div class="field"><label>Upstream model ID</label><input class="field new-model-upstream mono" required maxlength="200" placeholder="grok-4.5" /></div>
+            <div class="field"><label>Endpoint override <span class="muted">(optional)</span></label><input class="field new-model-base mono" type="url" maxlength="400" placeholder="Uses provider endpoint" /></div>
+            <div class="field admin-key-field"><label>Route API key override <span class="muted">(optional)</span></label><input class="field new-model-key" type="password" autocomplete="new-password" placeholder="Uses provider key" /></div>
+            <label class="admin-active admin-toggle-field"><input type="checkbox" class="new-model-active" checked /> Model active</label>
+          </div>
+          <div class="admin-row-actions"><button type="submit" class="btn btn-sm btn-primary">Add model alias</button></div>
+        </form>
+      </details>`;
+
+      const providerCards = providers.map((provider) => {
+        const models = (modelsByProvider.get(provider.providerId) || [])
+          .slice()
+          .sort((left, right) => String(left.displayName).localeCompare(String(right.displayName)));
+        const keyStatus = provider.keyConfigured ? "Default key configured" : "No default key";
+        const modelSummary = `${models.length} model alias${models.length === 1 ? "" : "es"}`;
+        return `<article class="admin-provider-card" data-provider-id="${escapeHtml(provider.providerId)}" data-profile-id="${escapeHtml(provider.id || "")}" data-profile-configured="${provider.profileConfigured ? "true" : "false"}" data-model-count="${String(models.length)}">
+          <header class="admin-provider-head">
+            <div>
+              <p class="admin-eyebrow">Provider configuration</p>
+              <h3>${escapeHtml(provider.displayName)}</h3>
+              <p class="muted small mono">${escapeHtml(provider.providerId)}</p>
+            </div>
+            <div class="admin-provider-status"><span class="admin-state ${provider.active ? "is-active" : "is-paused"}">${provider.active ? "Active" : "Paused"}</span><span class="muted small">${escapeHtml(modelSummary)}</span></div>
+          </header>
+          <div class="admin-provider-grid">
+            <div class="field"><label>Provider ID</label><input class="field mono admin-provider-id" value="${escapeHtml(provider.providerId)}" readonly aria-readonly="true" /><p class="muted small">Stable technical ID</p></div>
+            <div class="field"><label>Provider alias shown in app</label><input class="field admin-provider-name" value="${escapeHtml(provider.displayName)}" maxlength="120" required /></div>
+            <div class="field admin-provider-endpoint"><label>Default HTTPS endpoint</label><input class="field mono admin-provider-base" type="url" value="${escapeHtml(provider.baseUrl)}" maxlength="400" required /><p class="muted small">OpenAI-compatible chat-completions endpoint</p></div>
+            <div class="field admin-key-field"><label>Default server API key</label><input class="field admin-provider-key" type="password" autocomplete="new-password" placeholder="${provider.keyConfigured ? "•••••••• (leave blank to keep)" : "Paste a provider key"}" /><p class="muted small">${keyStatus}. It applies to aliases without a route-specific override.</p></div>
+            <label class="admin-active admin-toggle-field"><input type="checkbox" class="admin-provider-active" ${provider.active ? "checked" : ""} /> Provider active</label>
+          </div>
+          <div class="admin-provider-actions">
+            <button type="button" class="btn btn-sm btn-primary admin-provider-save">${provider.profileConfigured ? "Save provider" : "Configure provider"}</button>
+            <button type="button" class="btn btn-sm admin-provider-clear" ${provider.keyConfigured ? "" : "disabled"}>Clear default key</button>
+            ${provider.profileConfigured && models.length === 0 ? `<button type="button" class="btn btn-sm danger admin-provider-delete">Remove provider</button>` : ""}
+          </div>
+          <section class="admin-model-section">
+            <div class="admin-model-section-head"><div><p class="admin-eyebrow">Model aliases</p><h4>Models available under ${escapeHtml(provider.displayName)}</h4></div><span class="muted small">${escapeHtml(modelSummary)}</span></div>
+            ${models.length ? `<div class="admin-model-list">${models.map((model) => modelRow(model, provider)).join("")}</div>` : `<div class="admin-empty-models">No model aliases yet. Configure the provider, then add the first alias below.</div>`}
+            ${addModelForm(provider)}
+          </section>
+        </article>`;
+      }).join("");
+
+      root.innerHTML = `
+        <section class="admin-provider-intro card">
+          <div>
+            <p class="admin-eyebrow">Secure provider registry</p>
+            <h2>Provider keys, names, and model aliases</h2>
+            <p class="muted">Every API key is write-only and encrypted before it reaches storage. Set a provider default once, override an individual model only when that model needs a different credential, and control the names clients see in the desktop picker.</p>
+          </div>
+          <div class="admin-security-note"><span aria-hidden="true">◆</span><p><strong>Keys never leave the server.</strong> The dashboard only reports whether a key is configured; it never displays the saved value.</p></div>
+        </section>
+        ${storageWarning}
+        <section class="admin-add-provider-card card">
+          <div class="admin-model-section-head"><div><p class="admin-eyebrow">Create provider</p><h3>Add a custom hosted provider</h3></div><span class="muted small">Use an OpenAI-compatible endpoint</span></div>
+          <form id="admin-provider-new-form">
+            <div class="admin-provider-grid">
+              <div class="field"><label>Provider ID</label><input class="field mono" id="new-provider-id" required maxlength="49" placeholder="my-provider" pattern="[a-z][a-z0-9_-]*" /><p class="muted small">Lowercase letters, numbers, dashes, or underscores</p></div>
+              <div class="field"><label>Provider alias shown in app</label><input class="field" id="new-provider-name" required maxlength="120" placeholder="My Provider" /></div>
+              <div class="field admin-provider-endpoint"><label>Default HTTPS endpoint</label><input class="field mono" id="new-provider-base" required type="url" maxlength="400" placeholder="https://provider.example/v1" /></div>
+              <div class="field admin-key-field"><label>Default server API key</label><input class="field" id="new-provider-key" type="password" autocomplete="new-password" placeholder="Paste a provider key" /><p class="muted small">You can add the provider first and save the key later.</p></div>
+              <label class="admin-active admin-toggle-field"><input type="checkbox" id="new-provider-active" checked /> Provider active</label>
+            </div>
+            <div class="admin-row-actions"><button class="btn btn-primary" type="submit">Add provider</button></div>
+          </form>
+        </section>
+        <div class="admin-provider-list">${providerCards}</div>`;
+
+      const providerFields = (card) => ({
+        id: card.getAttribute("data-profile-id") || undefined,
+        providerId: card.getAttribute("data-provider-id"),
+        displayName: card.querySelector(".admin-provider-name").value.trim(),
+        baseUrl: card.querySelector(".admin-provider-base").value.trim(),
+        active: card.querySelector(".admin-provider-active").checked,
+      });
+
+      root.querySelectorAll(".admin-provider-card").forEach((card) => {
+        const save = card.querySelector(".admin-provider-save");
+        const clear = card.querySelector(".admin-provider-clear");
+        const remove = card.querySelector(".admin-provider-delete");
+        save?.addEventListener("click", async () => {
+          const key = card.querySelector(".admin-provider-key").value.trim();
+          save.disabled = true;
+          save.textContent = "Saving…";
+          try {
+            const body = providerFields(card);
+            if (key) body.apiKey = key;
+            await apiAdmin("/api/admin/providers", {
+              method: card.getAttribute("data-profile-configured") === "true" ? "PATCH" : "POST",
+              body,
+            });
+            toast("Provider saved securely");
+            await paintAdmin("models");
+          } catch (ex) {
+            toast(String(ex.message || ex));
+            save.disabled = false;
+            save.textContent = card.getAttribute("data-profile-configured") === "true" ? "Save provider" : "Configure provider";
+          }
+        });
+        clear?.addEventListener("click", async () => {
+          if (!confirm("Clear this provider's default API key? Aliases with a route-specific key will continue to work.")) return;
+          clear.disabled = true;
+          try {
+            await apiAdmin("/api/admin/providers", {
+              method: "PATCH",
+              body: { ...providerFields(card), clearApiKey: true },
+            });
+            toast("Provider default key cleared");
+            await paintAdmin("models");
+          } catch (ex) {
+            toast(String(ex.message || ex));
+            clear.disabled = false;
+          }
+        });
+        remove?.addEventListener("click", async () => {
+          const providerName = card.querySelector(".admin-provider-name").value.trim() || "this provider";
+          if (!confirm(`Remove ${providerName}? It has no model aliases, so this only removes its saved provider configuration.`)) return;
+          remove.disabled = true;
+          try {
+            await apiAdmin("/api/admin/providers", {
+              method: "DELETE",
+              body: { providerId: card.getAttribute("data-provider-id") },
+            });
+            toast("Provider removed");
+            await paintAdmin("models");
+          } catch (ex) {
+            toast(String(ex.message || ex));
+            remove.disabled = false;
+          }
+        });
+      });
+
+      const modelFields = (row) => ({
+        id: row.getAttribute("data-model-id"),
+        providerId: row.getAttribute("data-provider-id"),
+        alias: row.querySelector(".admin-model-alias").value.trim(),
+        displayName: row.querySelector(".admin-model-name").value.trim(),
+        upstreamModel: row.querySelector(".admin-model-upstream").value.trim(),
+        baseUrl: row.querySelector(".admin-model-base").value.trim(),
+        active: row.querySelector(".admin-model-active").checked,
+      });
+
+      root.querySelectorAll(".admin-model-row").forEach((row) => {
+        const save = row.querySelector(".admin-model-save");
+        const clear = row.querySelector(".admin-model-clear");
+        const remove = row.querySelector(".admin-model-delete");
+        save.addEventListener("click", async () => {
+          const key = row.querySelector(".admin-model-key").value.trim();
+          save.disabled = true;
+          save.textContent = "Saving…";
+          try {
+            const body = modelFields(row);
+            if (key) body.apiKey = key;
+            await apiAdmin("/api/admin/models", { method: "PATCH", body });
+            toast("Model alias saved");
+            await paintAdmin("models");
+          } catch (ex) {
+            toast(String(ex.message || ex));
+            save.disabled = false;
+            save.textContent = "Save alias";
+          }
+        });
+        clear.addEventListener("click", async () => {
+          if (!confirm("Clear this route-specific API key? The model will use the provider default key if one is configured.")) return;
+          clear.disabled = true;
+          try {
+            await apiAdmin("/api/admin/models", {
+              method: "PATCH",
+              body: { ...modelFields(row), clearApiKey: true },
+            });
+            toast("Route key cleared");
+            await paintAdmin("models");
+          } catch (ex) {
+            toast(String(ex.message || ex));
+            clear.disabled = false;
+          }
+        });
+        remove.addEventListener("click", async () => {
+          const modelName = row.querySelector(".admin-model-name").value.trim() || "this model alias";
+          if (!confirm(`Delete ${modelName}? It will no longer appear in the desktop app.`)) return;
+          remove.disabled = true;
+          try {
+            await apiAdmin("/api/admin/models", {
+              method: "DELETE",
+              body: { id: row.getAttribute("data-model-id") },
+            });
+            toast("Model alias deleted");
+            await paintAdmin("models");
+          } catch (ex) {
+            toast(String(ex.message || ex));
+            remove.disabled = false;
+          }
+        });
+      });
+
+      root.querySelectorAll(".admin-model-add-form").forEach((form) => {
+        form.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          const btn = form.querySelector('button[type="submit"]');
+          btn.disabled = true;
+          btn.textContent = "Adding…";
+          try {
+            const key = form.querySelector(".new-model-key").value.trim();
+            const body = {
+              providerId: form.getAttribute("data-provider-id"),
+              alias: form.querySelector(".new-model-alias").value.trim(),
+              displayName: form.querySelector(".new-model-name").value.trim(),
+              upstreamModel: form.querySelector(".new-model-upstream").value.trim(),
+              baseUrl: form.querySelector(".new-model-base").value.trim(),
+              active: form.querySelector(".new-model-active").checked,
+            };
+            if (key) body.apiKey = key;
+            await apiAdmin("/api/admin/models", { method: "POST", body });
+            toast("Model alias added");
+            await paintAdmin("models");
+          } catch (ex) {
+            toast(String(ex.message || ex));
+            btn.disabled = false;
+            btn.textContent = "Add model alias";
+          }
+        });
+      });
+
+      root.querySelector("#admin-provider-new-form").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const form = event.currentTarget;
+        const btn = form.querySelector('button[type="submit"]');
+        btn.disabled = true;
+        btn.textContent = "Adding…";
+        try {
+          const key = root.querySelector("#new-provider-key").value.trim();
+          const body = {
+            providerId: root.querySelector("#new-provider-id").value.trim(),
+            displayName: root.querySelector("#new-provider-name").value.trim(),
+            baseUrl: root.querySelector("#new-provider-base").value.trim(),
+            active: root.querySelector("#new-provider-active").checked,
+          };
+          if (key) body.apiKey = key;
+          await apiAdmin("/api/admin/providers", { method: "POST", body });
+          toast("Custom provider added securely");
+          await paintAdmin("models");
+        } catch (ex) {
+          toast(String(ex.message || ex));
+          btn.disabled = false;
+          btn.textContent = "Add provider";
+        }
+      });
+    } catch (ex) {
+      if (String(ex.message || "").toLowerCase().includes("admin")) {
+        setAdminToken("");
+        paintLogin();
+        return;
+      }
+      root.innerHTML = `<div class="alert warn">${escapeHtml(String(ex.message || ex))}</div>`;
+    }
+  }
+
+  async function paintLegacyModels() {
     root.innerHTML = `<p class="muted">Loading hosted models…</p>`;
     try {
       const data = await apiAdmin("/api/admin/models");

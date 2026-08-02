@@ -13,8 +13,11 @@ import {
   adminSetForceUpdate,
 } from "../_lib/releases.js";
 import {
+  adminDeleteHostedProviderConfig,
+  adminListHostedProviderConfigs,
   adminDeleteHostedModelConfig,
   adminListHostedModelConfigs,
+  adminSaveHostedProviderConfig,
   adminSaveHostedModelConfig,
 } from "../_lib/hosted-model-configs.js";
 
@@ -54,7 +57,7 @@ export default async function handler(req, res) {
       );
     }
 
-    if (action === "users" || action === "releases" || action === "models") {
+    if (action === "users" || action === "releases" || action === "providers" || action === "models") {
       if (!supabaseConfigured()) {
         return json(res, 503, { error: "Admin service not configured" }, req);
       }
@@ -107,6 +110,24 @@ export default async function handler(req, res) {
         }
         const release = await adminPublishRelease({ ...body, version: body.version });
         return json(res, 200, { ok: true, release }, req);
+      }
+    }
+
+    if (action === "providers") {
+      if (req.method === "GET") {
+        return json(res, 200, { ok: true, ...(await adminListHostedProviderConfigs()) }, req);
+      }
+      if (req.method === "POST" || req.method === "PATCH") {
+        const body = await readJson(req);
+        const provider = await adminSaveHostedProviderConfig(body);
+        return json(res, req.method === "POST" ? 201 : 200, { ok: true, provider }, req);
+      }
+      if (req.method === "DELETE") {
+        const body = await readJson(req);
+        const providerId = body.providerId || body.provider_id;
+        if (!providerId) return json(res, 400, { error: "Missing provider ID" }, req);
+        await adminDeleteHostedProviderConfig(providerId);
+        return json(res, 200, { ok: true }, req);
       }
     }
 

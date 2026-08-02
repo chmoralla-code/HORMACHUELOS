@@ -15,6 +15,11 @@ import {
 
 export const HORMACHUELOS_FREE_PROVIDER = "hormachuelos_free";
 export const XAI_PROVIDER = "xai";
+// A provider profile is stored alongside model aliases in the existing
+// encrypted, service-role-only table. Keeping it in the same protected store
+// means a dashboard upgrade does not require a public schema change before an
+// administrator can safely manage providers and their keys.
+export const PROVIDER_PROFILE_ALIAS = "hormachuelos-provider-profile-v1";
 
 /**
  * Built-in provider ids that can be managed from the admin dashboard. They
@@ -42,6 +47,24 @@ const ALIAS_RE = /^[a-z0-9][a-z0-9._-]{0,80}$/;
 let routeCache = null;
 let routeCacheAt = 0;
 const CACHE_MS = 10_000;
+
+const PROVIDER_DEFAULTS = Object.freeze({
+  [HORMACHUELOS_FREE_PROVIDER]: {
+    displayName: "HORMACHUELOS FREE",
+    baseUrl: "https://api.neuralwatt.com/v1",
+  },
+  [XAI_PROVIDER]: { displayName: "xAI", baseUrl: "https://api.x.ai/v1" },
+  openai: { displayName: "OpenAI", baseUrl: "https://api.openai.com/v1" },
+  deepseek: { displayName: "DeepSeek", baseUrl: "https://api.deepseek.com/v1" },
+  openrouter: { displayName: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1" },
+  glm: { displayName: "OpenCode", baseUrl: "https://open.bigmodel.cn/api/paas/v4" },
+  pollinations: { displayName: "Pollinations", baseUrl: "https://gen.pollinations.ai/v1" },
+  // These hosted routes need an OpenAI-compatible upstream proxy. The default
+  // points at the existing OpenRouter-compatible path, but an administrator
+  // can set a different compatible endpoint in the dashboard.
+  anthropic: { displayName: "Anthropic", baseUrl: "https://openrouter.ai/api/v1" },
+  gemini: { displayName: "Gemini", baseUrl: "https://openrouter.ai/api/v1" },
+});
 
 function inputText(value, label, maxLength) {
   const text = String(value || "").trim();
@@ -80,6 +103,11 @@ function validHostedBaseUrl(value) {
   return url.toString().replace(/\/$/, "");
 }
 
+function optionalHostedBaseUrl(value) {
+  const raw = String(value || "").trim();
+  return raw ? validHostedBaseUrl(raw) : "";
+}
+
 export function isHostedProviderAlias(value) {
   const provider = String(value || "").trim().toLowerCase();
   return PROVIDER_ALIAS_RE.test(provider) && !LOCAL_ONLY_PROVIDERS.has(provider);
@@ -114,14 +142,42 @@ function normalizeAlias(value) {
   return alias;
 }
 
+export function isHostedProviderProfileRow(row) {
+  return String(row?.alias || "").trim().toLowerCase() === PROVIDER_PROFILE_ALIAS;
+}
+
 function normalizeConfig(body) {
+  const alias = normalizeAlias(body.alias);
+  if (alias === PROVIDER_PROFILE_ALIAS) {
+    throw Object.assign(new Error("That model alias is reserved for a provider profile."), {
+      status: 400,
+    });
+  }
   return {
     provider_id: normalizeProvider(body.providerId || body.provider_id),
-    alias: normalizeAlias(body.alias),
+    alias,
     display_name: inputText(body.displayName || body.display_name, "Display name", 120),
     upstream_model: inputText(body.upstreamModel || body.upstream_model, "Upstream model", 200),
-    base_url: validHostedBaseUrl(body.baseUrl || body.base_url),
+    // A model can inherit the provider profile endpoint. Existing records keep
+    // their own endpoint and therefore continue to work unchanged.
+    base_url: optionalHostedBaseUrl(body.baseUrl || body.base_url),
     active: body.active !== false,
+  };
+}
+
+function normalizeProviderProfile(body) {
+  const provider_id = normalizeProvider(body?.providerId || body?.provider_id);
+  return {
+    provider_id,
+    display_name: inputText(
+      body?.displayName || body?.display_name || hostedProviderDefaultProfile(provider_id).displayName,
+      "Provider display name",
+      120,
+    ),
+    base_url: validHostedBaseUrl(
+      body?.baseUrl || body?.base_url || hostedProviderDefaultProfile(provider_id).baseUrl,
+    ),
+    active: body?.active !== false,
   };
 }
 
@@ -139,6 +195,24 @@ export function publicHostedModelConfig(row) {
     keyConfigured: Boolean(String(row.api_key_ciphertext || "").trim()),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+/** Public-safe provider profile. Credentials are write-only and never serialized. */
+export function publicHostedProviderConfig(row, { modelCount = 0, providerId: fallbackProviderId = "" } = {}) {
+  const providerId = String(row?.provider_id || fallbackProviderId || "").trim().toLowerCase();
+  const defaults = hostedProviderDefaultProfile(providerId);
+  return {
+    id: row?.id || null,
+    providerId,
+    displayName: String(row?.display_name || defaults.displayName),
+    baseUrl: String(row?.base_url || defaults.baseUrl),
+    active: row ? Boolean(row.active) : true,
+    keyConfigured: Boolean(String(row?.api_key_ciphertext || "").trim()),
+    profileConfigured: Boolean(row),
+    modelCount: Math.max(0, Number(modelCount) || 0),
+    createdAt: row?.created_at || null,
+    updatedAt: row?.updated_at || null,
   };
 }
 
@@ -165,6 +239,18 @@ export function hostedProviderDisplayName(providerId) {
     .join(" ") || "Hosted provider";
 }
 
+/** Defaults used only to prefill a dashboard profile; no credential is implied. */
+export function hostedProviderDefaultProfile(providerId) {
+  const provider = String(providerId || "").trim().toLowerCase();
+  const known = PROVIDER_DEFAULTS[provider];
+  return {
+    providerId: provider,
+    displayName: known?.displayName || hostedProviderDisplayName(provider),
+    baseUrl: known?.baseUrl || "",
+    active: true,
+  };
+}
+
 /** Options shown by the dashboard before it has any custom provider rows. */
 export function hostedProviderOptions() {
   return BUILTIN_HOSTED_PROVIDERS.map((id) => ({ id, label: hostedProviderDisplayName(id) }));
@@ -177,21 +263,56 @@ export function invalidateHostedModelRouteCache() {
 
 export async function adminListHostedModelConfigs() {
   const rows = await listHostedModelConfigs();
+  const modelRows = rows.filter((row) => !isHostedProviderProfileRow(row));
   return {
     credentialStorageReady: hostedModelCredentialStorageReady(),
     providerOptions: hostedProviderOptions(),
-    configs: rows.map(publicHostedModelConfig),
+    configs: modelRows.map(publicHostedModelConfig),
   };
 }
 
-export async function adminSaveHostedModelConfig(body) {
-  const input = normalizeConfig(body || {});
-  const id = String(body?.id || "").trim();
+/**
+ * The provider registry powers the admin dashboard. Profiles have a writable
+ * label, endpoint, activation state, and default encrypted credential; model
+ * aliases under the provider may optionally carry their own key override.
+ */
+export async function adminListHostedProviderConfigs() {
+  const rows = await listHostedModelConfigs();
+  const profileRows = rows.filter(isHostedProviderProfileRow);
+  const modelRows = rows.filter((row) => !isHostedProviderProfileRow(row));
+  const profileByProvider = new Map(
+    profileRows.map((row) => [String(row.provider_id || "").trim().toLowerCase(), row]),
+  );
+  const modelCountByProvider = new Map();
+  for (const row of modelRows) {
+    const provider = String(row.provider_id || "").trim().toLowerCase();
+    modelCountByProvider.set(provider, (modelCountByProvider.get(provider) || 0) + 1);
+  }
+  const providerIds = new Set([
+    ...BUILTIN_HOSTED_PROVIDERS,
+    ...profileByProvider.keys(),
+    ...modelCountByProvider.keys(),
+  ]);
+  const providers = [...providerIds]
+    .filter(Boolean)
+    .map((providerId) => publicHostedProviderConfig(profileByProvider.get(providerId), {
+      modelCount: modelCountByProvider.get(providerId) || 0,
+      providerId,
+    }))
+    .sort((left, right) => left.displayName.localeCompare(right.displayName));
+  return {
+    credentialStorageReady: hostedModelCredentialStorageReady(),
+    providerOptions: providers.map(({ providerId, displayName }) => ({ id: providerId, label: displayName })),
+    providers,
+    configs: modelRows.map(publicHostedModelConfig),
+  };
+}
+
+function applyCredentialChange(body, patch) {
   const replaceCredential = Object.prototype.hasOwnProperty.call(body || {}, "apiKey") ||
     Object.prototype.hasOwnProperty.call(body || {}, "api_key");
   const clearCredential = body?.clearApiKey === true || body?.clear_api_key === true;
   const rawCredential = String(body?.apiKey ?? body?.api_key ?? "").trim();
-
   if (clearCredential && rawCredential) {
     throw Object.assign(new Error("Choose either a replacement key or clear the existing key."), {
       status: 400,
@@ -200,21 +321,32 @@ export async function adminSaveHostedModelConfig(body) {
   if (replaceCredential && rawCredential.length > 4096) {
     throw Object.assign(new Error("API key is too long."), { status: 400 });
   }
-
-  let existing = null;
-  if (id) {
-    existing = await getHostedModelConfigById(id);
-    if (!existing) throw Object.assign(new Error("Hosted model configuration not found."), { status: 404 });
-  } else {
-    existing = await getHostedModelConfig(input.provider_id, input.alias);
-  }
-
-  const patch = { ...input };
   if (clearCredential) {
     patch.api_key_ciphertext = "";
   } else if (replaceCredential && rawCredential) {
     patch.api_key_ciphertext = encryptHostedModelCredential(rawCredential);
   }
+}
+
+export async function adminSaveHostedModelConfig(body) {
+  const input = normalizeConfig(body || {});
+  const id = String(body?.id || "").trim();
+
+  let existing = null;
+  if (id) {
+    existing = await getHostedModelConfigById(id);
+    if (!existing) throw Object.assign(new Error("Hosted model configuration not found."), { status: 404 });
+    if (isHostedProviderProfileRow(existing)) {
+      throw Object.assign(new Error("Use the provider controls to edit a provider profile."), {
+        status: 400,
+      });
+    }
+  } else {
+    existing = await getHostedModelConfig(input.provider_id, input.alias);
+  }
+
+  const patch = { ...input };
+  applyCredentialChange(body, patch);
 
   const saved = existing
     ? await updateHostedModelConfig(existing.id, patch)
@@ -223,9 +355,64 @@ export async function adminSaveHostedModelConfig(body) {
   return publicHostedModelConfig(saved);
 }
 
+export async function adminSaveHostedProviderConfig(body) {
+  const input = normalizeProviderProfile(body || {});
+  const id = String(body?.id || "").trim();
+  let existing = null;
+  if (id) {
+    existing = await getHostedModelConfigById(id);
+    if (!existing || !isHostedProviderProfileRow(existing)) {
+      throw Object.assign(new Error("Hosted provider configuration not found."), { status: 404 });
+    }
+    if (String(existing.provider_id || "").trim().toLowerCase() !== input.provider_id) {
+      throw Object.assign(
+        new Error("Provider ID is stable after creation. Create a new provider ID and move model aliases deliberately."),
+        { status: 409 },
+      );
+    }
+  } else {
+    existing = await getHostedModelConfig(input.provider_id, PROVIDER_PROFILE_ALIAS);
+  }
+
+  const patch = {
+    ...input,
+    alias: PROVIDER_PROFILE_ALIAS,
+    upstream_model: PROVIDER_PROFILE_ALIAS,
+  };
+  applyCredentialChange(body, patch);
+  const saved = existing
+    ? await updateHostedModelConfig(existing.id, patch)
+    : await insertHostedModelConfig({ ...patch, api_key_ciphertext: patch.api_key_ciphertext || "" });
+  invalidateHostedModelRouteCache();
+  return publicHostedProviderConfig(saved);
+}
+
+export async function adminDeleteHostedProviderConfig(providerId) {
+  const provider = normalizeProvider(providerId);
+  const rows = await listHostedModelConfigs();
+  const models = rows.filter(
+    (row) => String(row.provider_id || "").trim().toLowerCase() === provider && !isHostedProviderProfileRow(row),
+  );
+  if (models.length) {
+    throw Object.assign(
+      new Error("Delete or move this provider's model aliases before removing its provider profile."),
+      { status: 409 },
+    );
+  }
+  const profile = rows.find(
+    (row) => String(row.provider_id || "").trim().toLowerCase() === provider && isHostedProviderProfileRow(row),
+  );
+  if (!profile) throw Object.assign(new Error("Hosted provider configuration not found."), { status: 404 });
+  await deleteHostedModelConfig(profile.id);
+  invalidateHostedModelRouteCache();
+}
+
 export async function adminDeleteHostedModelConfig(id) {
   const existing = await getHostedModelConfigById(String(id || "").trim());
   if (!existing) throw Object.assign(new Error("Hosted model configuration not found."), { status: 404 });
+  if (isHostedProviderProfileRow(existing)) {
+    throw Object.assign(new Error("Use the provider controls to remove a provider profile."), { status: 400 });
+  }
   await deleteHostedModelConfig(existing.id);
   invalidateHostedModelRouteCache();
 }
@@ -239,19 +426,38 @@ export async function activeAllHostedModelRoutes() {
   if (!supabaseConfigured()) return [];
   const now = Date.now();
   if (!routeCache || now - routeCacheAt > CACHE_MS) {
-    const rows = await listHostedModelConfigs({ activeOnly: true });
+    const rows = await listHostedModelConfigs();
+    const providerProfiles = new Map(
+      rows
+        .filter(isHostedProviderProfileRow)
+        .map((row) => [String(row.provider_id || "").trim().toLowerCase(), row]),
+    );
     const routes = [];
-    for (const row of rows) {
+    for (const row of rows.filter((candidate) => !isHostedProviderProfileRow(candidate))) {
       try {
-        const apiKey = decryptHostedModelCredential(row.api_key_ciphertext);
-        if (!apiKey) continue;
+        const providerId = String(row.provider_id || "").trim().toLowerCase();
+        const profile = providerProfiles.get(providerId);
+        if (!row.active || (profile && !profile.active)) continue;
+        const modelKey = decryptHostedModelCredential(row.api_key_ciphertext);
+        // A model-specific credential must remain usable even if an unrelated
+        // provider-default credential was rotated incorrectly or cannot be
+        // decrypted on this server.
+        const providerKey = !modelKey && profile
+          ? decryptHostedModelCredential(profile.api_key_ciphertext)
+          : "";
+        const apiKey = modelKey || providerKey;
+        const baseUrl = String(row.base_url || profile?.base_url || "").trim();
+        if (!apiKey || !baseUrl) continue;
         routes.push({
           id: row.id,
-          providerId: row.provider_id,
+          providerId,
+          providerDisplayName: String(
+            profile?.display_name || hostedProviderDefaultProfile(providerId).displayName,
+          ),
           alias: row.alias,
           displayName: row.display_name,
           upstreamModel: row.upstream_model,
-          baseUrl: row.base_url,
+          baseUrl,
           apiKey,
         });
       } catch (error) {
@@ -284,10 +490,14 @@ export function publicHostedProviderCatalogFromRoutes(routes) {
     grouped.set(route.providerId, current);
   }
   return [...grouped.entries()]
-    .sort(([left], [right]) => hostedProviderDisplayName(left).localeCompare(hostedProviderDisplayName(right)))
+    .sort(([left, leftRoutes], [right, rightRoutes]) => {
+      const leftLabel = leftRoutes[0]?.providerDisplayName || hostedProviderDisplayName(left);
+      const rightLabel = rightRoutes[0]?.providerDisplayName || hostedProviderDisplayName(right);
+      return leftLabel.localeCompare(rightLabel);
+    })
     .map(([id, routes]) => ({
       id,
-      label: hostedProviderDisplayName(id),
+      label: String(routes[0]?.providerDisplayName || hostedProviderDisplayName(id)),
       models: routes
         .slice()
         .sort((left, right) => left.displayName.localeCompare(right.displayName))
