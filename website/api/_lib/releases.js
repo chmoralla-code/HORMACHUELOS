@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.16";
-const BUILTIN_MSI_SHA256 = "6698e467a84bbdca2e0919a132e717bc133bc8cef87f4fa19121d8079644db0f";
-const BUILTIN_EXE_SHA256 = "a859587a0a4f9a4cf17b6f9992ba3cefe4cdcab80e6dbfcfa74842b50133344b";
-const BUILTIN_RELEASE_NOTES = "• OpenAI provider alias with GPT 5.6 Sol and GPT 5.6 Luna\n• Hide OpenAI · Grok (xAI) and OpenCode from the provider picker\n• Preview opens blank by default instead of auto-loading a project game/HTML";
+const BUILTIN_RELEASE_VERSION = "0.1.17";
+const BUILTIN_MSI_SHA256 = "a00e6f0f69494b90ced2a66ca903b2f7ec4972653cc80abf533a312b74348a1a";
+const BUILTIN_EXE_SHA256 = "309e07898e92d1855ef8aa71bc3b3897cc4cdc14732b05ed16d01926ec6b3e2b";
+const BUILTIN_RELEASE_NOTES = "• Plan usage pools sized from official model list prices with a 2× markup\n• Starter 0.92M · Pro 3.08M · Max 7.69M / 15.4M / 30.8M units\n• Billable burn tracks real model costs (Sol, Luna, DeepSeek, Claude, and more)";
 
 /**
  * A deployment-bundled release keeps the download/update path available even

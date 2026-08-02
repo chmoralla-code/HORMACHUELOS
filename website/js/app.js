@@ -16,17 +16,17 @@ const ASSET_BASE =
 
 /** Desktop installer files (uploaded to Supabase after `npm run desktop:build`). */
 const DESKTOP_DOWNLOADS = {
-  version: "0.1.16",
+  version: "0.1.17",
   windows: {
     msi: {
       label: "Windows installer (MSI)",
-      href: "/downloads/Hormachuelos_0.1.16_x64_en-US.msi",
-      file: "Hormachuelos_0.1.16_x64_en-US.msi",
+      href: "/downloads/Hormachuelos_0.1.17_x64_en-US.msi",
+      file: "Hormachuelos_0.1.17_x64_en-US.msi",
     },
     setup: {
       label: "Windows setup (EXE)",
-      href: "/downloads/Hormachuelos_0.1.16_x64-setup.exe",
-      file: "Hormachuelos_0.1.16_x64-setup.exe",
+      href: "/downloads/Hormachuelos_0.1.17_x64-setup.exe",
+      file: "Hormachuelos_0.1.17_x64-setup.exe",
     },
   },
 };
@@ -62,14 +62,14 @@ const BILLING = {
   },
 };
 
-/** Max tiers — lean ROI (~80% of plan price → usage pool). Pools vs Pro (1×). */
+/** Max tiers — 2× earn on official model list prices (ref: Grok 4.5 / Sol). */
 const MAX_ROI_TIERS = {
   "5x": {
     id: "max5",
     label: "5×",
     multiplier: 5,
     price: 2499,
-    pool: "27.5M units",
+    pool: "7.69M units",
     tagline: "Teams & parallel builds",
   },
   "10x": {
@@ -77,7 +77,7 @@ const MAX_ROI_TIERS = {
     label: "10×",
     multiplier: 10,
     price: 4999,
-    pool: "55M units",
+    pool: "15.4M units",
     tagline: "Agency sprints",
   },
   "20x": {
@@ -85,7 +85,7 @@ const MAX_ROI_TIERS = {
     label: "20×",
     multiplier: 20,
     price: 9999,
-    pool: "110M units",
+    pool: "30.8M units",
     tagline: "Multi-seat shops",
   },
 };
@@ -99,7 +99,7 @@ const PLANS = [
     price: 299,
     features: [
       "Full desktop agent (GPT 5.6, Opus 5, Claude & more)",
-      "Included usage wallet",
+      "0.92M usage units included",
       "Plan · Auto modes",
       "Pinoy templates + Client Pack",
       "GCash & Maya checkout",
@@ -114,7 +114,7 @@ const PLANS = [
     price: 999,
     features: [
       "Everything in Starter",
-      "3× usage headroom",
+      "3.08M usage units (~3.3× Starter)",
       "Full autonomy mode",
       "Priority model routing",
       "GCash credit top-ups",
@@ -132,7 +132,7 @@ const PLANS = [
     defaultTier: "5x",
     features: [
       "Everything in Pro",
-      "ROI-tier usage pool",
+      "2× markup on model list prices",
       "Up to 5 team seats",
       "Shared workspaces",
       "BIR-ready receipts",
@@ -682,7 +682,7 @@ function renderPricing() {
         ? `<div class="max-tier-meta">
             <span class="max-tier-chip">${escapeHtml(tier.tagline)}</span>
             <span class="max-tier-chip">${escapeHtml(tier.pool)}</span>
-            <span class="max-tier-chip">80% → usage</span>
+            <span class="max-tier-chip">2× on model list price</span>
           </div>`
         : "";
       return `
@@ -715,7 +715,7 @@ function renderPricing() {
         maxTier = btn.getAttribute("data-max-tier") || "5x";
         paintCards(true);
         const tier = MAX_ROI_TIERS[maxTier];
-        typeInto(live, `Max ${tier.label} · ${formatPHP(tier.price)} · lean ROI (~80% to usage)`, 18);
+        typeInto(live, `Max ${tier.label} · ${formatPHP(tier.price)} · 2× on official model rates`, 18);
       });
     });
 
@@ -1787,7 +1787,7 @@ function renderCheckout() {
       <aside class="checkout-summary">
         <h2>Order summary</h2>
         <div class="summary-row"><span>Plan</span><span>${escapeHtml(planLabel)}</span></div>
-        <div class="summary-row"><span>Billing</span><span>Pay as you go · lean ROI</span></div>
+        <div class="summary-row"><span>Billing</span><span>Pay as you go · 2× model list markup</span></div>
         <div class="summary-row"><span>Account</span><span class="mono small">${escapeHtml(user.email)}</span></div>
         <div class="summary-row total"><span>Total</span><span class="mono">${formatPHP(amount)}</span></div>
         <ul class="feature-list" style="margin-top:12px">

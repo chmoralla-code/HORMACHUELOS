@@ -48,7 +48,7 @@ test("HORMACHUELOS FREE pins the public alias to the NeuralWatt model", async ()
     assert.equal(model.base, "https://api.neuralwatt.com/v1");
     assert.equal(model.apiKey, process.env.NEURALWATT_API_KEY);
     assert.match(resolveHostedModel(upstream, "another-model").error, /not currently available/i);
-    assert.equal(billableTokens("hormachuelos_free", "hormachuelos-v1", 1_000), 100);
+    assert.equal(billableTokens("hormachuelos_free", "hormachuelos-v1", 1_000), 61);
 
     const status = (await hostedProvidersStatus()).hormachuelos_free;
     assert.deepEqual(status, { ok: true, viaOpenRouter: false });

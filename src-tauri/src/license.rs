@@ -42,20 +42,21 @@ fn license_path() -> Result<PathBuf> {
     Ok(dir.join("license.json"))
 }
 
-/// Public plans: pro (₱999/mo) · pro+ (₱2499/mo) · max (₱5999/mo)
-/// Lean ROI: ~80% of plan price → client usage (~₱400 of every ₱500 API),
-/// ~20% keep. Pools sized for ~$2.50/1M full-burn near that budget.
+/// Public plans: starter (₱299) · pro (₱999) · max 5×/10×/20×
+///
+/// Budgets are sized from official model list prices (see website/api/_lib/plans.js):
+/// GPT 5.6 Sol / Grok 4.5 @ $2/$6 → $2.80/1M blended (80% in / 20% out).
+/// 2× markup ⇒ 50% of PHP price funds that COGS (₱58/$). Keep website + Rust
+/// numbers identical.
 fn plan_budget(plan: &str) -> u64 {
     match plan {
-        // Pro (entry) — also legacy starter / 15-day
-        "pro" | "starter" | "fifteen" | "15day" | "15-day" => 5_500_000, // Generous (1×)
-        // Pro+
-        "proplus" | "pro+" | "pro_plus" => 13_750_000, // ~2.5× Pro
-        // Max tiers (5× / 10× / 20× Pro) — lean ROI pools
-        "max5" | "max" | "ultra" | "agency" => 27_500_000,
-        "max10" => 55_000_000,
-        "max20" => 110_000_000,
-        _ => 5_500_000,
+        "starter" => 920_567,
+        "pro" | "fifteen" | "15day" | "15-day" => 3_075_739,
+        "proplus" | "pro+" | "pro_plus" => 7_693_966,
+        "max5" | "max" | "ultra" | "agency" => 7_693_966,
+        "max10" => 15_391_010,
+        "max20" => 30_785_099,
+        _ => 920_567,
     }
 }
 
@@ -85,27 +86,40 @@ fn expires_in_days(days: i64) -> String {
         .to_string()
 }
 
-/// Convert raw API tokens into plan-billable units.
-/// Cheap models (DeepSeek Flash, Ollama, free OpenRouter) burn the meter slowly;
-/// premium Cursor/Claude paths burn ~1:1 (estimates already include safety margin).
+/// Convert raw API tokens into plan-billable units using official list-price
+/// blends relative to Grok 4.5 / GPT 5.6 Sol ($2.80/1M @ 80/20 mix).
 pub fn to_billable_tokens(provider: &str, model: &str, raw: u64) -> u64 {
     if raw == 0 {
         return 0;
     }
     let p = provider.trim().to_ascii_lowercase();
     let m = model.trim().to_ascii_lowercase();
+    let ref_blend = 2.8_f64;
     let weight: f64 = match p.as_str() {
-        "deepseek" if m.contains("flash") => 0.10, // ~$0.18/1M vs ~$2.50 target
-        "deepseek" => 0.30,                        // V4 Pro
-        "hormachuelos_free" => 0.10,
-        "ollama" => 0.05,
-        "openrouter" if m.contains("free") || m.ends_with(":free") => 0.05,
+        // DeepSeek V4 Flash $0.14/$0.28 → $0.168 blend
+        "deepseek" if m.contains("flash") => 0.168 / ref_blend,
+        // DeepSeek V4 Pro $0.435/$0.87 → $0.522 blend
+        "deepseek" => 0.522 / ref_blend,
+        "hormachuelos_free" => 0.168 / ref_blend,
+        "ollama" | "pollinations" => 0.05 / ref_blend,
+        "openrouter" if m.contains("free") || m.ends_with(":free") => 0.05 / ref_blend,
         "openrouter" => 0.45,
-        "glm" | "zhipu" => 0.35,
-        "gemini" => 0.40,
-        "anthropic" => 1.35,
-        "cursor" | "openai" => 1.0, // Cursor bridge already over-estimates
-        "pollinations" => 0.05,
+        // GLM 5.2 $1.40/$4.40 → $2.00 blend
+        "glm" | "zhipu" => 2.0 / ref_blend,
+        // Gemini 3.1 Pro $2/$12 → $4.00 blend
+        "gemini" => 4.0 / ref_blend,
+        // Claude Opus-class $5/$25 → $9.00 blend
+        "anthropic" => 9.0 / ref_blend,
+        // Cursor / OpenAI aliases — Sol = Grok 4.5; Luna = Composer 2.5 Fast
+        "cursor" | "openai" | "xai" => {
+            if m.contains("composer") || m.contains("luna") {
+                5.4 / ref_blend
+            } else if m.contains("terra") {
+                4.0 / ref_blend
+            } else {
+                1.0
+            }
+        }
         _ => 1.0,
     };
     let billable = ((raw as f64) * weight).ceil() as u64;
@@ -311,10 +325,11 @@ impl LicenseStatus {
         if s.enforce_expiry() {
             dirty = true;
         }
-        // Lean ROI pools are larger — bump active seats so clients get more usage.
+        // 2×-margin pools are smaller than the old lean-ROI grants — clamp
+        // oversized seats down so active licenses match the current sheet.
         if s.active && !s.plan.eq_ignore_ascii_case("free") {
             let expected = plan_budget(&s.plan);
-            if s.token_budget > 0 && s.token_budget < expected {
+            if s.token_budget > 0 && s.token_budget != expected {
                 s.token_budget = expected;
                 dirty = true;
             }
