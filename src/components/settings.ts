@@ -128,18 +128,8 @@ export const PROVIDERS: ProviderDef[] = [
     defaultBaseUrl: "https://openrouter.ai/api/v1",
     keyUrl: "https://openrouter.ai/keys",
     keyRequired: true,
-    models: [
-      "openrouter/free",
-      "meta-llama/llama-3.3-70b-instruct:free",
-      "meta-llama/llama-3.2-3b-instruct:free",
-      "openai/gpt-oss-120b:free",
-      "openai/gpt-oss-20b:free",
-      "qwen/qwen3-coder:free",
-      "qwen/qwen3-next-80b-a3b-instruct:free",
-      "nousresearch/hermes-3-llama-3.1-405b:free",
-      "google/gemma-4-31b-it:free",
-      "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
-    ],
+    // Pinned to Free Models Router only — no other OpenRouter catalog IDs.
+    models: ["openrouter/free"],
   },
   {
     id: "glm",
@@ -344,10 +334,9 @@ const MODEL_DISPLAY_NAMES: Record<string, string> = {
   "openrouter/free": "Free Models Router",
 };
 
-/** OpenRouter free-tier ids: `:free` variants and the free models router. */
+/** Allowed OpenRouter model — Free Models Router only. */
 export function isOpenRouterFreeModel(modelId: string): boolean {
-  const id = String(modelId || "").trim().toLowerCase();
-  return id.includes(":free") || id === "openrouter/free";
+  return String(modelId || "").trim().toLowerCase() === "openrouter/free";
 }
 
 /** Providers routed through the Cursor local SDK (not chat-completions). */
@@ -357,7 +346,7 @@ export const CURSOR_SDK_PROVIDER_IDS = new Set(["cursor"]);
 export const REASONING_EFFORT_PROVIDER_IDS = new Set(["cursor", "xai"]);
 
 /** Provider catalogs that are deliberately pinned (no live /models flood). */
-export const STATIC_MODEL_PROVIDER_IDS = new Set(["cursor", "xai", "glm"]);
+export const STATIC_MODEL_PROVIDER_IDS = new Set(["cursor", "xai", "glm", "openrouter"]);
 
 export function isCursorSdkProvider(providerId: string): boolean {
   return CURSOR_SDK_PROVIDER_IDS.has(providerId);
@@ -637,10 +626,8 @@ export function normalizeSettings(s: Settings): Settings {
     }
   }
   if (s.provider === "openrouter") {
-    // Keep OpenRouter on free models only — never surface paid catalog IDs.
-    if (!isOpenRouterFreeModel(s.model)) {
-      s.model = meta.defaultModel;
-    }
+    // Pin OpenRouter to Free Models Router only.
+    s.model = meta.defaultModel;
   }
   if (s.provider === "pollinations" && s.base_url === "https://text.pollinations.ai/openai") {
     s.base_url = meta.defaultBaseUrl;
@@ -814,7 +801,7 @@ export class SettingsModal {
       // OpenRouter: keep free models only so the picker never floods with paid IDs.
       const discovered =
         providerId === "openrouter"
-          ? modelsRaw.filter((id) => isOpenRouterFreeModel(id))
+          ? ["openrouter/free"]
           : providerId === "glm"
             ? modelsRaw.filter(
                 (id) =>

@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.19";
-const BUILTIN_MSI_SHA256 = "59063215951f818263db59a2c3782fe1b38aa22c0fda1c27e2e2035a9b1246b7";
-const BUILTIN_EXE_SHA256 = "d7f5a14ff7fadc049c28886aadef2eb19725c257d3a4f55eea88159ea1672ff5";
-const BUILTIN_RELEASE_NOTES = "• OpenRouter defaults to Free Models Router (openrouter/free)\n• Free-tier picker keeps openrouter/free alongside :free models";
+const BUILTIN_RELEASE_VERSION = "0.1.20";
+const BUILTIN_MSI_SHA256 = "80f0302a71839a86151bb22073d14752b6e67f85a6b7b637d11a6c0aac0b0e71";
+const BUILTIN_EXE_SHA256 = "9b73c848c233d26e625f7df4ef3dddf2b320cce95dbf46d2e8af70bb0d0076c0";
+const BUILTIN_RELEASE_NOTES = "• OpenRouter shows only Free Models Router (openrouter/free)\n• Removed other OpenRouter model choices from the picker";
 
 /**
  * A deployment-bundled release keeps the download/update path available even
