@@ -77,7 +77,7 @@ export const PROVIDERS: ProviderDef[] = [
   },
   {
     id: "hormachuelos_free",
-    label: "HORMACHUELOS FREE",
+    label: "Hormachuelos",
     logoKey: "hormachuelos",
     logoSrc: "./logos/hormachuelos-free.svg",
     defaultModel: "hormachuelos-v1",

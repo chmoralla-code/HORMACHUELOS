@@ -88,6 +88,38 @@ const MAX_ROI_TIERS = {
   },
 };
 
+const GCASH_RECEIVER_LABEL = "CH*****O M.";
+
+/** Keep in sync with website/api/_lib/payments.js PLAN_CHECKOUTS. */
+const GCASH_CHECKOUTS = {
+  starter: { planName: "Starter", amountPhp: 299, qrPath: "/images/gcash/gcash-299.png" },
+  pro: { planName: "Pro", amountPhp: 999, qrPath: "/images/gcash/gcash-999.png" },
+  proplus: { planName: "Pro+", amountPhp: 2499, qrPath: "/images/gcash/gcash-2499.png" },
+  max5: { planName: "Max 5×", amountPhp: 2499, qrPath: "/images/gcash/gcash-2499.png" },
+  max10: { planName: "Max 10×", amountPhp: 4999, qrPath: "/images/gcash/gcash-4999.png" },
+  max20: { planName: "Max 20×", amountPhp: 9999, qrPath: "/images/gcash/gcash-9999.png" },
+};
+
+function normalizeCheckoutPlanId(planId, tierKey = "") {
+  const id = String(planId || "pro").toLowerCase();
+  if (id === "max" || id === "agency" || id === "ultra") {
+    const tier = MAX_ROI_TIERS[tierKey] || MAX_ROI_TIERS["5x"];
+    return tier?.id || "max5";
+  }
+  if (id === "pro+" || id === "pro_plus") return "proplus";
+  if (id === "fifteen" || id === "15day" || id === "15-day") return "pro";
+  return id;
+}
+
+function gcashCheckoutDetails(planId, tierKey = "") {
+  const normalized = normalizeCheckoutPlanId(planId, tierKey);
+  const details = GCASH_CHECKOUTS[normalized];
+  if (!details) {
+    return { planId: "pro", ...GCASH_CHECKOUTS.pro, receiverLabel: GCASH_RECEIVER_LABEL };
+  }
+  return { planId: normalized, ...details, receiverLabel: GCASH_RECEIVER_LABEL };
+}
+
 const PLANS = [
   {
     id: "starter",
@@ -535,8 +567,22 @@ function renderHome() {
   return page(`
     <section class="hero container">
       <div class="eyebrow ix-reveal" data-delay="0"><span class="dot"></span> Built for PH · GCash ready</div>
-      <h1 class="ix-headline" aria-label="OpenAI, Claude, DeepSeek, Hormachuelos, Ollama, OpenRouter. All models in one place.">
-        OpenAi, Claude, Deepseek, Hormachuelos, Ollama, Openrouter. All models in one place.
+      <h1 class="ix-headline ix-hero-headline ix-reveal" data-delay="0" aria-label="OpenAI, Claude, DeepSeek, Hormachuelos, Ollama, OpenRouter. All models in one place.">
+        <span class="ix-hero-models">
+          <span class="ix-model-chip" data-provider="openai" style="--ix-delay:0" tabindex="0">OpenAi</span><span class="ix-hero-sep">,</span>
+          <span class="ix-model-chip" data-provider="claude" style="--ix-delay:1" tabindex="0">Claude</span><span class="ix-hero-sep">,</span>
+          <span class="ix-model-chip" data-provider="deepseek" style="--ix-delay:2" tabindex="0">Deepseek</span><span class="ix-hero-sep">,</span>
+          <span class="ix-model-chip" data-provider="hormachuelos" style="--ix-delay:3" tabindex="0">Hormachuelos</span><span class="ix-hero-sep">,</span>
+          <span class="ix-model-chip" data-provider="ollama" style="--ix-delay:4" tabindex="0">Ollama</span><span class="ix-hero-sep">,</span>
+          <span class="ix-model-chip" data-provider="openrouter" style="--ix-delay:5" tabindex="0">Openrouter</span><span class="ix-hero-sep">.</span>
+        </span>
+        <span class="ix-hero-tagline">
+          <span class="ix-static">All models in </span>
+          <span class="ix-type-wrap" aria-live="polite">
+            <span id="hero-type" class="ix-type" data-phrases="one place|one desktop|one checkout|your workflow">one place</span>
+            <span class="ix-caret" aria-hidden="true"></span>
+          </span>
+        </span>
       </h1>
       <p class="lead ix-reveal" data-delay="1" data-ix-hover-words>
         PinoyMade ARTIFICIAL INTELLIGENCE (GUI) software and a website that is easy to use and built for vibe coders that don't have bank accounts.
@@ -589,8 +635,8 @@ function renderHome() {
               <tr tabindex="0" data-line="Every receipt gets amount, duplicate, and visual-risk checks."><td>Receipt review</td><td class="no">No</td><td class="yes">Yes</td></tr>
               <tr tabindex="0" data-line="See ₱ on the price tag, not $20 + FX."><td>PHP pricing</td><td class="no">USD + FX</td><td class="yes">₱ PHP</td></tr>
               <tr tabindex="0" data-line="Message us on Messenger — 09505339963."><td>Local support</td><td class="no">Email / Discord</td><td class="yes"><a class="compare-messenger" href="https://www.facebook.com/profile.php?id=61584774638218" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">Messenger</a> + 09505339963</td></tr>
-              <tr tabindex="0" data-line="No surprise hourly or weekly caps — keep building."><td>Usage reset</td><td class="no">Hourly · Weekly · Monthly</td><td class="yes">No hourly, weekly, or monthly reset</td></tr>
-              <tr tabindex="0" data-line="Try for ₱149 — fifteen days, no card drama."><td>From</td><td class="no">~$20/mo card</td><td class="yes">₱149 / 15 days</td></tr>
+              <tr tabindex="0" data-line="No expiry — keep building on your plan wallet."><td>Usage reset</td><td class="no">Hourly · Weekly · Monthly</td><td class="yes">No Expiry</td></tr>
+              <tr tabindex="0" data-line="Starter from ₱299 — lowest subscription, no card drama."><td>From</td><td class="no">~$20/mo card</td><td class="yes">299php lowest subscription</td></tr>
             </tbody>
           </table>
           <p class="compare-live mono" id="compare-live" aria-live="polite">Click a row to hear the pitch…</p>
@@ -601,7 +647,6 @@ function renderHome() {
     <section class="section">
       <div class="container">
         <div class="cta-band ix-reveal">
-          <h2 data-ix-split>Start in 15 days. Or go yearly.</h2>
           <p data-ix-hover-words>Choose a plan, pay its exact GCash amount, then track your private proof review from the dashboard.</p>
           <a class="btn btn-primary btn-lg" href="#/pricing">See plans</a>
         </div>
@@ -633,26 +678,25 @@ function renderFeatures() {
   `);
 }
 
-function findPlanByCheckoutId(planId) {
+function findPlanByCheckoutId(planId, tierKey = "") {
+  const id = normalizeCheckoutPlanId(planId, tierKey);
   for (const plan of PLANS) {
-    if (plan.id === planId) return { plan, tier: null };
+    if (plan.id === id) return { plan, tier: null };
     if (plan.tiers) {
       for (const tier of Object.values(plan.tiers)) {
-        if (tier.id === planId) return { plan, tier };
+        if (tier.id === id) return { plan, tier };
       }
     }
   }
   return { plan: PLANS[1], tier: null };
 }
 
-function checkoutAmount(planId) {
-  const { plan, tier } = findPlanByCheckoutId(planId);
-  if (tier) return tier.price;
-  return plan.price;
+function checkoutAmount(planId, tierKey = "") {
+  return gcashCheckoutDetails(planId, tierKey).amountPhp;
 }
 
-function checkoutPlanLabel(planId) {
-  const { plan, tier } = findPlanByCheckoutId(planId);
+function checkoutPlanLabel(planId, tierKey = "") {
+  const { plan, tier } = findPlanByCheckoutId(planId, tierKey);
   if (tier) return `Max ${tier.label}`;
   return plan.name;
 }
@@ -1384,6 +1428,8 @@ function renderAdmin() {
               ${users
                 .map((u) => {
                   const plan = u.plan || "free";
+                  const planOptions = ["free", "starter", "pro", "proplus", "max5", "max10", "max20"];
+                  if (plan && !planOptions.includes(plan)) planOptions.unshift(plan);
                   return `<tr data-id="${escapeHtml(u.id)}">
                     <td>
                       <div class="admin-user">
@@ -1394,7 +1440,7 @@ function renderAdmin() {
                     </td>
                     <td>
                       <select class="field admin-plan">
-                        ${["free", "starter", "pro", "proplus", "max5", "max10", "max20"]
+                        ${planOptions
                           .map(
                             (p) =>
                               `<option value="${p}" ${plan === p ? "selected" : ""}>${p}</option>`,
@@ -2189,12 +2235,13 @@ function renderAdmin() {
 function renderCheckout() {
   const user = getSessionUser();
   const q = queryOf();
-  const planId = q.get("plan") || "pro";
-  const period = q.get("period") || "payg";
   const tier = q.get("tier") || "";
-  const amount = checkoutAmount(planId);
-  const planLabel = checkoutPlanLabel(planId);
-  const { plan } = findPlanByCheckoutId(planId);
+  const period = q.get("period") || "payg";
+  const checkout = gcashCheckoutDetails(q.get("plan") || "pro", tier);
+  const planId = checkout.planId;
+  const amount = checkout.amountPhp;
+  const planLabel = checkoutPlanLabel(planId, tier);
+  const { plan } = findPlanByCheckoutId(planId, tier);
   const tierQ = tier ? `&tier=${encodeURIComponent(tier)}` : "";
 
   if (!user) {
@@ -2210,20 +2257,20 @@ function renderCheckout() {
         <section class="card gcash-payment-card" aria-labelledby="gcash-payment-heading">
           <div class="payment-step-heading">
             <span class="payment-step-number" aria-hidden="true">1</span>
-            <div><h3 id="gcash-payment-heading">Open your GCash payment</h3><p class="muted small">The QR is created for the selected plan amount only.</p></div>
+            <div><h3 id="gcash-payment-heading">Scan this GCash QR</h3><p class="muted small">This QR is locked to ${escapeHtml(planLabel)} · ${escapeHtml(formatPHP(amount))} only.</p></div>
           </div>
           <div class="payment-amount-lock"><span>Exact amount to pay</span><strong id="payment-amount-lock">${formatPHP(amount)}</strong></div>
-          <button type="button" class="btn btn-primary btn-block btn-lg" id="pay-btn">Show GCash QR</button>
+          <div class="gcash-qr-panel">
+            <div class="gcash-qr-frame"><img id="gcash-qr" class="gcash-qr-image" src="${escapeHtml(checkout.qrPath)}" alt="GCash QR code for ${escapeHtml(formatPHP(amount))}" /></div>
+            <div class="gcash-qr-copy"><span class="pay-badge">GCash</span><strong id="gcash-receiver">Pay ${escapeHtml(formatPHP(amount))} to ${escapeHtml(checkout.receiverLabel)}</strong><p class="muted small">Pay exactly <span id="gcash-amount">${escapeHtml(formatPHP(amount))}</span>. A different amount cannot be auto-approved.</p></div>
+          </div>
+          <button type="button" class="btn btn-primary btn-block btn-lg" id="pay-btn">I've paid — upload receipt</button>
           <p class="muted small center" style="margin:12px 0 0">Do not send a GCash PIN, OTP, or account password to Hormachuelos.</p>
         </section>
         <section class="card gcash-proof-card" id="payment-proof-stage" hidden aria-labelledby="payment-proof-heading">
           <div class="payment-step-heading">
             <span class="payment-step-number" aria-hidden="true">2</span>
-            <div><h3 id="payment-proof-heading">Pay, then upload your receipt</h3><p class="muted small">Use the QR below and upload a clear JPG, PNG, or WebP proof (up to 6 MB).</p></div>
-          </div>
-          <div class="gcash-qr-panel">
-            <div class="gcash-qr-frame"><img id="gcash-qr" class="gcash-qr-image" alt="" /></div>
-            <div class="gcash-qr-copy"><span class="pay-badge">GCash</span><strong id="gcash-receiver">Loading payment details…</strong><p class="muted small">Pay exactly <span id="gcash-amount">—</span>. A different amount cannot be auto-approved.</p></div>
+            <div><h3 id="payment-proof-heading">Upload your receipt</h3><p class="muted small">Use a clear JPG, PNG, or WebP proof (up to 6 MB) showing the ${escapeHtml(formatPHP(amount))} payment.</p></div>
           </div>
           <div class="receipt-upload-wrap">
             <input id="payment-proof-input" type="file" accept="image/jpeg,image/png,image/webp" hidden />
@@ -2328,7 +2375,7 @@ function renderCheckout() {
     scanTimer = window.setInterval(paintPhase, 3200);
   }
 
-  payBtn.textContent = "Show GCash QR";
+  payBtn.textContent = "I've paid — upload receipt";
   payBtn.addEventListener("click", async () => {
     if (activePayment) {
       proofStage.hidden = false;
@@ -2345,17 +2392,19 @@ function renderCheckout() {
       });
       activePayment = created.order;
       upsertPaymentRequest(activePayment);
-      paymentQr.src = created.payment.qrPath;
-      paymentQr.alt = "GCash QR code for " + formatPHP(created.payment.amountPhp);
-      paymentAmount.textContent = formatPHP(created.payment.amountPhp);
-      paymentReceiver.textContent = "Pay " + formatPHP(created.payment.amountPhp) + " to " + created.payment.receiverLabel;
+      if (created.payment?.qrPath) paymentQr.src = created.payment.qrPath;
+      if (created.payment?.amountPhp) {
+        paymentAmount.textContent = formatPHP(created.payment.amountPhp);
+        paymentReceiver.textContent =
+          "Pay " + formatPHP(created.payment.amountPhp) + " to " + (created.payment.receiverLabel || GCASH_RECEIVER_LABEL);
+      }
       proofStage.hidden = false;
-      payBtn.textContent = "GCash QR ready";
+      payBtn.textContent = "Receipt upload ready";
       proofStage.scrollIntoView({ behavior: "smooth", block: "start" });
     } catch (error) {
       showPaymentError(error.message || error);
       payBtn.disabled = false;
-      payBtn.textContent = "Show GCash QR";
+      payBtn.textContent = "I've paid — upload receipt";
     }
   });
 
@@ -2922,6 +2971,67 @@ function wireTrustChips(root) {
   });
 }
 
+/** Hero provider chips: stagger in, cycle highlight, pause on hover/focus. */
+function wireHeroHeadline(root) {
+  const headline = root.querySelector(".ix-hero-headline");
+  if (!headline) return;
+  const chips = [...headline.querySelectorAll(".ix-model-chip")];
+  if (!chips.length) return;
+
+  let activeIndex = 0;
+  let paused = false;
+  let timer = 0;
+
+  const setActive = (index) => {
+    activeIndex = index;
+    chips.forEach((chip, i) => chip.classList.toggle("ix-model-active", i === index));
+  };
+
+  const schedule = (delay = 2200) => {
+    clearTimeout(timer);
+    if (paused || prefersReducedMotion()) return;
+    timer = window.setTimeout(() => {
+      setActive((activeIndex + 1) % chips.length);
+      schedule(2200);
+    }, delay);
+  };
+
+  if (prefersReducedMotion()) {
+    setActive(0);
+    chips.forEach((chip) => {
+      chip.classList.add("ix-model-ready");
+    });
+    return;
+  }
+
+  setActive(0);
+  chips.forEach((chip, i) => {
+    chip.classList.add("ix-model-ready");
+    chip.addEventListener("mouseenter", () => {
+      paused = true;
+      clearTimeout(timer);
+      setActive(i);
+    });
+    chip.addEventListener("mouseleave", () => {
+      paused = false;
+      schedule(900);
+    });
+    chip.addEventListener("focus", () => {
+      paused = true;
+      clearTimeout(timer);
+      setActive(i);
+    });
+    chip.addEventListener("blur", () => {
+      if (!headline.contains(document.activeElement)) {
+        paused = false;
+        schedule(900);
+      }
+    });
+  });
+  schedule(2400);
+  onPageCleanup(() => clearTimeout(timer));
+}
+
 function wireTypeOnce(root) {
   root.querySelectorAll(".ix-type-once").forEach((el) => {
     const text = el.getAttribute("data-text") || el.textContent || "";
@@ -2937,6 +3047,7 @@ function initTextInteractions(root) {
   wireDemoVideo(root);
   wireCompare(root);
   wireTrustChips(root);
+  wireHeroHeadline(root);
   wireTypeOnce(root);
 
   const heroType = root.querySelector("#hero-type");

@@ -1553,23 +1553,27 @@ async function init() {
       try {
         const lic = await api.applyLicenseKey(user.licenseKey);
         applyLicenseSnapshot(lic);
-        // Keep website counters if activate returned older/empty numbers.
-        if (
-          user.licenseActive &&
-          Number(user.tokenBudget) > 0 &&
-          (Number(lic.tokenBudget) || 0) > 0
-        ) {
-          applyWebsitePlanUsage({
-            ...user,
-            tokenBudget: Number(lic.tokenBudget) || user.tokenBudget,
-            tokensUsed: Math.max(Number(lic.tokensUsed) || 0, Number(user.tokensUsed) || 0),
-            plan: lic.plan || user.plan,
-            licenseActive: lic.active,
-            expiresAt: lic.expiresAt || user.expiresAt,
-          });
-        } else {
-          syncUsageBar();
-        }
+        // Website /api/auth/me (license row) is the plan source of truth.
+        // Re-apply after local activate so a stale license.json cannot win.
+        const mergedPlan = String(user.plan || lic.plan || "free");
+        applyWebsitePlanUsage({
+          ...user,
+          plan: mergedPlan,
+          tokenBudget:
+            Number(user.tokenBudget) > 0
+              ? Number(user.tokenBudget)
+              : Number(lic.tokenBudget) || user.tokenBudget,
+          tokensUsed: Math.max(Number(lic.tokensUsed) || 0, Number(user.tokensUsed) || 0),
+          licenseActive:
+            user.licenseActive === true || (lic.active !== false && mergedPlan.toLowerCase() !== "free"),
+          expiresAt: user.expiresAt || lic.expiresAt || "",
+        });
+        sidebar?.setAccountStatus({
+          state: "synced",
+          email: user.email,
+          name: user.name,
+          plan: mergedPlan,
+        });
       } catch (e) {
         console.warn("license sync from website account failed", e);
         syncUsageBar();

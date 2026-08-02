@@ -318,10 +318,10 @@ test.describe("Pricing & checkout", () => {
     await page.goto("/#/checkout?plan=pro&period=payg");
     await expect(page.locator("#main")).toContainText(/Checkout|GCash/i);
     await expect(page.locator("#payment-proof-stage")).toBeHidden();
-    await page.click("#pay-btn");
-    await expect(page.locator("#payment-proof-stage")).toBeVisible();
     await expect(page.locator("#gcash-amount")).toContainText(/999/);
     await expect(page.locator("#gcash-qr")).toHaveAttribute("src", /gcash-999\.png/);
+    await page.click("#pay-btn");
+    await expect(page.locator("#payment-proof-stage")).toBeVisible();
     await expect(page.locator("#submit-payment-proof")).toBeDisabled();
     await page.screenshot({ path: path.join(OUT, "04-gcash-proof-checkout.png"), fullPage: true });
     await page.setInputFiles("#payment-proof-input", {

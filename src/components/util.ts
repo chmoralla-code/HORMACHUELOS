@@ -114,17 +114,16 @@ export function formatTokens(n: number): string {
   return (n / 1_000_000).toFixed(1).replace(/\.0$/, "") + "M";
 }
 
-/** User-facing plan names: Pro · Pro+ · Max */
+/** User-facing plan names — must match website plan ids (starter ≠ pro). */
 export function displayPlanLabel(plan: string): string {
   const p = (plan || "").trim().toLowerCase();
   if (p === "proplus" || p === "pro+" || p === "pro_plus") return "Pro+";
   if (p === "max20") return "Max 20×";
   if (p === "max10") return "Max 10×";
   if (p === "max5" || p === "max" || p === "ultra" || p === "agency") return "Max 5×";
-  if (p === "pro" || p === "starter" || p === "fifteen" || p === "15day" || p === "15-day") {
-    return "Pro";
-  }
-  if (!p) return "Plan";
+  if (p === "pro" || p === "fifteen" || p === "15day" || p === "15-day") return "Pro";
+  if (p === "starter" || p === "start") return "Starter";
+  if (p === "free" || p === "expired" || !p) return p === "expired" ? "Expired" : p === "free" ? "Free" : "Plan";
   return p.charAt(0).toUpperCase() + p.slice(1);
 }
 

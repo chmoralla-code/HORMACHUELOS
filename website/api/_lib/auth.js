@@ -19,7 +19,7 @@ import {
   updateAccount,
   updateDeviceLink,
 } from "./supabase.js";
-import { planBudget } from "./plans.js";
+import { normalizePlan, planBudget } from "./plans.js";
 import { sendVerificationEmail } from "./resend.js";
 
 const SITE_URL = () => process.env.PUBLIC_SITE_URL || "https://hormachuelos.vercel.app";
@@ -90,12 +90,12 @@ export async function publicAccountWithUsage(row) {
     budget > 0 ? Math.max(0, Math.min(100, Math.round((remaining / budget) * 100))) : 0;
   return {
     ...base,
-    plan: license.plan || base.plan || "free",
+    plan: normalizePlan(license.plan || base.plan || "free"),
     licenseKey: license.key || base.licenseKey,
     tokenBudget: budget,
     tokensUsed: used,
     licenseActive: active,
-    expiresAt: "",
+    expiresAt: license.expires_at ? String(license.expires_at).slice(0, 10) : "",
     planRemainingPct,
   };
 }

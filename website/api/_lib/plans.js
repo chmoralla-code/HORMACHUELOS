@@ -68,10 +68,11 @@ export const PLAN_BUDGETS = {
 };
 
 export function normalizePlan(planId) {
-  const id = String(planId || "starter").toLowerCase();
+  const id = String(planId || "starter").toLowerCase().trim();
   if (id === "max" || id === "agency" || id === "ultra") return "max5";
   if (id === "pro+" || id === "pro_plus") return "proplus";
   if (id === "fifteen" || id === "15day" || id === "15-day") return "pro";
+  if (id === "start") return "starter";
   return id;
 }
 
