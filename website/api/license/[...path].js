@@ -25,24 +25,21 @@ function issueSecretOk(req, body) {
 }
 
 function toStatus(row) {
-  const expiresAt = String(row.expires_at || "").slice(0, 10);
-  const expired = new Date(row.expires_at).getTime() < Date.now();
-  const active = Boolean(row.active) && !expired;
+  // Pay-as-you-go paid plans are gated by usage wallet only (no calendar expiry).
+  const active = Boolean(row.active);
   const budget = Number(row.token_budget) || planBudget(row.plan);
   const used = Number(row.tokens_used) || 0;
   let message = active
     ? `${row.plan} plan active - hosted models via Hormachuelos server.`
-    : expired
-      ? `License expired on ${expiresAt}.`
-      : "License inactive.";
+    : "License inactive.";
   if (active && used >= budget) {
     message = "Hosted credits exhausted. Top up or use your own provider key.";
   }
   return {
     ok: active,
-    plan: expired ? "expired" : row.plan,
+    plan: row.plan,
     active,
-    expiresAt,
+    expiresAt: "",
     email: row.email || "",
     tokenBudget: budget,
     tokensUsed: used,
@@ -71,10 +68,10 @@ export default async function handler(req, res) {
       if (!issueSecretOk(req, body)) return json(res, 401, { error: "Unauthorized" }, req);
       const plan = normalizePlan(body.planId || body.plan || "starter");
       const email = String(body.email || "").trim().toLowerCase();
-      const days = Number(body.days) > 0 ? Number(body.days) : 30;
       const prefix = licensePrefix(plan);
       const key = `${prefix}-${randomUUID().replace(/-/g, "").slice(0, 12).toUpperCase()}`;
-      const expires = new Date(Date.now() + days * 86400000);
+      // Far-future placeholder — pay-as-you-go ignores calendar expiry.
+      const expires = new Date("2099-12-31T00:00:00.000Z");
       const budget = planBudget(plan);
       const row = await insertLicense({
         key,
@@ -101,7 +98,7 @@ export default async function handler(req, res) {
           email: row.email,
           tokenBudget: Number(row.token_budget),
           tokensUsed: Number(row.tokens_used),
-          expiresAt: row.expires_at.slice(0, 10),
+          expiresAt: "",
           active: row.active,
           message: `${plan} plan issued. Paste this key in Hormachuelos > Settings.`,
         },
@@ -119,11 +116,6 @@ export default async function handler(req, res) {
       const row = await getLicenseByKey(key);
       if (!row) {
         return json(res, 404, { error: "Unknown license key", ok: false, active: false }, req);
-      }
-      const expired = new Date(row.expires_at).getTime() < Date.now();
-      if (expired && row.active) {
-        await updateLicense(row.id, { active: false });
-        row.active = false;
       }
       return json(res, 200, toStatus(row), req);
     }

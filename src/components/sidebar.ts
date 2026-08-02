@@ -546,22 +546,20 @@ export class Sidebar {
       meter.setAttribute("aria-valuenow", active ? String(clampedPct) : "0");
       meter.setAttribute(
         "aria-valuetext",
-        active ? `${clampedPct}% remaining this period` : "No active plan",
+        active ? `${clampedPct}% usage remaining` : "No active plan",
       );
     }
     if (hint) {
-      const exp = this.formatPlanExpiry(m.planExpiresAt || "");
       if (!active) {
         hint.textContent =
           planId.toLowerCase() === "expired"
-            ? "Plan expired · Mag-load to renew"
+            ? "Usage empty · Mag-load to continue"
             : "No plan yet · Mag-load via GCash";
       } else if (planPct <= 0) {
-        hint.textContent = "Period used up · Mag-load to continue";
-      } else if (exp) {
-        hint.textContent = `${clampedPct}% left · ends ${exp}`;
+        hint.textContent = "Usage empty · Mag-load to continue";
       } else {
-        hint.textContent = `${clampedPct}% left this period`;
+        // Pay-as-you-go: wallet only — no calendar expiry line.
+        hint.textContent = `${clampedPct}% left`;
       }
     }
     row?.classList.toggle("is-byok", !active);
@@ -580,7 +578,7 @@ export class Sidebar {
       if (!active) {
         metaEl.textContent = "Buy or renew a plan to unlock hosted usage";
       } else {
-        metaEl.textContent = `${clampedPct}% remaining this period`;
+        metaEl.textContent = `${clampedPct}% usage remaining`;
       }
     }
 
@@ -599,7 +597,7 @@ export class Sidebar {
     }
 
     this.usageRoot.title = active
-      ? `${name} · ${clampedPct}% left this period`
+      ? `${name} · ${clampedPct}% usage left`
       : "No active plan — Mag-load via GCash";
   }
   private actionBtn(

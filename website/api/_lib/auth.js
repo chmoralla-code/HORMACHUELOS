@@ -82,8 +82,7 @@ export async function publicAccountWithUsage(row) {
       planRemainingPct: 100,
     };
   }
-  const expired = new Date(license.expires_at).getTime() < Date.now();
-  const active = Boolean(license.active) && !expired;
+  const active = Boolean(license.active);
   const budget = Number(license.token_budget) || planBudget(license.plan);
   const used = Number(license.tokens_used) || 0;
   const remaining = Math.max(0, budget - used);
@@ -91,12 +90,12 @@ export async function publicAccountWithUsage(row) {
     budget > 0 ? Math.max(0, Math.min(100, Math.round((remaining / budget) * 100))) : 0;
   return {
     ...base,
-    plan: expired ? "expired" : license.plan || base.plan || "free",
+    plan: license.plan || base.plan || "free",
     licenseKey: license.key || base.licenseKey,
     tokenBudget: budget,
     tokensUsed: used,
     licenseActive: active,
-    expiresAt: String(license.expires_at || "").slice(0, 10),
+    expiresAt: "",
     planRemainingPct,
   };
 }

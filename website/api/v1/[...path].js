@@ -263,9 +263,7 @@ async function handleChat(req, res) {
       return json(res, 403, { error: "Invalid or inactive license" }, req);
     }
   }
-  if (new Date(license.expires_at).getTime() < Date.now()) {
-    return json(res, 403, { error: "License expired" }, req);
-  }
+  // Paid plans are pay-as-you-go (usage wallet). Free entitlement still has its own period check above.
   const budget = Number(license.token_budget) || 0;
   const used = Number(license.tokens_used) || 0;
   if (budget > 0 && used >= budget) {

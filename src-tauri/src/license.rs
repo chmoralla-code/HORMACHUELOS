@@ -286,26 +286,9 @@ pub fn should_use_hosted_for_provider(status: &LicenseStatus, provider: &str) ->
 }
 
 impl LicenseStatus {
-    fn enforce_expiry_at(&mut self, today: NaiveDate) -> bool {
-        if !self.active || self.plan.eq_ignore_ascii_case("free") {
-            return false;
-        }
-        let Some(expires) = parse_expiry_date(&self.expires_at) else {
-            return false;
-        };
-        // Date-only licenses remain usable throughout their displayed expiry day.
-        if expires >= today {
-            return false;
-        }
-        self.plan = "expired".into();
-        self.active = false;
-        self.token_budget = 0;
-        self.blocked_by = "plan".into();
-        self.message = format!(
-            "License expired on {}. Renew the plan to start new agent runs.",
-            self.expires_at
-        );
-        true
+    fn enforce_expiry_at(&mut self, _today: NaiveDate) -> bool {
+        // Pay-as-you-go plans are gated by usage wallet only — no calendar expiry.
+        false
     }
 
     fn enforce_expiry(&mut self) -> bool {
@@ -627,18 +610,18 @@ fn apply_license_key_local(key: &str) -> Result<LicenseStatus> {
             status.active = true;
             status.token_budget = plan_budget("max20");
             status.tokens_used = 0;
-            status.expires_at = expires_in_days(30);
+            status.expires_at = String::new();
             status.message =
-                "Max 20× plan activated (local test). 20× usage vs Pro · 30 days.".into();
+                "Max 20× plan activated (local test). Pay-as-you-go usage wallet.".into();
             status.reset_windows_fresh();
         } else if upper.starts_with("HORMA-MAX10") {
             status.plan = "max10".into();
             status.active = true;
             status.token_budget = plan_budget("max10");
             status.tokens_used = 0;
-            status.expires_at = expires_in_days(30);
+            status.expires_at = String::new();
             status.message =
-                "Max 10× plan activated (local test). 10× usage vs Pro · 30 days.".into();
+                "Max 10× plan activated (local test). Pay-as-you-go usage wallet.".into();
             status.reset_windows_fresh();
         } else if upper.starts_with("HORMA-MAX")
             || upper.starts_with("HORMA-ULTRA")
@@ -648,9 +631,9 @@ fn apply_license_key_local(key: &str) -> Result<LicenseStatus> {
             status.active = true;
             status.token_budget = plan_budget("max5");
             status.tokens_used = 0;
-            status.expires_at = expires_in_days(30);
+            status.expires_at = String::new();
             status.message =
-                "Max 5× plan activated (local test). 5× usage vs Pro · 30 days.".into();
+                "Max 5× plan activated (local test). Pay-as-you-go usage wallet.".into();
             status.reset_windows_fresh();
         } else if upper.starts_with("HORMA-PROPLUS")
             || upper.starts_with("HORMA-PRO+")
@@ -661,9 +644,9 @@ fn apply_license_key_local(key: &str) -> Result<LicenseStatus> {
             status.active = true;
             status.token_budget = plan_budget("proplus");
             status.tokens_used = 0;
-            status.expires_at = expires_in_days(30);
+            status.expires_at = String::new();
             status.message =
-                "Pro+ plan activated (local test). ~2.5× usage vs Pro · 30 days.".into();
+                "Pro+ plan activated (local test). Pay-as-you-go usage wallet.".into();
             status.reset_windows_fresh();
         } else if upper.starts_with("HORMA-PRO")
             || upper.starts_with("HORMA-STARTER")
@@ -676,8 +659,8 @@ fn apply_license_key_local(key: &str) -> Result<LicenseStatus> {
             status.active = true;
             status.token_budget = plan_budget("pro");
             status.tokens_used = 0;
-            status.expires_at = expires_in_days(30);
-            status.message = "Pro plan activated (local test). Generous usage · 30 days.".into();
+            status.expires_at = String::new();
+            status.message = "Pro plan activated (local test). Pay-as-you-go usage wallet.".into();
             status.reset_windows_fresh();
         } else {
             status.message =
@@ -784,21 +767,20 @@ mod tests {
     }
 
     #[test]
-    fn paid_license_is_deactivated_after_expiry() {
+    fn payg_license_ignores_calendar_expiry() {
         let mut status = LicenseStatus {
             plan: "pro".into(),
             active: true,
             expires_at: "2026-07-14".into(),
             ..Default::default()
         };
-        assert!(status.enforce_expiry_at(NaiveDate::from_ymd_opt(2026, 7, 15).unwrap()));
-        assert!(!status.active);
-        assert_eq!(status.plan, "expired");
-        assert_eq!(status.token_budget, 0);
+        assert!(!status.enforce_expiry_at(NaiveDate::from_ymd_opt(2026, 7, 15).unwrap()));
+        assert!(status.active);
+        assert_eq!(status.plan, "pro");
     }
 
     #[test]
-    fn paid_license_remains_active_on_expiry_day() {
+    fn payg_license_remains_active_with_or_without_expiry_date() {
         let mut status = LicenseStatus {
             plan: "pro".into(),
             active: true,
@@ -806,6 +788,9 @@ mod tests {
             ..Default::default()
         };
         assert!(!status.enforce_expiry_at(NaiveDate::from_ymd_opt(2026, 7, 15).unwrap()));
+        assert!(status.active);
+        status.expires_at.clear();
+        assert!(!status.enforce_expiry_at(NaiveDate::from_ymd_opt(2099, 1, 1).unwrap()));
         assert!(status.active);
     }
 }

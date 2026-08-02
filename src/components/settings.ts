@@ -1235,13 +1235,12 @@ export class SettingsModal {
         const r4 = fmtReset(lic.window4hResetsAt);
         const rw = fmtReset(lic.windowWeekResetsAt);
         const planLabel = displayPlanLabel(lic.plan || "plan");
-        const exp = lic.expiresAt ? ` · expires ${lic.expiresAt}` : "";
         licenseStatus.textContent =
-          `${planLabel}${exp} · Current ${p4}%` +
+          `${planLabel} · Current ${p4}%` +
           (r4 ? ` (resets ${r4})` : "") +
           ` · Weekly ${pw}%` +
           (rw ? ` (resets ${rw})` : "") +
-          ` · Period ${planPct}%`;
+          ` · Usage ${planPct}%`;
         topUpBtn.onclick = () => {
           window.open(lic.topUpUrl || "https://hormachuelos.com/#/pricing", "_blank", "noopener");
         };

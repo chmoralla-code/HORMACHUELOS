@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.17";
-const BUILTIN_MSI_SHA256 = "a00e6f0f69494b90ced2a66ca903b2f7ec4972653cc80abf533a312b74348a1a";
-const BUILTIN_EXE_SHA256 = "309e07898e92d1855ef8aa71bc3b3897cc4cdc14732b05ed16d01926ec6b3e2b";
-const BUILTIN_RELEASE_NOTES = "• Plan usage pools sized from official model list prices with a 2× markup\n• Starter 0.92M · Pro 3.08M · Max 7.69M / 15.4M / 30.8M units\n• Billable burn tracks real model costs (Sol, Luna, DeepSeek, Claude, and more)";
+const BUILTIN_RELEASE_VERSION = "0.1.18";
+const BUILTIN_MSI_SHA256 = "5735ee4f98f57563306ab930741c83a672520e5a3fd7f99fb55976388e6688bc";
+const BUILTIN_EXE_SHA256 = "c7d85ccce7651ef70fecbed68b569735ba579ee03f42660e9cbac8be8f570411";
+const BUILTIN_RELEASE_NOTES = "• Pay-as-you-go plans no longer show or enforce calendar expiry\n• Usage sidebar shows remaining wallet % only\n• Paid licenses stay active until usage is exhausted or Mag-load tops up";
 
 /**
  * A deployment-bundled release keeps the download/update path available even
