@@ -548,7 +548,7 @@ pub async fn apply_license_key(key: &str) -> Result<LicenseStatus> {
                         .token_budget
                         .unwrap_or_else(|| plan_budget(&status.plan));
                     status.tokens_used = body.tokens_used.unwrap_or(0);
-                    status.expires_at = body.expires_at.unwrap_or_else(|| expires_in_days(30));
+                    status.expires_at = body.expires_at.unwrap_or_default();
                     status.top_up_url = body
                         .top_up_url
                         .unwrap_or_else(|| format!("{}/#/pricing", hosted_api_base()));
