@@ -1,5 +1,5 @@
 import { api, type Settings } from "../ipc";
-import { PROVIDERS, effortOptionsForProvider, displayModelName, getProviderMeta, getSettingsSafe, hasStaticModelCatalog, isUltraEffort, mergeProviderModelCatalog, normalizeEffortForProvider, refreshHostedProviderCatalog, uiProviderId, usesReasoningEffort, visibleProviders } from "./settings";
+import { PROVIDERS, effortOptionsForProvider, displayModelName, getProviderMeta, getSettingsSafe, hasStaticModelCatalog, isOpenRouterFreeModel, isUltraEffort, mergeProviderModelCatalog, normalizeEffortForProvider, refreshHostedProviderCatalog, uiProviderId, usesReasoningEffort, visibleProviders } from "./settings";
 import { clear, el, escapeHtml } from "./util";
 import { icon, icons } from "./icons";
 
@@ -168,7 +168,7 @@ export class ModelBar {
       );
       const discovered =
         providerId === "openrouter"
-          ? modelsRaw.filter((id) => id.includes(":free"))
+          ? modelsRaw.filter((id) => isOpenRouterFreeModel(id))
           : modelsRaw;
       const models = mergeProviderModelCatalog(providerId, discovered);
       if (models.length) {

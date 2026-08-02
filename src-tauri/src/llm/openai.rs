@@ -455,7 +455,11 @@ fn parse_model_ids(text: &str, require_tools: bool, free_only: bool) -> Result<V
                     })
         })
         .filter_map(|model| model.get("id").and_then(Value::as_str))
-        .filter(|model| !free_only || model.ends_with(":free"))
+        .filter(|model| {
+            !free_only
+                || model.ends_with(":free")
+                || *model == "openrouter/free"
+        })
         .filter(|model| !model.is_empty() && model.len() <= 200)
         .map(str::to_string)
         .collect();

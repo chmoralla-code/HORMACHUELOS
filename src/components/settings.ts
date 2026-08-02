@@ -124,11 +124,12 @@ export const PROVIDERS: ProviderDef[] = [
     label: "OpenRouter",
     logoKey: "openrouter",
     logoSrc: "./logos/openrouter.svg",
-    defaultModel: "meta-llama/llama-3.3-70b-instruct:free",
+    defaultModel: "openrouter/free",
     defaultBaseUrl: "https://openrouter.ai/api/v1",
     keyUrl: "https://openrouter.ai/keys",
     keyRequired: true,
     models: [
+      "openrouter/free",
       "meta-llama/llama-3.3-70b-instruct:free",
       "meta-llama/llama-3.2-3b-instruct:free",
       "openai/gpt-oss-120b:free",
@@ -340,7 +341,14 @@ const MODEL_DISPLAY_NAMES: Record<string, string> = {
   "laguna-s-2.1-free": "Laguna S 2.1 Free",
   "nemotron-3-ultra-free": "Nemotron 3 Ultra Free",
   "big-pickle": "Big Pickle Free",
+  "openrouter/free": "Free Models Router",
 };
+
+/** OpenRouter free-tier ids: `:free` variants and the free models router. */
+export function isOpenRouterFreeModel(modelId: string): boolean {
+  const id = String(modelId || "").trim().toLowerCase();
+  return id.includes(":free") || id === "openrouter/free";
+}
 
 /** Providers routed through the Cursor local SDK (not chat-completions). */
 export const CURSOR_SDK_PROVIDER_IDS = new Set(["cursor"]);
@@ -372,7 +380,9 @@ export function hasStaticModelCatalog(providerId: string): boolean {
 export function mergeProviderModelCatalog(providerId: string, models: readonly string[]): string[] {
   const meta = getProviderMeta(providerId);
   const configured =
-    providerId === "hormachuelos_free" || meta?.hostedManaged
+    providerId === "hormachuelos_free" ||
+    providerId === "openrouter" ||
+    meta?.hostedManaged
       ? meta?.models ?? []
       : [];
   return [...new Set([...configured, ...models].map((model) => model.trim()).filter(Boolean))];
@@ -628,7 +638,7 @@ export function normalizeSettings(s: Settings): Settings {
   }
   if (s.provider === "openrouter") {
     // Keep OpenRouter on free models only — never surface paid catalog IDs.
-    if (!String(s.model || "").includes(":free")) {
+    if (!isOpenRouterFreeModel(s.model)) {
       s.model = meta.defaultModel;
     }
   }
@@ -804,7 +814,7 @@ export class SettingsModal {
       // OpenRouter: keep free models only so the picker never floods with paid IDs.
       const discovered =
         providerId === "openrouter"
-          ? modelsRaw.filter((id) => id.includes(":free"))
+          ? modelsRaw.filter((id) => isOpenRouterFreeModel(id))
           : providerId === "glm"
             ? modelsRaw.filter(
                 (id) =>
