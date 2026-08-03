@@ -32,12 +32,43 @@ struct BridgeEvent {
     result: Option<String>,
     #[serde(rename = "agentId")]
     agent_id: Option<String>,
+    /// The bridge sets this only when an implementation task explicitly
+    /// declared the hidden completion marker in its final answer.
+    completed: Option<bool>,
     #[serde(rename = "requestId")]
     request_id: Option<String>,
     summary: Option<String>,
     turn_tokens: Option<u64>,
     total_tokens: Option<u64>,
     iteration: Option<u32>,
+}
+
+// This guards only automatic Cursor follow-up passes. It does not limit the
+// SDK agent's own tool loop, which may take as many concrete steps as needed.
+const MAX_CURSOR_AUTOMATIC_CONTINUATIONS: u8 = 6;
+const CURSOR_FIRST_EVENT_TIMEOUT: Duration = Duration::from_secs(45);
+const CURSOR_IDLE_TIMEOUT: Duration = Duration::from_secs(12 * 60);
+const CURSOR_MAX_ACTIVE_DURATION: Duration = Duration::from_secs(45 * 60);
+
+const CURSOR_AUTOMATIC_CONTINUATION_PROMPT: &str = "[System - Automatic continuation]\n\
+The previous agent pass ended without the required completion marker. Continue the SAME implementation task from the current workspace and durable agent state.\n\
+Do not repeat completed work and do not ask the client to type \"continue\". Inspect what remains, implement and verify the next steps, then finish with [[HORMACHUELOS_TASK_COMPLETE]] only when the full requested task is genuinely complete.";
+
+#[derive(Debug)]
+struct CursorTurnOutcome {
+    agent_id: Option<String>,
+    completion_marker_seen: bool,
+    terminal: bool,
+}
+
+impl CursorTurnOutcome {
+    fn terminal(agent_id: Option<String>) -> Self {
+        Self {
+            agent_id,
+            completion_marker_seen: false,
+            terminal: true,
+        }
+    }
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -362,6 +393,7 @@ fn handle_event(
     session_id: &str,
     event: BridgeEvent,
     agent_id_out: &mut Option<String>,
+    completion_marker_seen: &mut bool,
     saw_error: &mut Option<String>,
     model: &str,
 ) -> bool {
@@ -417,6 +449,9 @@ fn handle_event(
         "done" => {
             if let Some(id) = event.agent_id.filter(|s| !s.is_empty()) {
                 *agent_id_out = Some(id);
+            }
+            if event.completed.unwrap_or(false) {
+                *completion_marker_seen = true;
             }
         }
         "usage" => {
@@ -495,7 +530,114 @@ pub async fn run_cursor_turn(
     run: Arc<SessionRun>,
     history: &[HistoryTurn],
     resume_agent_id: Option<String>,
+    requires_project_completion: bool,
 ) -> Result<Option<String>> {
+    let mut continuation_pass: u8 = 0;
+    let mut current_prompt = prompt.to_string();
+    let mut current_agent_id = resume_agent_id;
+
+    loop {
+        let outcome = run_cursor_attempt(
+            app.clone(),
+            project_root,
+            &current_prompt,
+            api_key,
+            model,
+            effort,
+            permission_mode,
+            computer_use_enabled,
+            session_id,
+            run.clone(),
+            history,
+            current_agent_id.clone(),
+            requires_project_completion,
+        )
+        .await?;
+
+        if let Some(id) = outcome.agent_id.filter(|id| !id.is_empty()) {
+            current_agent_id = Some(id);
+        }
+
+        if outcome.terminal || !requires_project_completion || outcome.completion_marker_seen {
+            if !outcome.terminal {
+                emit(
+                    &app,
+                    session_id,
+                    "end",
+                    json!({ "reason": "completed", "iteration": continuation_pass }),
+                );
+            }
+            return Ok(current_agent_id);
+        }
+
+        if current_agent_id.is_none() {
+            emit(
+                &app,
+                session_id,
+                "text",
+                json!({
+                    "text": "\n\n— The Cursor agent finished without a resumable checkpoint, so automatic continuation could not safely preserve its state."
+                }),
+            );
+            emit(
+                &app,
+                session_id,
+                "end",
+                json!({ "reason": "continuation_checkpoint_missing", "iteration": continuation_pass }),
+            );
+            return Ok(None);
+        }
+
+        if continuation_pass >= MAX_CURSOR_AUTOMATIC_CONTINUATIONS {
+            emit(
+                &app,
+                session_id,
+                "text",
+                json!({
+                    "text": "\n\n— Automatic continuation paused after several incomplete Cursor passes. Your workspace and agent checkpoint are preserved; inspect the latest progress before another pass."
+                }),
+            );
+            emit(
+                &app,
+                session_id,
+                "end",
+                json!({ "reason": "continuation_safety_guard", "iteration": continuation_pass }),
+            );
+            return Ok(current_agent_id);
+        }
+
+        continuation_pass = continuation_pass.saturating_add(1);
+        emit(
+            &app,
+            session_id,
+            "reasoning",
+            json!({
+                "text": "Continuing automatically from the unfinished Cursor task...",
+                "iteration": continuation_pass,
+            }),
+        );
+        current_prompt = CURSOR_AUTOMATIC_CONTINUATION_PROMPT.to_string();
+    }
+}
+
+/// Run one Cursor SDK pass. The outer runner owns automatic continuation so
+/// the desktop keeps one user-initiated session active across resumed passes.
+#[allow(clippy::too_many_arguments)]
+async fn run_cursor_attempt(
+    app: Arc<AppHandle>,
+    project_root: &str,
+    prompt: &str,
+    api_key: &str,
+    model: &str,
+    effort: &str,
+    permission_mode: &str,
+    computer_use_enabled: bool,
+    session_id: &str,
+    run: Arc<SessionRun>,
+    history: &[HistoryTurn],
+    resume_agent_id: Option<String>,
+    requires_project_completion: bool,
+) -> Result<CursorTurnOutcome> {
     let bridge = bridge_script_path()?;
     let node_runtime = node_runtime_path(&bridge);
     let forge_root = bridge
@@ -542,6 +684,7 @@ pub async fn run_cursor_turn(
         "prompt": prompt,
         "history": bounded_history,
         "agentId": resume_agent_id,
+        "completionMarker": requires_project_completion.then_some("[[HORMACHUELOS_TASK_COMPLETE]]"),
         "computerUseEnabled": computer_use_active,
         "computerHelperPath": computer_helper_path,
         "computerSessionSecret": computer_session_secret,
@@ -618,11 +761,11 @@ pub async fn run_cursor_turn(
     });
 
     let mut agent_id_out: Option<String> = None;
+    let mut completion_marker_seen = !requires_project_completion;
     let mut saw_error: Option<String> = None;
     let mut saw_bridge_event = false;
     let started = std::time::Instant::now();
-    const FIRST_EVENT_TIMEOUT: Duration = Duration::from_secs(45);
-    const TOTAL_TIMEOUT: Duration = Duration::from_secs(300);
+    let mut last_bridge_event = started;
 
     loop {
         if cancel.load(Ordering::SeqCst) {
@@ -630,10 +773,10 @@ pub async fn run_cursor_turn(
             emit(&app, session_id, "cancelled", json!({ "iteration": 0 }));
             *run.active_pid.lock().unwrap() = None;
             let _ = stderr_task.await;
-            return Ok(agent_id_out);
+            return Ok(CursorTurnOutcome::terminal(agent_id_out));
         }
 
-        if !saw_bridge_event && started.elapsed() > FIRST_EVENT_TIMEOUT {
+        if !saw_bridge_event && started.elapsed() > CURSOR_FIRST_EVENT_TIMEOUT {
             let _ = child.start_kill();
             let msg = "Cursor SDK took too long to start. Check your Cursor API key and network, then try again.";
             emit(
@@ -653,9 +796,29 @@ pub async fn run_cursor_turn(
             return Err(anyhow!(msg));
         }
 
-        if started.elapsed() > TOTAL_TIMEOUT {
+        if last_bridge_event.elapsed() > CURSOR_IDLE_TIMEOUT {
             let _ = child.start_kill();
-            let msg = "Cursor SDK run timed out after 5 minutes.";
+            let msg = "Cursor SDK stopped reporting progress for 12 minutes.";
+            emit(
+                &app,
+                session_id,
+                "text",
+                json!({ "text": format!("Error: {msg}") }),
+            );
+            emit(
+                &app,
+                session_id,
+                "end",
+                json!({ "reason": "timeout", "iteration": 0 }),
+            );
+            *run.active_pid.lock().unwrap() = None;
+            let _ = stderr_task.await;
+            return Err(anyhow!(msg));
+        }
+
+        if started.elapsed() > CURSOR_MAX_ACTIVE_DURATION {
+            let _ = child.start_kill();
+            let msg = "Cursor SDK reached the 45-minute active-run safety window.";
             emit(
                 &app,
                 session_id,
@@ -680,6 +843,7 @@ pub async fn run_cursor_turn(
                     continue;
                 }
                 saw_bridge_event = true;
+                last_bridge_event = std::time::Instant::now();
                 if let Ok(event) = serde_json::from_str::<BridgeEvent>(line) {
                     if event.kind == "approval_request" {
                         let Some(request_id) = event.request_id.filter(|value| !value.is_empty())
@@ -727,6 +891,7 @@ pub async fn run_cursor_turn(
                         session_id,
                         event,
                         &mut agent_id_out,
+                        &mut completion_marker_seen,
                         &mut saw_error,
                         model,
                     );
@@ -741,7 +906,7 @@ pub async fn run_cursor_turn(
                             "end",
                             json!({ "reason": "usage_limit", "iteration": 0 }),
                         );
-                        return Ok(agent_id_out);
+                        return Ok(CursorTurnOutcome::terminal(agent_id_out));
                     }
                 }
             }
@@ -787,13 +952,11 @@ pub async fn run_cursor_turn(
         return Err(anyhow!(err));
     }
 
-    emit(
-        &app,
-        session_id,
-        "end",
-        json!({ "reason": "completed", "iteration": 0 }),
-    );
-    Ok(agent_id_out)
+    Ok(CursorTurnOutcome {
+        agent_id: agent_id_out,
+        completion_marker_seen,
+        terminal: false,
+    })
 }
 
 #[cfg(test)]

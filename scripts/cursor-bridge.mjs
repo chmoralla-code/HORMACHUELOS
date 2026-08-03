@@ -695,6 +695,60 @@ function createTextCoalescer(onFlush) {
 }
 
 /**
+ * Hide the host-only completion marker from the visible reply while accepting
+ * streamed chunks where the marker can be split at arbitrary boundaries.
+ * The Rust host uses the resulting completion flag to resume an unfinished
+ * Cursor agent on its durable checkpoint without asking the client to type
+ * "continue".
+ */
+function createCompletionMarkerFilter(marker, onText) {
+  const normalizedMarker = String(marker || "").trim();
+  let pending = "";
+  let completed = !normalizedMarker;
+
+  const removeCompleteMarkers = () => {
+    if (!normalizedMarker) return;
+    let markerIndex = pending.indexOf(normalizedMarker);
+    while (markerIndex >= 0) {
+      if (markerIndex > 0) onText(pending.slice(0, markerIndex));
+      pending = pending.slice(markerIndex + normalizedMarker.length);
+      completed = true;
+      markerIndex = pending.indexOf(normalizedMarker);
+    }
+  };
+
+  return {
+    push(text) {
+      if (!text) return;
+      if (!normalizedMarker) {
+        onText(text);
+        return;
+      }
+      pending += text;
+      removeCompleteMarkers();
+
+      // Keep a suffix large enough to recognize a marker crossing the next
+      // stream boundary; everything before it is safe for the UI.
+      const keep = Math.min(normalizedMarker.length - 1, pending.length);
+      const flushLength = pending.length - keep;
+      if (flushLength > 0) {
+        onText(pending.slice(0, flushLength));
+        pending = pending.slice(flushLength);
+      }
+    },
+    flush() {
+      if (!normalizedMarker) return;
+      removeCompleteMarkers();
+      if (pending) onText(pending);
+      pending = "";
+    },
+    get completed() {
+      return completed;
+    },
+  };
+}
+
+/**
  * Thinking may arrive as tiny deltas OR full cumulative snapshots.
  * Normalize to deltas and emit immediately so the UI can type live.
  */
@@ -749,6 +803,7 @@ async function runMain(protocol) {
 
   const cwd = (req.cwd || "").trim();
   const prompt = (req.prompt || "").trim();
+  const completionMarker = String(req.completionMarker || "").trim();
   if (!cwd) throw new Error("Missing cwd.");
   if (!prompt) throw new Error("Missing prompt.");
 
@@ -845,11 +900,14 @@ async function runMain(protocol) {
     write({ type: "text", text: chunk });
     emitUsageDelta(false);
   });
+  const completionFilter = createCompletionMarkerFilter(completionMarker, (chunk) =>
+    textOut.push(chunk),
+  );
 
   function flushHeldAssistant() {
     thinkingActive = false;
     for (const chunk of heldAssistant.splice(0)) {
-      textOut.push(chunk);
+      completionFilter.push(chunk);
     }
   }
 
@@ -992,7 +1050,7 @@ async function runMain(protocol) {
     if (thinkingActive) {
       heldAssistant.push(delta);
     } else {
-      textOut.push(delta);
+      completionFilter.push(delta);
     }
   }
 
@@ -1110,22 +1168,30 @@ async function runMain(protocol) {
   }
 
   flushHeldAssistant();
-  textOut.flush();
-
-  // Seal any tools the SDK left open so the UI doesn't keep shimmering after Done
-  for (const [id, meta] of openTools.entries()) {
-    emitToolResult(id, meta.name, true, "(completed)");
-  }
-
   const result = await run.wait();
   const finalText =
     (typeof result?.result === "string" && result.result) ||
     (typeof result?.text === "string" && result.text) ||
     "";
 
-  if (!sawText && finalText) {
-    assistantChars += finalText.length;
-    write({ type: "text", text: finalText });
+  if (!assistantSeen && finalText) {
+    pushAssistantText(finalText);
+  } else if (
+    completionMarker &&
+    !completionFilter.completed &&
+    finalText.includes(completionMarker)
+  ) {
+    // Some SDK runtimes stream the prose but expose the terminal marker only
+    // on RunResult. Record it without replaying the already-visible reply.
+    completionFilter.push(completionMarker);
+  }
+  flushHeldAssistant();
+  completionFilter.flush();
+  textOut.flush();
+
+  // Seal any tools the SDK left open so the UI doesn't keep shimmering after Done
+  for (const [id, meta] of openTools.entries()) {
+    emitToolResult(id, meta.name, true, "(completed)");
   }
 
   const status = result?.status || "finished";
@@ -1146,6 +1212,7 @@ async function runMain(protocol) {
   write({
     type: "done",
     status,
+    completed: completionFilter.completed,
     // Never put the reply text here — Rust used to forward it as a Done-card
     // summary and the UI showed the same answer twice.
     agentId: agent.agentId || agent.id || null,
@@ -1169,6 +1236,7 @@ export {
   boundedHistory,
   buildAgentPrompt,
   computerApprovalSummary,
+  createCompletionMarkerFilter,
   createComputerUseTools,
   helperEnvironment,
   isToolAllowed,

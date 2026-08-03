@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.25";
-const BUILTIN_MSI_SHA256 = "c6da5ed48716fe09234373cf31c82e1b8f9ad7754db589f66217d8a3be57a7a2";
-const BUILTIN_EXE_SHA256 = "e104dec1d9b0811c5a47fa458fe9a51784f9c82c1bb3a8c3f94c5645e80c9b8a";
-const BUILTIN_RELEASE_NOTES = "Fix plan label so Starter accounts no longer show as Pro. Prefer website account plan when syncing.";
+const BUILTIN_RELEASE_VERSION = "0.1.26";
+const BUILTIN_MSI_SHA256 = "bae7a9bda7c5b1ae988dc6a16dddb4e93b32311c86c1e1d70dc4da83de0d24b1";
+const BUILTIN_EXE_SHA256 = "b7d4acfebcd4e73544f197e6a5d19023c0fcb08a09e2f37c5b614d6471152946";
+const BUILTIN_RELEASE_NOTES = "Long-running website, app, APK, and software tasks now continue automatically after provider output limits. Cursor tasks resume from their durable agent state and no longer stop at the old five-minute cutoff.";
 
 /**
  * A deployment-bundled release keeps the download/update path available even

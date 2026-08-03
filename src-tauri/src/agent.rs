@@ -34,6 +34,122 @@ fn emit_cancelled(app: &AppHandle, session_id: &str, iteration: u32) {
     );
 }
 
+// These are continuation safety guards, not an agent iteration limit. The
+// normal tool loop intentionally remains unbounded. A provider can otherwise
+// repeatedly return the exact same truncated reply forever and burn a user's
+// allowance without making any progress.
+const MAX_AUTOMATIC_CONTINUATIONS: u8 = 12;
+const MAX_PREMATURE_COMPLETION_NUDGES: u8 = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutomaticContinuationReason {
+    OutputLimit,
+    CompletionCheck,
+}
+
+impl AutomaticContinuationReason {
+    fn status_text(self) -> &'static str {
+        match self {
+            Self::OutputLimit => {
+                "The model reached its response limit. Continuing automatically from the next unfinished step..."
+            }
+            Self::CompletionCheck => {
+                "Checking the in-progress task and continuing automatically if work remains..."
+            }
+        }
+    }
+
+    fn instruction(self) -> &'static str {
+        match self {
+            Self::OutputLimit => {
+                "[System - Automatic continuation]\n\
+Your previous response was cut off by the provider's output limit. Continue the SAME task now. \n\
+Keep the existing workspace and conversation state. Do not repeat completed work or ask the user to type \"continue\". \n\
+Inspect the most recent work, take the next concrete tool action, and keep going until the requested work is implemented and verified. \n\
+Call done only when the task is genuinely complete."
+            }
+            Self::CompletionCheck => {
+                "[System - Automatic continuation]\n\
+This is an active build, fix, release, or project task, but the previous response ended without a completion signal. \n\
+Continue the SAME task now. Inspect the workspace and prior tool results; if anything remains, perform the next concrete action and verify it. \n\
+Do not stop at a progress update and do not ask the user to type \"continue\". \n\
+If and only if everything requested is actually complete, call done with the final summary."
+            }
+        }
+    }
+}
+
+/// Providers use different spellings for an answer that ended because the
+/// response budget was exhausted. Those are not successful task completions.
+fn stop_reason_requires_continuation(stop_reason: &str) -> bool {
+    let normalized = stop_reason
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['-', ' '], "_");
+    matches!(
+        normalized.as_str(),
+        "length"
+            | "max_tokens"
+            | "max_output_tokens"
+            | "max_completion_tokens"
+            | "max_tokens_reached"
+            | "max_output"
+            | "output_limit"
+            | "token_limit"
+            | "token_limit_reached"
+            | "truncated"
+            | "incomplete"
+    ) || normalized.contains("max_token")
+        || normalized.contains("output_limit")
+        || normalized.contains("token_limit")
+}
+
+fn contains_task_term(text: &str, term: &str) -> bool {
+    if term.contains(' ') {
+        return text.contains(term);
+    }
+    text.split(|ch: char| !ch.is_ascii_alphanumeric())
+        .any(|word| word == term)
+}
+
+/// Treat only clear implementation-oriented requests as tasks that need an
+/// explicit completion handshake. Ordinary questions must still be allowed to
+/// end with a normal text response.
+fn task_likely_requires_project_completion(prompt: &str) -> bool {
+    let normalized = prompt.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return false;
+    }
+
+    if matches!(normalized.as_str(), "continue" | "keep going" | "go on" | "finish it") {
+        return true;
+    }
+
+    let has_action = [
+        "build", "create", "make", "implement", "develop", "scaffold", "generate", "fix",
+        "debug", "repair", "refactor", "upgrade", "update", "release", "publish", "deploy",
+        "finish", "continue",
+    ]
+    .iter()
+    .any(|word| contains_task_term(&normalized, word));
+    if !has_action {
+        return false;
+    }
+
+    let has_project_target = [
+        "website", "web app", "webapp", "apk", "android", "ios", "app", "application",
+        "software", "project", "code", "codebase", "repository", "repo", "feature", "file",
+        "frontend", "backend", "api", "database", "game", "installer",
+    ]
+    .iter()
+    .any(|word| contains_task_term(&normalized, word));
+
+    has_project_target
+        || ["fix", "debug", "repair", "release", "publish", "deploy", "continue"]
+            .iter()
+            .any(|word| contains_task_term(&normalized, word))
+}
+
 /// Prior session turn for agent memory (from the frontend transcript).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HistoryTurn {
@@ -423,6 +539,7 @@ pub async fn run_loop(
     if uses_cursor_sdk(&settings.provider) {
         match crate::config::load_cursor_sdk_api_key(&settings.provider) {
             Ok(key) => {
+                let requires_project_completion = task_likely_requires_project_completion(&prompt);
                 let effort = cursor_effort_for_request(
                     &settings.model_effort,
                     &prompt,
@@ -431,8 +548,17 @@ pub async fn run_loop(
                 let model_display = display_model_name(&settings.model);
                 let provider_display = display_provider_name(&settings.provider);
                 let permission_mode = normalized_permission_mode(&settings.permission_mode);
+                let completion_contract = if requires_project_completion {
+                    "\n\nAUTONOMOUS LONG-TASK CONTRACT:\n\
+- This is an implementation task. Keep using tools until the requested website, app, APK, software, or fix is actually complete and verified.\n\
+- Do not stop after a plan, a partial progress report, or an unfinished response. Do not tell the client to type \"continue\".\n\
+- When the task is truly complete, finish your final reply with this exact standalone marker: [[HORMACHUELOS_TASK_COMPLETE]].\n\
+- The desktop host removes that marker from the visible reply and automatically resumes the same agent if the marker is absent.\n"
+                } else {
+                    ""
+                };
                 let wrapped_prompt = format!(
-                    "{identity}\n\n{policy}{computer_policy}\n\n\
+                    "{identity}\n\n{policy}{computer_policy}{completion_contract}\n\n\
 IN-APP PREVIEW:\n\
 - Hormachuelos has a built-in Preview panel on the right. Do NOT open websites/games in Chrome or the system browser.\n\
 - After creating or updating HTML (index.html, game pages, etc.), call open_path on that HTML file so the in-app Preview opens.\n\
@@ -441,6 +567,7 @@ Current user request:\n{prompt}",
                     identity = identity_instructions(&model_display, &provider_display),
                     policy = cursor_permission_instructions(&permission_mode),
                     computer_policy = cursor_computer_use_instructions(settings.computer_use_enabled),
+                    completion_contract = completion_contract,
                     prompt = prompt,
                 );
                 return crate::cursor_bridge::run_cursor_turn(
@@ -456,6 +583,7 @@ Current user request:\n{prompt}",
                     run,
                     &history,
                     cursor_resume_agent_id,
+                    requires_project_completion,
                 )
                 .await;
             }
@@ -729,9 +857,10 @@ BASE RULES (mode rules above win on conflict):\n\
 {execution_style}\
 7. When the task is COMPLETE, call `done` with a short plain summary: title, description, summary, key files, tech, features (up to 5). No hype. Pure conversation can end without done.\n\
 8. If a command fails, read the error, fix the cause, and retry — don't give up immediately.\n\
-9. Only do what the user asked (or what they approved in Plan mode). No unrelated changes.\n\
-10. For deploy/git hosting: use connected integrations first. If missing, call connect_account (in-chat secure form + browser) — do not run interactive CLI login via run_command and do not request credentials in the chat message box.\n\
-11. Format final prose as clean Markdown: use a short Result heading followed by clear sections and bullets; use Markdown tables only for comparisons. Every table must include a header row and separator row; never use unaligned plain-text columns. Never print raw JSON, function-call syntax, tool arguments, or a literal `done` payload for the user. When work is complete, call the done tool instead of repeating its title, files, and features as loose prose.\n\
+9. For an active build, fix, release, deployment, website, APK, app, or software task: keep taking concrete tool steps until all requested work is implemented and verified. Do NOT stop at a progress update, partial response, or an unfinished plan, and never ask the user to type \"continue\". If the provider reaches an output limit, the host will resume this same run automatically with its current workspace and tool history.\n\
+10. Only do what the user asked (or what they approved in Plan mode). No unrelated changes.\n\
+11. For deploy/git hosting: use connected integrations first. If missing, call connect_account (in-chat secure form + browser) — do not run interactive CLI login via run_command and do not request credentials in the chat message box.\n\
+12. Format final prose as clean Markdown: use a short Result heading followed by clear sections and bullets; use Markdown tables only for comparisons. Every table must include a header row and separator row; never use unaligned plain-text columns. Never print raw JSON, function-call syntax, tool arguments, or a literal `done` payload for the user. When work is complete, call the done tool instead of repeating its title, files, and features as loose prose.\n\
 {memory_rules}\n\
 TOOL REFERENCE: read_file, write_file, edit_file, list_dir, glob, grep, run_command, git_init, git_add_all, git_commit, git_status, list_drives, sys_info, env_vars, list_processes, kill_process, open_url, open_path, download_file, move_file, copy_file, delete_file, make_dir, file_info, connect_account, integration_status, web_search, browse_page, export_client_pack, computer_list_windows, computer_observe, computer_focus_window, computer_click, computer_type_text, computer_press_key, computer_scroll, computer_drag, computer_game_sequence, ask_user, done.",
         root = root.display(),
@@ -860,6 +989,12 @@ Use them as continuous memory for everything that follows.",
     let mut total_tokens: u64 = 0;
     // How many times we've forced plan-mode models to call ask_user after text-only replies.
     let mut plan_ask_nudges: u8 = 0;
+    // A continuation is only injected after a provider output cap or a clear
+    // project task that ended without `done`. This preserves normal concise
+    // answers while keeping long implementation work moving autonomously.
+    let mut automatic_continuations: u8 = 0;
+    let mut premature_completion_nudges: u8 = 0;
+    let requires_project_completion = task_likely_requires_project_completion(&prompt);
     emit(
         &app,
         &session_id,
@@ -1114,6 +1249,64 @@ Use them as continuous memory for everything that follows.",
         }
 
         if resp.tool_calls.is_empty() {
+            let continuation_reason = if stop_reason_requires_continuation(&resp.stop_reason) {
+                Some(AutomaticContinuationReason::OutputLimit)
+            } else if requires_project_completion
+                && !auth_request_routed
+                && mode != "plan"
+                && premature_completion_nudges < MAX_PREMATURE_COMPLETION_NUDGES
+            {
+                Some(AutomaticContinuationReason::CompletionCheck)
+            } else {
+                None
+            };
+
+            if let Some(reason) = continuation_reason {
+                if automatic_continuations >= MAX_AUTOMATIC_CONTINUATIONS {
+                    emit(
+                        &app,
+                        &session_id,
+                        "text",
+                        json!({
+                            "text": "\n\n— Automatic continuation paused after repeated incomplete provider responses. Your workspace and session progress are preserved; review the latest result before starting another pass."
+                        }),
+                    );
+                    emit(
+                        &app,
+                        &session_id,
+                        "end",
+                        json!({
+                            "reason": "continuation_safety_guard",
+                            "iteration": iteration,
+                            "total_tokens": total_tokens,
+                        }),
+                    );
+                    return Ok(None);
+                }
+
+                automatic_continuations = automatic_continuations.saturating_add(1);
+                if reason == AutomaticContinuationReason::CompletionCheck {
+                    premature_completion_nudges = premature_completion_nudges.saturating_add(1);
+                }
+                messages.push(ChatMessage::assistant(
+                    resp.text.as_deref().unwrap_or(""),
+                    None,
+                    resp.reasoning_content.clone(),
+                ));
+                emit(
+                    &app,
+                    &session_id,
+                    "reasoning",
+                    json!({
+                        "text": reason.status_text(),
+                        "iteration": iteration,
+                    }),
+                );
+                messages.push(ChatMessage::user(reason.instruction()));
+                iteration = iteration.saturating_add(1);
+                continue;
+            }
+
             // Plan mode often lists choices in prose without calling ask_user â€” the UI then shows nothing.
             // Nudge the model to call the tool so clickable options appear.
             let should_nudge_plan = mode == "plan"
@@ -1700,8 +1893,8 @@ mod tests {
         cursor_computer_use_instructions, cursor_effort_for_request,
         cursor_permission_instructions, display_model_name, display_provider_name,
         identity_instructions, normalized_permission_mode, public_tool_arguments,
-        public_tool_preview_delta, resolve_tool_preview_name, tool_confirm_summary, truncate_utf8,
-        uses_cursor_sdk,
+        public_tool_preview_delta, resolve_tool_preview_name, stop_reason_requires_continuation,
+        task_likely_requires_project_completion, tool_confirm_summary, truncate_utf8, uses_cursor_sdk,
     };
     use serde_json::json;
 
@@ -1835,5 +2028,36 @@ mod tests {
             cursor_effort_for_request("light", "explain this file", false),
             "low"
         );
+    }
+
+    #[test]
+    fn output_limit_stop_reasons_resume_instead_of_ending_the_run() {
+        assert!(stop_reason_requires_continuation("length"));
+        assert!(stop_reason_requires_continuation("MAX_TOKENS"));
+        assert!(stop_reason_requires_continuation("max output tokens"));
+        assert!(stop_reason_requires_continuation("token_limit_reached"));
+        assert!(!stop_reason_requires_continuation("stop"));
+        assert!(!stop_reason_requires_continuation("tool_calls"));
+        assert!(!stop_reason_requires_continuation("content_filter"));
+    }
+
+    #[test]
+    fn project_work_requests_get_a_completion_handshake_but_questions_do_not() {
+        assert!(task_likely_requires_project_completion(
+            "Build a website and release the installer"
+        ));
+        assert!(task_likely_requires_project_completion(
+            "Fix the APK build error"
+        ));
+        assert!(task_likely_requires_project_completion("continue"));
+        assert!(!task_likely_requires_project_completion(
+            "What is the difference between a website and an app?"
+        ));
+        assert!(!task_likely_requires_project_completion(
+            "Explain how the current provider works"
+        ));
+        assert!(!task_likely_requires_project_completion(
+            "Can you make a happy birthday message?"
+        ));
     }
 }
