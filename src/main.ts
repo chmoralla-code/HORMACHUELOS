@@ -532,6 +532,12 @@ function isUsageExhausted(): boolean {
 }
 
 function usageBlockMessage(): string {
+  if (usageBlockedBy === "4h") {
+    return "You've hit this 4-hour burst limit. It resets automatically in a few hours — or top up via GCash to keep going.";
+  }
+  if (usageBlockedBy === "week") {
+    return "You've hit this week's usage window. It resets automatically — or top up via GCash to keep going.";
+  }
   return "You've used up this plan period. Mag-load via GCash or upgrade to continue.";
 }
 

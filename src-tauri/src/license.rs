@@ -60,22 +60,22 @@ fn plan_budget(plan: &str) -> u64 {
     }
 }
 
-fn plan_period_days(_plan: &str) -> u64 {
-    30
-}
-
 /// (4h budget, weekly budget) derived from plan pool.
-/// Weekly ≈ fair share of plan over 7 days; 4h ≈ weekly/6 so ~6 full bursts
-/// can exhaust the week (Cursor-style pacing).
+/// Generous pacing caps so a session is never blocked while the plan pool
+/// still has meaningful remaining capacity (e.g. 72% left):
+/// - weekly ≈ 50% of the plan pool
+/// - 4h    ≈ 20% of the plan pool
+/// Previously these were tiny fractions (weekly ≈ plan/4.3, 4h ≈ weekly/6),
+/// which let the burst windows exhaust long before the plan pool and made
+/// sessions "suddenly" hit a usage limit while the UI still showed plenty of
+/// plan remaining.
 fn window_budgets(plan: &str, token_budget: u64) -> (u64, u64) {
     if token_budget == 0 {
         return (0, 0);
     }
-    let days = plan_period_days(plan).max(1);
-    let weekly = ((token_budget as u128) * 7 / days as u128)
-        .min(token_budget as u128)
-        .max(1) as u64;
-    let four_h = (weekly / 6).max(1);
+    let _ = plan;
+    let weekly = ((token_budget as u128) / 2).max(1) as u64;
+    let four_h = ((token_budget as u128) / 5).max(1) as u64;
     (four_h, weekly)
 }
 
@@ -792,5 +792,39 @@ mod tests {
         status.expires_at.clear();
         assert!(!status.enforce_expiry_at(NaiveDate::from_ymd_opt(2099, 1, 1).unwrap()));
         assert!(status.active);
+    }
+
+    #[test]
+    fn burst_windows_are_generous_relative_to_plan_pool() {
+        // Pro plan pool = 3,075,739 tokens.
+        let (four_h, weekly) = window_budgets("pro", plan_budget("pro"));
+        // 4h ≈ 20% of the pool, weekly ≈ 50% of the pool.
+        assert_eq!(four_h, plan_budget("pro") / 5);
+        assert_eq!(weekly, plan_budget("pro") / 2);
+        // The 4h window must be far larger than the old weekly/6 pacing cap
+        // (which was ~119k for pro) so it no longer blocks a session that
+        // still has most of its plan pool left.
+        assert!(four_h > 300_000);
+    }
+
+    #[test]
+    fn session_with_72_percent_remaining_is_not_blocked_by_burst_windows() {
+        // User has used 28% of a pro plan (72% remaining) but only a modest
+        // amount in the current 4h window. This must NOT be rate-blocked.
+        let mut status = LicenseStatus {
+            plan: "pro".into(),
+            active: true,
+            token_budget: plan_budget("pro"),
+            tokens_used: (plan_budget("pro") as f64 * 0.28) as u64,
+            ..Default::default()
+        };
+        status.refresh_rate_windows();
+        // 4h usage well under the 20% burst cap.
+        status.window_4h_used = plan_budget("pro") / 10;
+        status.window_week_used = plan_budget("pro") / 4;
+        status.refresh_rate_windows();
+        assert_eq!(status.blocked_by, "");
+        assert!(!status.is_rate_blocked());
+        assert_eq!(status.remaining_percent(), 72);
     }
 }
