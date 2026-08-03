@@ -334,6 +334,15 @@
   border-color: rgba(110, 155, 240, 0.68);
   color: #fff;
 }
+.site-preview-make-public-btn {
+  border-color: rgba(240, 180, 90, 0.42);
+  color: rgba(255, 210, 140, 0.95);
+}
+.site-preview-make-public-btn:hover {
+  background: linear-gradient(135deg, rgba(230, 160, 60, 0.42), rgba(200, 130, 50, 0.3));
+  border-color: rgba(240, 180, 90, 0.68);
+  color: #fff;
+}
 .site-preview-icon-btn {
   display: grid;
   place-items: center;

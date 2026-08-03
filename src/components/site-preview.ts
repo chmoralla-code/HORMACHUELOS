@@ -433,6 +433,7 @@ export class SitePreview {
   private softwareBtn: HTMLButtonElement;
   private buildApkBtn: HTMLButtonElement;
   private buildSoftwareBtn: HTMLButtonElement;
+  private makePublicBtn: HTMLButtonElement;
   private viewport: HTMLElement;
   private editBar: HTMLElement;
   private editInput: HTMLInputElement;
@@ -569,6 +570,14 @@ export class SitePreview {
     }, ["Build Software"]) as HTMLButtonElement;
     this.buildSoftwareBtn.addEventListener("click", () => this.buildSoftware());
 
+    this.makePublicBtn = el("button", {
+      class: "site-preview-design-btn site-preview-build-btn site-preview-make-public-btn",
+      type: "button",
+      title: "Ask the AI to make this website public via GitHub, Vercel, and Supabase",
+      "aria-label": "Make the website public",
+    }, ["Make Public"]) as HTMLButtonElement;
+    this.makePublicBtn.addEventListener("click", () => this.makePublic());
+
     const close = el("button", {
       class: "site-preview-icon-btn",
       type: "button",
@@ -579,7 +588,7 @@ export class SitePreview {
     close.addEventListener("click", () => this.close());
 
     const actions = el("div", { class: "site-preview-actions" });
-    actions.append(this.buildApkBtn, this.buildSoftwareBtn, this.androidBtn, this.softwareBtn, this.designBtn, close);
+    actions.append(this.buildApkBtn, this.buildSoftwareBtn, this.makePublicBtn, this.androidBtn, this.softwareBtn, this.designBtn, close);
     toolbar.append(this.backBtn, this.forwardBtn, refresh, this.urlInput, actions);
     chrome.append(tabstrip, toolbar);
 
@@ -1499,6 +1508,21 @@ export class SitePreview {
     const entry = this.entryPath || "the current project";
     const project = this.projectRoot ? ` (project: ${this.projectRoot})` : "";
     return `Convert ${entry}${project} into ${target}.\n\n${instruction}`;
+  }
+
+  private makePublic() {
+    const entry = this.entryPath || "the current project";
+    const project = this.projectRoot ? ` (project: ${this.projectRoot})` : "";
+    const prompt = `Make ${entry}${project} public on the internet.
+
+Walk me through the exact steps to deploy this website live using GitHub, Vercel, and Supabase, then carry them out:
+
+1. GitHub — initialize a git repository (if not already one), stage and commit all files, create a new repository, and push the code to it.
+2. Vercel — connect the GitHub repository, configure the build settings (framework preset, build command, output directory), and deploy the site to a public URL.
+3. Supabase — set up the backend: create a project, run any needed database migrations, configure authentication and storage, and wire the environment variables into the deployment.
+
+When finished, give me the live public URL and a short summary of what was deployed.`;
+    this.onDescribe?.(prompt);
   }
 
   private submitDescribe() {
