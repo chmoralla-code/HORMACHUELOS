@@ -111,7 +111,7 @@ export type LicenseStatus = {
   tokensUsed: number;
   topUpUrl: string;
   message: string;
-  /** Provider-style rate windows */
+  /** Recent activity telemetry; these fields never enforce a usage limit. */
   window4hUsed?: number;
   window4hStartedAt?: string;
   window4hBudget?: number;
@@ -120,7 +120,7 @@ export type LicenseStatus = {
   windowWeekStartedAt?: string;
   windowWeekBudget?: number;
   windowWeekResetsAt?: string;
-  /** "" | "plan" | "4h" | "week" */
+  /** "" | "plan" — only an empty hosted plan wallet blocks use. */
   blockedBy?: string;
   /** Dev bypass — limits not enforced (debug builds). */
   limitsDisabled?: boolean;

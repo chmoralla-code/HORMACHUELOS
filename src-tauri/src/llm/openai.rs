@@ -81,7 +81,14 @@ fn build_request_body(
     body
 }
 
-fn provider_http_error(status: reqwest::StatusCode, _body: &str) -> anyhow::Error {
+fn provider_http_error(status: reqwest::StatusCode, body: &str) -> anyhow::Error {
+    // A 402 can originate either from the Hormachuelos wallet or from an
+    // upstream provider. Keep those cases distinct so a client with a healthy
+    // plan meter does not receive a misleading generic provider failure.
+    let hosted_wallet_empty = body.to_ascii_lowercase().contains("usage_exhausted")
+        || body
+            .to_ascii_lowercase()
+            .contains("hosted credits exhausted");
     let (code, message) = match status.as_u16() {
         400 | 422 => (
             "invalid_request",
@@ -90,6 +97,14 @@ fn provider_http_error(status: reqwest::StatusCode, _body: &str) -> anyhow::Erro
         401 | 403 => (
             "authentication_failed",
             "The provider rejected the API key. Save a current key in Settings.",
+        ),
+        402 if hosted_wallet_empty => (
+            "usage_exhausted",
+            "Your hosted plan wallet is empty. Refreshing the account balance now.",
+        ),
+        402 => (
+            "provider_payment_required",
+            "The upstream provider requires credits or rejected this request.",
         ),
         404 => (
             "model_or_endpoint_not_found",
@@ -482,11 +497,7 @@ fn parse_model_ids(text: &str, require_tools: bool, free_only: bool) -> Result<V
                     })
         })
         .filter_map(|model| model.get("id").and_then(Value::as_str))
-        .filter(|model| {
-            !free_only
-                || model.ends_with(":free")
-                || *model == "openrouter/free"
-        })
+        .filter(|model| !free_only || model.ends_with(":free") || *model == "openrouter/free")
         .filter(|model| !model.is_empty() && model.len() <= 200)
         .map(str::to_string)
         .collect();
@@ -803,6 +814,21 @@ mod tests {
     }
 
     #[test]
+    fn distinguishes_hosted_wallet_402_from_an_upstream_payment_error() {
+        let wallet = provider_http_error(
+            reqwest::StatusCode::PAYMENT_REQUIRED,
+            r#"{"code":"usage_exhausted","error":"Hosted credits exhausted"}"#,
+        );
+        let upstream = provider_http_error(
+            reqwest::StatusCode::PAYMENT_REQUIRED,
+            r#"{"error":"upstream account needs credits"}"#,
+        );
+
+        assert!(wallet.to_string().contains("usage_exhausted"));
+        assert!(upstream.to_string().contains("provider_payment_required"));
+    }
+
+    #[test]
     fn parses_reasoning_and_tool_calls_for_replay() {
         let response = parse_response(
             r#"{
@@ -860,7 +886,10 @@ mod tests {
         let response = accumulator.into_response().expect("resumable response");
         assert_eq!(response.stop_reason, "stream_interrupted");
         assert!(response.tool_calls.is_empty());
-        assert_eq!(response.text.as_deref(), Some("I am applying the change..."));
+        assert_eq!(
+            response.text.as_deref(),
+            Some("I am applying the change...")
+        );
     }
 
     #[test]

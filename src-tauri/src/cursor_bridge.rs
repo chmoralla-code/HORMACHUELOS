@@ -410,6 +410,7 @@ fn cursor_permission_enforcement(mode: &str) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_event(
     app: &AppHandle,
     session_id: &str,
@@ -487,17 +488,9 @@ fn handle_event(
         "usage" => {
             let raw = event.turn_tokens.unwrap_or(0);
             let billable = crate::license::to_billable_tokens("cursor", model, raw);
-            let mut license_snapshot = None;
-            let mut blocked = false;
-            if raw > 0 {
-                if let Ok(lic) = crate::license::record_provider_usage("cursor", model, raw) {
-                    blocked = lic.is_rate_blocked();
-                    if blocked {
-                        crate::state::AppState::halt_all_for_usage_limit(app);
-                    }
-                    license_snapshot = serde_json::to_value(lic.for_api()).ok();
-                }
-            }
+            // Cursor uses the customer's Cursor subscription/API key. It is
+            // useful to show per-session tokens, but it must never burn or
+            // hard-stop the separate Hormachuelos hosted-plan wallet.
             emit(
                 app,
                 session_id,
@@ -507,24 +500,9 @@ fn handle_event(
                     "turn_tokens": billable,
                     "raw_tokens": raw,
                     "total_tokens": event.total_tokens.unwrap_or(raw),
-                    "license": license_snapshot,
+                    "license": null,
                 }),
             );
-            if blocked {
-                emit(
-                    app,
-                    session_id,
-                    "text",
-                    json!({ "text": "\n\n— Usage limit reached. Stopping all runs." }),
-                );
-                emit(
-                    app,
-                    session_id,
-                    "cancelled",
-                    json!({ "iteration": event.iteration.unwrap_or(0) }),
-                );
-                return true;
-            }
         }
         "error" => {
             let msg = event

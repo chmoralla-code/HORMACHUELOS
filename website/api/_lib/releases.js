@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.28";
-const BUILTIN_MSI_SHA256 = "07582054f02e4422e515404c84b2c03d51647d6e2e654a4c7459dbc9d396cb35";
-const BUILTIN_EXE_SHA256 = "c8e5cc7913f7b26d5ba60508acbdf9d765bc474ceae8c22c5f6ccf7818156949";
-const BUILTIN_RELEASE_NOTES = "Smart Agent task planning and verification. Long HORMACHUELOS builds now recover after interrupted streams without a task-wide recovery cutoff. Improved session progress visibility.";
+const BUILTIN_RELEASE_VERSION = "0.1.29";
+const BUILTIN_MSI_SHA256 = "20f75031b86d344bc3383fe681203e9d8f6a6bbef0d6fabc4180069b66355cf1";
+const BUILTIN_EXE_SHA256 = "d0d9fbe0ec58aab51803efc9b7def2602c0adc92a3c462fde0f1e26937e1ec2d";
+const BUILTIN_RELEASE_NOTES = "Reliable hosted-plan usage sync: users with remaining wallet credit are no longer stopped by stale desktop or activity-window counters. Preview can now send Android APK, desktop software, and public-site build requests directly to the active AI session.";
 
 /**
  * A deployment-bundled release keeps the download/update path available even

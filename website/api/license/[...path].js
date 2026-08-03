@@ -47,6 +47,10 @@ function toStatus(row, accountPlan = "") {
     email: row.email || "",
     tokenBudget: budget,
     tokensUsed: used,
+    // Keep the desktop's lock state tied to the same server-owned wallet
+    // values that decide a hosted request. Legacy desktop-only 4h/week
+    // counters are intentionally never returned as usage blocks.
+    blockedBy: active && budget > 0 && used >= budget ? "plan" : "",
     licenseKey: row.key,
     topUpUrl: "https://hormachuelos.vercel.app/#/pricing",
     message,

@@ -693,8 +693,7 @@ Current user request:\n{prompt}",
                 let license = crate::license::LicenseStatus::load().unwrap_or_default();
                 if !crate::license::should_use_hosted(&license) {
                     return Err(anyhow::anyhow!(
-                        "No API key for OpenAI: {}. Save a Cursor API key (crsr_…) in Settings, or activate a Hormachuelos plan so OpenAI can use hosted models.",
-                        cursor_err
+                        "No API key for OpenAI: {cursor_err}. Save a Cursor API key (crsr_…) in Settings, or activate a Hormachuelos plan so OpenAI can use hosted models."
                     ));
                 }
                 // Hosted fallback: OpenAI branding without a local Cursor key.
@@ -707,8 +706,22 @@ Current user request:\n{prompt}",
     let mut routed_auth_tool = integration_chat::auth_tool_for_prompt(&prompt);
     let auth_request_routed = routed_auth_tool.is_some();
     let license = crate::license::LicenseStatus::load().unwrap_or_default();
-    let use_hosted = crate::license::should_use_hosted_for_provider(&license, &settings.provider);
     let uses_hormachuelos_free = settings.provider.eq_ignore_ascii_case("hormachuelos_free");
+    let is_managed_alias = crate::config::is_custom_hosted_provider_alias(&settings.provider);
+    // A key deliberately saved by this client is BYOK and takes precedence
+    // over an available plan. That prevents direct-provider work from being
+    // billed against the shared hosted wallet merely because the account is
+    // also signed in to Hormachuelos.
+    let byok_key =
+        if !uses_hormachuelos_free && !is_managed_alias && provider_needs_key(&settings.provider) {
+            crate::config::load_provider_api_key(&settings.provider)
+                .ok()
+                .filter(|key| !key.trim().is_empty())
+        } else {
+            None
+        };
+    let use_hosted = byok_key.is_none()
+        && crate::license::should_use_hosted_for_provider(&license, &settings.provider);
     let (key, base_url_override) = if uses_hormachuelos_free {
         let session = crate::config::load_website_session().unwrap_or_default();
         if !session.trim().is_empty() {
@@ -728,11 +741,13 @@ Current user request:\n{prompt}",
             license.license_key.clone(),
             Some(crate::license::hosted_chat_base_url()),
         )
-    } else if crate::config::is_custom_hosted_provider_alias(&settings.provider) {
+    } else if is_managed_alias {
         return Err(anyhow::anyhow!(
             "'{}' is managed by your Hormachuelos administrator. Sign in with an active hosted plan before using this provider alias.",
             settings.provider
         ));
+    } else if let Some(key) = byok_key {
+        (key, settings.base_url.clone())
     } else if provider_needs_key(&settings.provider) {
         let key = crate::config::load_provider_api_key(&settings.provider).map_err(|e| {
             anyhow::anyhow!(
@@ -1263,25 +1278,25 @@ Use them as continuous memory for everything that follows.",
             resp.usage_tokens,
         );
 
-        // Persist cost-weighted burn + hard-stop when plan/4h/week is gone.
-        // Record before emit so usage events carry a fresh license snapshot
-        // (keeps the Usage UI accurate across concurrent multi-model sessions).
+        // Mirror only hosted-plan usage locally for a responsive usage display.
+        // Cursor and direct/BYOK providers must never consume the customer's
+        // Hormachuelos wallet. The hosted API remains the authoritative hard
+        // stop, so this cached mirror never cancels a run mid-turn.
         let mut license_snapshot = None;
-        if resp.usage_tokens > 0 {
+        if use_hosted && resp.usage_tokens > 0 {
             if let Ok(lic) = crate::license::record_provider_usage(
                 &settings.provider,
                 &settings.model,
                 resp.usage_tokens,
             ) {
-                if lic.is_rate_blocked() {
-                    crate::state::AppState::halt_all_for_usage_limit(&app);
-                }
                 license_snapshot = serde_json::to_value(lic.for_api()).ok();
             }
-        } else if let Ok(mut lic) = crate::license::LicenseStatus::load() {
-            let _ = lic.refresh_rate_windows();
-            if lic.is_rate_blocked() {
-                crate::state::AppState::halt_all_for_usage_limit(&app);
+        } else if use_hosted {
+            // Keep the telemetry state normalized even when an upstream does
+            // not report usage. In particular this clears stale legacy 4h /
+            // weekly blocks inherited from older installations.
+            if let Ok(mut lic) = crate::license::LicenseStatus::load() {
+                let _ = lic.refresh_usage_status();
                 license_snapshot = serde_json::to_value(lic.for_api()).ok();
             }
         }
@@ -1298,29 +1313,6 @@ Use them as continuous memory for everything that follows.",
                 "license": license_snapshot,
             }),
         );
-
-        if let Some(ref snap) = license_snapshot {
-            let blocked = snap
-                .get("blockedBy")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            if !blocked.is_empty() {
-                emit(
-                    &app,
-                    &session_id,
-                    "text",
-                    json!({
-                        "text": format!(
-                            "\n\n— Usage limit reached ({}). Stopping all runs.",
-                            blocked
-                        )
-                    }),
-                );
-                emit_cancelled(&app, &session_id, iteration);
-                return Ok(None);
-            }
-        }
 
         if cancel.load(Ordering::SeqCst) {
             emit_cancelled(&app, &session_id, iteration);
@@ -1364,10 +1356,8 @@ Use them as continuous memory for everything that follows.",
             };
 
             if let Some(reason) = continuation_reason {
-                consecutive_stalled_recoveries = next_stalled_recovery_count(
-                    consecutive_stalled_recoveries,
-                    false,
-                );
+                consecutive_stalled_recoveries =
+                    next_stalled_recovery_count(consecutive_stalled_recoveries, false);
                 if consecutive_stalled_recoveries >= MAX_CONSECUTIVE_STALLED_RECOVERIES {
                     smart_agent.pause(
                         &app,
@@ -1459,10 +1449,8 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
 
         // A provider tool call is concrete forward progress. Reset only the
         // recovery watchdog, never the task or conversation history.
-        consecutive_stalled_recoveries = next_stalled_recovery_count(
-            consecutive_stalled_recoveries,
-            true,
-        );
+        consecutive_stalled_recoveries =
+            next_stalled_recovery_count(consecutive_stalled_recoveries, true);
         let assistant_msg = ChatMessage::assistant(
             resp.text.as_deref().unwrap_or(""),
             Some(resp.tool_calls.clone()),
@@ -2040,9 +2028,9 @@ mod tests {
     use super::{
         cursor_computer_use_instructions, cursor_effort_for_request,
         cursor_permission_instructions, display_model_name, display_provider_name,
-        identity_instructions, normalized_permission_mode, public_tool_arguments,
-        public_tool_preview_delta, resolve_tool_preview_name, starts_as_explanatory_request,
-        next_stalled_recovery_count, stop_reason_requires_continuation,
+        identity_instructions, next_stalled_recovery_count, normalized_permission_mode,
+        public_tool_arguments, public_tool_preview_delta, resolve_tool_preview_name,
+        starts_as_explanatory_request, stop_reason_requires_continuation,
         task_likely_requires_project_completion, tool_confirm_summary, truncate_utf8,
         uses_cursor_sdk, MAX_CONSECUTIVE_STALLED_RECOVERIES,
     };

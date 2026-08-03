@@ -1,10 +1,13 @@
 //! Subscription / license scaffolding for Hormachuelos.
 //! Local file today; swap `refresh_from_server` for PayMongo-backed API later.
 //!
-//! Rate windows (provider-style):
-//! - 4-hour burst window — resets every 4h
-//! - Weekly window — resets every 7 days
-//! - Plan period budget — hard cap until renew/top-up (no auto-reset)
+//! Usage accounting:
+//! - The hosted plan wallet is the only paid-usage hard limit. It is enforced
+//!   atomically by the hosted API, which is the source of truth across every
+//!   device a customer may use.
+//! - The 4-hour and weekly fields are retained as *activity telemetry* for
+//!   existing installations. They reset on their usual cadence but must never
+//!   stop a run or make a customer appear out of credits.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, NaiveDate, Utc};
@@ -60,15 +63,9 @@ fn plan_budget(plan: &str) -> u64 {
     }
 }
 
-/// (4h budget, weekly budget) derived from plan pool.
-/// Generous pacing caps so a session is never blocked while the plan pool
-/// still has meaningful remaining capacity (e.g. 72% left):
-/// - weekly ≈ 50% of the plan pool
-/// - 4h    ≈ 20% of the plan pool
-/// Previously these were tiny fractions (weekly ≈ plan/4.3, 4h ≈ weekly/6),
-/// which let the burst windows exhaust long before the plan pool and made
-/// sessions "suddenly" hit a usage limit while the UI still showed plenty of
-/// plan remaining.
+/// Informational (4h, weekly) activity-window capacities derived from the
+/// plan pool. These fields exist for display and backward compatibility only;
+/// unlike the plan wallet, they never block a request.
 fn window_budgets(plan: &str, token_budget: u64) -> (u64, u64) {
     if token_budget == 0 {
         return (0, 0);
@@ -77,13 +74,6 @@ fn window_budgets(plan: &str, token_budget: u64) -> (u64, u64) {
     let weekly = ((token_budget as u128) / 2).max(1) as u64;
     let four_h = ((token_budget as u128) / 5).max(1) as u64;
     (four_h, weekly)
-}
-
-fn expires_in_days(days: i64) -> String {
-    (Utc::now() + Duration::days(days))
-        .date_naive()
-        .format("%Y-%m-%d")
-        .to_string()
 }
 
 /// Convert raw API tokens into plan-billable units using official list-price
@@ -139,20 +129,6 @@ fn parse_rfc3339(s: &str) -> Option<DateTime<Utc>> {
         .map(|dt| dt.with_timezone(&Utc))
 }
 
-fn parse_expiry_date(value: &str) -> Option<NaiveDate> {
-    let value = value.trim();
-    if value.is_empty() {
-        return None;
-    }
-    NaiveDate::parse_from_str(value, "%Y-%m-%d")
-        .ok()
-        .or_else(|| {
-            DateTime::parse_from_rfc3339(value)
-                .ok()
-                .map(|date| date.date_naive())
-        })
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LicenseStatus {
@@ -169,7 +145,7 @@ pub struct LicenseStatus {
     pub top_up_url: String,
     pub message: String,
 
-    // ── Rate windows (provider-style) ──────────────────────────────────
+    // ── Recent activity telemetry (never an enforcement limit) ─────────
     #[serde(default)]
     pub window_4h_used: u64,
     /// RFC3339 start of current 4h window
@@ -190,7 +166,8 @@ pub struct LicenseStatus {
     #[serde(default)]
     pub window_week_resets_at: String,
 
-    /// Which limit is blocking: "" | "plan" | "4h" | "week"
+    /// Hard usage block: "" | "plan". Older desktop releases persisted
+    /// "4h" and "week" here; `refresh_usage_status` clears those values.
     #[serde(default)]
     pub blocked_by: String,
 
@@ -238,7 +215,7 @@ impl Default for LicenseStatus {
             hosted: false,
             limits_disabled: false,
         };
-        s.refresh_rate_windows();
+        s.refresh_usage_status();
         s
     }
 }
@@ -257,20 +234,15 @@ pub fn hosted_chat_base_url() -> String {
 }
 
 /// When true, agent runs should call the Hormachuelos proxy with the license key.
+///
+/// The proxy, not this on-disk cache, decides whether a paid wallet is empty.
+/// That prevents a stale desktop counter (for example after a top-up on another
+/// computer) from rejecting a valid hosted request before the server sees it.
 pub fn should_use_hosted(status: &LicenseStatus) -> bool {
     if !status.hosted || status.license_key.trim().is_empty() {
         return false;
     }
     if !status.active || status.plan.eq_ignore_ascii_case("free") {
-        return false;
-    }
-    if usage_limits_disabled() {
-        return true;
-    }
-    if status.token_budget > 0 && status.tokens_used >= status.token_budget {
-        return false;
-    }
-    if status.is_rate_blocked() {
         return false;
     }
     true
@@ -308,16 +280,18 @@ impl LicenseStatus {
         if s.enforce_expiry() {
             dirty = true;
         }
-        // 2×-margin pools are smaller than the old lean-ROI grants — clamp
-        // oversized seats down so active licenses match the current sheet.
-        if s.active && !s.plan.eq_ignore_ascii_case("free") {
+        // Local development/test licenses retain their fixed plan pools. A
+        // verified hosted license may have an administrator-adjusted wallet,
+        // so never overwrite that server-provided budget from an old desktop
+        // release (doing so can make the UI disagree with the real balance).
+        if !s.hosted && s.active && !s.plan.eq_ignore_ascii_case("free") {
             let expected = plan_budget(&s.plan);
             if s.token_budget > 0 && s.token_budget != expected {
                 s.token_budget = expected;
                 dirty = true;
             }
         }
-        if s.refresh_rate_windows() {
+        if s.refresh_usage_status() {
             dirty = true;
         }
         if dirty {
@@ -359,17 +333,13 @@ impl LicenseStatus {
         self.window_week_used = 0;
         self.window_week_started_at = now;
         self.blocked_by.clear();
-        self.refresh_rate_windows();
+        self.refresh_usage_status();
     }
 
-    /// Compatibility alias used by the run gate in `lib.rs`.
-    pub fn refresh_plan_block(&mut self) -> bool {
-        self.refresh_rate_windows()
-    }
-
-    /// Advance / reset 4h + weekly windows; recompute budgets + blocked_by.
+    /// Advance / reset 4h + weekly activity telemetry and recompute the
+    /// wallet-only `blocked_by` state.
     /// Returns true if persisted fields changed (caller should save).
-    pub fn refresh_rate_windows(&mut self) -> bool {
+    pub fn refresh_usage_status(&mut self) -> bool {
         let now = Utc::now();
         let (b4, bw) = window_budgets(&self.plan, self.token_budget);
         let mut dirty = false;
@@ -437,18 +407,12 @@ impl LicenseStatus {
             dirty = true;
         }
 
-        // ── Which limit blocks ─────────────────────────────────────────
-        let blocked = if usage_limits_disabled() {
-            ""
-        } else if self.token_budget > 0 && self.tokens_used >= self.token_budget {
-            "plan"
-        } else if self.window_week_budget > 0 && self.window_week_used >= self.window_week_budget {
-            "week"
-        } else if self.window_4h_budget > 0 && self.window_4h_used >= self.window_4h_budget {
-            "4h"
-        } else {
-            ""
-        };
+        // ── Wallet is the sole hard usage limit ─────────────────────────
+        //
+        // Do not restore the legacy 4h/week checks here. Existing installs
+        // may contain either value in `blocked_by`; replacing it with the
+        // wallet result below repairs that stale state on the next load.
+        let blocked = self.wallet_block_reason(!usage_limits_disabled());
         if self.blocked_by != blocked {
             self.blocked_by = blocked.into();
             dirty = true;
@@ -457,15 +421,34 @@ impl LicenseStatus {
         dirty
     }
 
-    pub fn is_rate_blocked(&self) -> bool {
+    fn wallet_exhausted(&self) -> bool {
+        self.active
+            && !self.plan.eq_ignore_ascii_case("free")
+            && self.token_budget > 0
+            && self.tokens_used >= self.token_budget
+    }
+
+    fn wallet_block_reason(&self, limits_enabled: bool) -> &'static str {
+        if limits_enabled && self.wallet_exhausted() {
+            "plan"
+        } else {
+            ""
+        }
+    }
+
+    /// True only when the plan wallet itself is empty. This deliberately
+    /// ignores the persisted `blocked_by` string so a stale legacy 4h/week
+    /// value can never lock the desktop before it is migrated on disk.
+    pub fn is_usage_exhausted(&self) -> bool {
         if usage_limits_disabled() {
             return false;
         }
-        !self.blocked_by.is_empty()
+        self.wallet_exhausted()
     }
 
-    /// Apply API-facing fields (clears blocks when limits are disabled).
+    /// Apply API-facing fields and normalize old persisted block state.
     pub fn for_api(mut self) -> Self {
+        self.refresh_usage_status();
         if usage_limits_disabled() {
             self.limits_disabled = true;
             self.blocked_by.clear();
@@ -645,8 +628,7 @@ fn apply_license_key_local(key: &str) -> Result<LicenseStatus> {
             status.token_budget = plan_budget("proplus");
             status.tokens_used = 0;
             status.expires_at = String::new();
-            status.message =
-                "Pro+ plan activated (local test). Pay-as-you-go usage wallet.".into();
+            status.message = "Pro+ plan activated (local test). Pay-as-you-go usage wallet.".into();
             status.reset_windows_fresh();
         } else if upper.starts_with("HORMA-PRO")
             || upper.starts_with("HORMA-STARTER")
@@ -684,7 +666,9 @@ pub async fn refresh_from_server() -> Result<LicenseStatus> {
     apply_license_key(&key).await
 }
 
-/// Persist token burn against the active license (account-wide, not per project).
+/// Persist a local mirror of hosted-plan token burn (account-wide, not per
+/// project). Callers must not use this for a customer's own provider key or
+/// Cursor subscription; those are not Hormachuelos wallet usage.
 /// Safe under concurrent sessions — serialized via LICENSE_LOCK.
 pub fn record_token_usage(tokens: u64) -> Result<LicenseStatus> {
     with_license_lock(|| {
@@ -692,24 +676,18 @@ pub fn record_token_usage(tokens: u64) -> Result<LicenseStatus> {
         if !status.active {
             return Ok(status.for_api());
         }
-        status.refresh_rate_windows();
+        status.refresh_usage_status();
         if tokens > 0 {
             status.tokens_used = status.tokens_used.saturating_add(tokens);
             status.window_4h_used = status.window_4h_used.saturating_add(tokens);
             status.window_week_used = status.window_week_used.saturating_add(tokens);
-            status.refresh_rate_windows();
+            status.refresh_usage_status();
 
             status.message = match status.blocked_by.as_str() {
                 "plan" => format!(
                     "{} plan usage exhausted. Top up or upgrade to continue.",
                     status.plan
                 ),
-                "week" => {
-                    "Weekly usage limit reached. Resets when the weekly window rolls over.".into()
-                }
-                "4h" => {
-                    "4-hour usage limit reached. Resets when the 4-hour window rolls over.".into()
-                }
                 _ => status.message.clone(),
             };
             status.save_unlocked()?;
@@ -795,36 +773,59 @@ mod tests {
     }
 
     #[test]
-    fn burst_windows_are_generous_relative_to_plan_pool() {
+    fn activity_windows_are_informational_relative_to_plan_pool() {
         // Pro plan pool = 3,075,739 tokens.
         let (four_h, weekly) = window_budgets("pro", plan_budget("pro"));
-        // 4h ≈ 20% of the pool, weekly ≈ 50% of the pool.
+        // These values are only display telemetry, not hard limits.
         assert_eq!(four_h, plan_budget("pro") / 5);
         assert_eq!(weekly, plan_budget("pro") / 2);
-        // The 4h window must be far larger than the old weekly/6 pacing cap
-        // (which was ~119k for pro) so it no longer blocks a session that
-        // still has most of its plan pool left.
         assert!(four_h > 300_000);
     }
 
     #[test]
-    fn session_with_72_percent_remaining_is_not_blocked_by_burst_windows() {
-        // User has used 28% of a pro plan (72% remaining) but only a modest
-        // amount in the current 4h window. This must NOT be rate-blocked.
+    fn legacy_burst_block_is_cleared_when_wallet_has_remaining_usage() {
+        // A previous release could leave a 4h/week hard block in license.json
+        // while most of the actual plan wallet remained. Loading that file
+        // must repair it rather than stopping the next request.
         let mut status = LicenseStatus {
             plan: "pro".into(),
             active: true,
+            hosted: true,
+            license_key: "HORMA-TEST".into(),
             token_budget: plan_budget("pro"),
-            tokens_used: (plan_budget("pro") as f64 * 0.28) as u64,
+            tokens_used: plan_budget("pro") / 10,
+            blocked_by: "4h".into(),
+            window_4h_used: plan_budget("pro"),
+            window_week_used: plan_budget("pro"),
             ..Default::default()
         };
-        status.refresh_rate_windows();
-        // 4h usage well under the 20% burst cap.
-        status.window_4h_used = plan_budget("pro") / 10;
-        status.window_week_used = plan_budget("pro") / 4;
-        status.refresh_rate_windows();
+        status.refresh_usage_status();
         assert_eq!(status.blocked_by, "");
-        assert!(!status.is_rate_blocked());
-        assert_eq!(status.remaining_percent(), 72);
+        assert!(!status.wallet_exhausted());
+        assert_eq!(status.wallet_block_reason(true), "");
+        assert_eq!(status.remaining_percent(), 90);
+        assert!(should_use_hosted(&status));
+    }
+
+    #[test]
+    fn only_an_empty_wallet_is_a_real_usage_limit() {
+        let mut status = hosted_pro_status();
+        status.token_budget = plan_budget("pro");
+        status.tokens_used = status.token_budget;
+        status.window_4h_used = 0;
+        status.window_week_used = 0;
+
+        status.refresh_usage_status();
+        assert!(status.wallet_exhausted());
+        assert_eq!(status.wallet_block_reason(true), "plan");
+        // The request still reaches the hosted proxy, whose database is the
+        // authoritative counter. This is important after a top-up on another
+        // device has made the local cache stale.
+        assert!(should_use_hosted(&status));
+
+        if !usage_limits_disabled() {
+            assert_eq!(status.blocked_by, "plan");
+            assert!(status.is_usage_exhausted());
+        }
     }
 }

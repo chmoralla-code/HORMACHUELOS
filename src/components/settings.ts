@@ -1258,32 +1258,13 @@ export class SettingsModal {
         const planPct = lic.tokenBudget
           ? Math.max(0, Math.round(((lic.tokenBudget - lic.tokensUsed) / lic.tokenBudget) * 100))
           : 100;
-        const b4 = Math.max(0, Number(lic.window4hBudget) || 0);
         const u4 = Math.max(0, Number(lic.window4hUsed) || 0);
-        const bw = Math.max(0, Number(lic.windowWeekBudget) || 0);
         const uw = Math.max(0, Number(lic.windowWeekUsed) || 0);
-        const p4 = b4 ? Math.max(0, Math.round(((b4 - u4) / b4) * 100)) : 100;
-        const pw = bw ? Math.max(0, Math.round(((bw - uw) / bw) * 100)) : 100;
-        const fmtReset = (iso?: string) => {
-          if (!iso) return "";
-          const t = Date.parse(iso);
-          if (!Number.isFinite(t)) return "";
-          const ms = Math.max(0, t - Date.now());
-          const mins = Math.ceil(ms / 60_000);
-          if (mins < 60) return `${mins}m`;
-          const h = Math.floor(mins / 60);
-          if (h < 48) return `${h}h`;
-          return `${Math.floor(h / 24)}d`;
-        };
-        const r4 = fmtReset(lic.window4hResetsAt);
-        const rw = fmtReset(lic.windowWeekResetsAt);
         const planLabel = displayPlanLabel(lic.plan || "plan");
         licenseStatus.textContent =
-          `${planLabel} · Current ${p4}%` +
-          (r4 ? ` (resets ${r4})` : "") +
-          ` · Weekly ${pw}%` +
-          (rw ? ` (resets ${rw})` : "") +
-          ` · Usage ${planPct}%`;
+          `${planLabel} · Plan wallet ${planPct}% remaining` +
+          ` · Recent activity: ${u4.toLocaleString()} tokens / 4h, ${uw.toLocaleString()} tokens / 7d` +
+          " · Only the plan wallet controls access.";
         topUpBtn.onclick = () => {
           window.open(lic.topUpUrl || "https://hormachuelos.com/#/pricing", "_blank", "noopener");
         };

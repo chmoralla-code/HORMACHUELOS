@@ -43,6 +43,21 @@ async function installMock(page) {
       permission_mode: "auto",
     };
 
+    const defaultLicense = {
+      plan: "pro",
+      active: true,
+      hosted: true,
+      licenseKey: "HORMA-MOCK-PLAN",
+      tokenBudget: 1_000_000,
+      tokensUsed: 10_000,
+      blockedBy: "",
+      topUpUrl: "https://hormachuelos.vercel.app/#/pricing",
+      message: "Pro plan active.",
+    };
+    function licenseSnapshot() {
+      return { ...defaultLicense, ...(window.__HORMA_LICENSE_FIXTURE__ || {}) };
+    }
+
     const tree = {
       nodes: [
         {
@@ -178,6 +193,9 @@ async function installMock(page) {
             return "0.1.5";
           case "get_website_session":
             return "message-test-session";
+          case "get_license_status":
+          case "apply_license_key":
+            return licenseSnapshot();
           case "get_settings":
             return { ...settings };
           case "save_settings":
@@ -285,6 +303,59 @@ async function sendMessage(page, text) {
   const send = page.getByRole("button", { name: "Send message", exact: true });
   await send.click();
 }
+
+test("legacy burst blocks cannot lock a healthy plan wallet", async ({ page }) => {
+  await page.addInitScript(() => {
+    // Simulates a license.json left by an older desktop release: its legacy
+    // 4-hour marker says blocked and its cached counter says empty, even
+    // though the signed-in account's real wallet still has 90% remaining.
+    window.__HORMA_LICENSE_FIXTURE__ = {
+      tokenBudget: 1_000_000,
+      tokensUsed: 1_000_000,
+      blockedBy: "4h",
+      window4hUsed: 1_000_000,
+      window4hBudget: 200_000,
+      windowWeekUsed: 1_000_000,
+      windowWeekBudget: 500_000,
+    };
+  });
+  await installMock(page);
+  await page.route("https://hormachuelos.vercel.app/api/update?*", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ updateAvailable: false, forceUpdate: false, currentVersion: "0.1.5", latest: null }),
+    }),
+  );
+  await page.route("https://hormachuelos.vercel.app/api/auth/me", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        ok: true,
+        user: {
+          email: "usage-test@example.com",
+          plan: "pro",
+          licenseActive: true,
+          licenseKey: "HORMA-MOCK-PLAN",
+          tokenBudget: 1_000_000,
+          tokensUsed: 100_000,
+        },
+      }),
+    }),
+  );
+
+  await page.goto(APP, { waitUntil: "networkidle" });
+  await openProjectViaUI(page);
+
+  const input = page.locator("#forge-prompt, .composer-input, textarea").first();
+  await expect(input).toBeEnabled({ timeout: 15000 });
+  await expect(page.locator(".composer.usage-exhausted, #forge-dock.usage-exhausted")).toHaveCount(0);
+  await expect(page.locator("[data-sub-meta]")).toContainText("90% usage remaining");
+
+  await sendMessage(page, "Confirm the healthy wallet can still send this message.");
+  await expect(page.locator("#chat")).toContainText("Mock agent reply", { timeout: 10000 });
+});
 
 test("send three messages and get mock agent replies", async ({ page }) => {
   const consoleErrors = [];

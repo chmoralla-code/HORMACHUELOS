@@ -279,9 +279,21 @@ async fn test_provider_connection(
     }
     let is_hormachuelos_free = provider.eq_ignore_ascii_case("hormachuelos_free");
     let license = license::LicenseStatus::load().unwrap_or_default();
-    let use_hosted =
-        !is_hormachuelos_free && license::should_use_hosted_for_provider(&license, &provider);
-    if config::is_custom_hosted_provider_alias(&provider) && !use_hosted {
+    let is_managed_alias = config::is_custom_hosted_provider_alias(&provider);
+    // Connection tests must exercise a saved customer key directly. Otherwise
+    // a harmless BYOK test could accidentally use (and bill) hosted credits.
+    let byok_key =
+        if !is_hormachuelos_free && !is_managed_alias && llm::provider_needs_key(&provider) {
+            config::load_provider_api_key(&provider)
+                .ok()
+                .filter(|key| !key.trim().is_empty())
+        } else {
+            None
+        };
+    let use_hosted = !is_hormachuelos_free
+        && byok_key.is_none()
+        && license::should_use_hosted_for_provider(&license, &provider);
+    if is_managed_alias && !use_hosted {
         return Ok(ConnectionTestResult {
             ok: false,
             latency_ms: started.elapsed().as_millis(),
@@ -308,6 +320,8 @@ async fn test_provider_connection(
         }
     } else if use_hosted {
         license.license_key.clone()
+    } else if let Some(key) = byok_key {
+        key
     } else if llm::provider_needs_key(&provider) {
         match config::load_provider_api_key(&provider) {
             Ok(key) => key,
@@ -745,17 +759,20 @@ async fn agent_run(
         Err(_) => state.settings.lock().unwrap().clone(),
     };
 
-    // Block new runs when plan period usage is already exhausted (multi-session safe).
+    // A hosted plan's wallet is enforced by the hosted API, not this local
+    // cache. That avoids rejecting a client who has just topped up or used a
+    // different computer. Keep the local development/test-plan guard only.
     if let Ok(mut lic) = license::LicenseStatus::load() {
-        let _ = lic.refresh_plan_block();
-        if !lic.active {
+        let _ = lic.refresh_usage_status();
+        let local_test_plan = !lic.hosted && !lic.plan.eq_ignore_ascii_case("free");
+        if local_test_plan && !lic.active {
             return Err(if lic.message.trim().is_empty() {
                 "This license is inactive. Renew it before starting a new run.".into()
             } else {
                 lic.message
             });
         }
-        if !license::usage_limits_disabled() && lic.is_rate_blocked() {
+        if local_test_plan && !license::usage_limits_disabled() && lic.is_usage_exhausted() {
             return Err(
                 "You've used up this plan period. Mag-load via GCash or upgrade to continue."
                     .into(),

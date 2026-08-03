@@ -13,6 +13,14 @@ export type PreviewOpenOptions = {
   autoPickEntry?: boolean;
 };
 
+/** Result returned by the chat shell after a preview action creates a prompt. */
+export type PreviewPromptDispatch =
+  | "sent"
+  | "queued"
+  | "needs_project"
+  | "usage_exhausted"
+  | "stopping";
+
 type SelectedEl = {
   tag: string;
   text: string;
@@ -431,8 +439,9 @@ export class SitePreview {
   private designBtn: HTMLButtonElement;
   private androidBtn: HTMLButtonElement;
   private softwareBtn: HTMLButtonElement;
-  private buildApkBtn: HTMLButtonElement;
-  private buildSoftwareBtn: HTMLButtonElement;
+  private buildMenuToggle: HTMLButtonElement;
+  private buildMenu: HTMLElement;
+  private buildMenuCleanup: (() => void) | null = null;
   private makePublicBtn: HTMLButtonElement;
   private viewport: HTMLElement;
   private editBar: HTMLElement;
@@ -444,7 +453,7 @@ export class SitePreview {
   private tabs: PreviewTab[] = [];
   private activeTabId = "";
   private selected: SelectedEl | null = null;
-  private onDescribe: ((prompt: string) => void) | null = null;
+  private onDescribe: ((prompt: string) => PreviewPromptDispatch | void) | null = null;
   private onStateChange: ((state: SessionPreviewState | null) => void) | null = null;
   private closing = false;
   private closeTimer: number | null = null;
@@ -554,29 +563,48 @@ export class SitePreview {
     }, ["Software"]) as HTMLButtonElement;
     this.softwareBtn.addEventListener("click", () => this.setSoftwareMode(!this.softwareMode));
 
-    this.buildApkBtn = el("button", {
-      class: "site-preview-design-btn site-preview-build-btn site-preview-build-apk-btn",
+    const buildLauncher = el("div", { class: "site-preview-build-launcher" });
+    this.buildMenuToggle = el("button", {
+      class: "site-preview-design-btn site-preview-build-toggle",
       type: "button",
-      title: "Ask the AI to build this as an Android APK",
-      "aria-label": "Build Android APK",
-    }, ["Build APK"]) as HTMLButtonElement;
-    this.buildApkBtn.addEventListener("click", () => this.buildApk());
-
-    this.buildSoftwareBtn = el("button", {
-      class: "site-preview-design-btn site-preview-build-btn site-preview-build-software-btn",
-      type: "button",
-      title: "Ask the AI to build this as desktop software",
-      "aria-label": "Build desktop software",
-    }, ["Build Software"]) as HTMLButtonElement;
-    this.buildSoftwareBtn.addEventListener("click", () => this.buildSoftware());
+      title: "Choose a build target",
+      "aria-label": "Choose build target",
+      "aria-haspopup": "menu",
+      "aria-controls": "site-preview-build-menu",
+      "aria-expanded": "false",
+    }, [
+      el("span", { class: "site-preview-build-toggle-label" }, ["Build"]),
+      el("span", { class: "site-preview-build-toggle-caret", "aria-hidden": "true" }, ["▾"]),
+    ]) as HTMLButtonElement;
+    this.buildMenuToggle.addEventListener("click", () => this.toggleBuildMenu());
+    this.buildMenu = el("div", {
+      class: "site-preview-build-menu",
+      id: "site-preview-build-menu",
+      role: "menu",
+      "aria-label": "Build target",
+      hidden: "true",
+    });
+    this.buildMenu.append(
+      this.buildMenuItem(
+        "apk",
+        "Build APK",
+        "Create an installable Android package",
+      ),
+      this.buildMenuItem(
+        "software",
+        "Build Software",
+        "Create a runnable desktop application",
+      ),
+    );
+    buildLauncher.append(this.buildMenuToggle, this.buildMenu);
 
     this.makePublicBtn = el("button", {
       class: "site-preview-design-btn site-preview-build-btn site-preview-make-public-btn",
       type: "button",
-      title: "Ask the AI to make this website public via GitHub, Vercel, and Supabase",
+      title: "Publish this website using GitHub, Vercel, and Supabase",
       "aria-label": "Make the website public",
-    }, ["Make Public"]) as HTMLButtonElement;
-    this.makePublicBtn.addEventListener("click", () => this.makePublic());
+    }, ["Make site public"]) as HTMLButtonElement;
+    this.makePublicBtn.addEventListener("click", () => this.makeWebsitePublic());
 
     const close = el("button", {
       class: "site-preview-icon-btn",
@@ -588,7 +616,7 @@ export class SitePreview {
     close.addEventListener("click", () => this.close());
 
     const actions = el("div", { class: "site-preview-actions" });
-    actions.append(this.buildApkBtn, this.buildSoftwareBtn, this.makePublicBtn, this.androidBtn, this.softwareBtn, this.designBtn, close);
+    actions.append(buildLauncher, this.makePublicBtn, this.androidBtn, this.softwareBtn, this.designBtn, close);
     toolbar.append(this.backBtn, this.forwardBtn, refresh, this.urlInput, actions);
     chrome.append(tabstrip, toolbar);
 
@@ -786,8 +814,82 @@ export class SitePreview {
     }
   }
 
-  setDescribeHandler(cb: (prompt: string) => void) {
+  setDescribeHandler(cb: (prompt: string) => PreviewPromptDispatch | void) {
     this.onDescribe = cb;
+  }
+
+  private buildMenuItem(
+    target: "apk" | "software",
+    title: string,
+    detail: string,
+  ): HTMLButtonElement {
+    const item = el("button", {
+      class: `site-preview-build-option site-preview-build-option-${target}`,
+      type: "button",
+      role: "menuitem",
+      "data-build-target": target,
+      "aria-label": target === "apk" ? "Build Android APK" : "Build desktop software",
+    }) as HTMLButtonElement;
+    item.append(
+      el("span", { class: "site-preview-build-option-title" }, [title]),
+      el("span", { class: "site-preview-build-option-detail" }, [detail]),
+    );
+    item.addEventListener("click", () => this.requestBuild(target));
+    return item;
+  }
+
+  private buildMenuItems(): HTMLButtonElement[] {
+    return Array.from(this.buildMenu.querySelectorAll<HTMLButtonElement>("[role='menuitem']"));
+  }
+
+  private toggleBuildMenu() {
+    this.setBuildMenuOpen(this.buildMenu.hidden);
+  }
+
+  private closeBuildMenu(restoreFocus = false) {
+    this.setBuildMenuOpen(false, restoreFocus);
+  }
+
+  private setBuildMenuOpen(open: boolean, restoreFocus = false) {
+    if (!open && this.buildMenu.hidden) return;
+    this.buildMenuCleanup?.();
+    this.buildMenuCleanup = null;
+    this.buildMenu.hidden = !open;
+    this.buildMenuToggle.setAttribute("aria-expanded", String(open));
+    this.buildMenuToggle.classList.toggle("is-active", open);
+    if (!open) {
+      if (restoreFocus) this.buildMenuToggle.focus({ preventScroll: true });
+      return;
+    }
+
+    const launcher = this.buildMenuToggle.parentElement;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!launcher?.contains(event.target as Node)) this.closeBuildMenu();
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        this.closeBuildMenu(true);
+        return;
+      }
+      if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+      const items = this.buildMenuItems();
+      if (!items.length) return;
+      event.preventDefault();
+      const current = items.indexOf(document.activeElement as HTMLButtonElement);
+      const offset = event.key === "ArrowDown" ? 1 : -1;
+      const next = current < 0
+        ? (offset > 0 ? 0 : items.length - 1)
+        : (current + offset + items.length) % items.length;
+      items[next].focus({ preventScroll: true });
+    };
+    document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("keydown", onKeyDown, true);
+    this.buildMenuCleanup = () => {
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("keydown", onKeyDown, true);
+    };
+    requestAnimationFrame(() => this.buildMenuItems()[0]?.focus({ preventScroll: true }));
   }
 
   /** Called after a user changes the visible preview for the selected session. */
@@ -920,6 +1022,7 @@ export class SitePreview {
 
   private teardownSessionView() {
     this.cancelCloseTeardown();
+    this.closeBuildMenu();
     this.clearDesignMode();
     this.designMode = false;
     this.androidMode = false;
@@ -1046,6 +1149,7 @@ export class SitePreview {
     this.viewGeneration += 1;
     this.closing = true;
     const generation = ++this.closeGeneration;
+    this.closeBuildMenu();
     this.clearDesignMode();
     this.designMode = false;
     this.syncModeUi();
@@ -1488,41 +1592,72 @@ export class SitePreview {
     return parts.join(" > ");
   }
 
-  private buildApk() {
-    const prompt = this.buildPrompt(
-      "Android APK",
-      "Build this project as a packaged Android APK. Scaffold a proper Android project (or a Cordova/Capacitor wrapper around the existing web app), add an AndroidManifest.xml, icons, and a Gradle build config, then produce a ready-to-install .apk file. Keep the existing look and functionality.",
-    );
-    this.onDescribe?.(prompt);
+  private requestBuild(target: "apk" | "software") {
+    this.closeBuildMenu();
+    const label = target === "apk" ? "Android APK build" : "Desktop software build";
+    this.dispatchGeneratedPrompt(this.buildPrompt(target), label);
   }
 
-  private buildSoftware() {
-    const prompt = this.buildPrompt(
-      "desktop software",
-      "Build this project as desktop software. Scaffold a proper desktop application (for example an Electron or Tauri app, or a native windowed app), add a window title bar, app icon, and a build config, then produce a runnable desktop executable. Keep the existing look and functionality.",
-    );
-    this.onDescribe?.(prompt);
+  /** Send a preview-generated request through the regular chat / pending queue. */
+  private dispatchGeneratedPrompt(prompt: string, label: string) {
+    if (!this.onDescribe) {
+      this.statusEl.textContent = "Preview actions are not available until chat is ready.";
+      return;
+    }
+
+    const dispatch = this.onDescribe(prompt) || "sent";
+    this.statusEl.textContent = dispatch === "queued"
+      ? `${label} queued — it will start after the active task finishes.`
+      : dispatch === "needs_project"
+        ? "Open or create a project before starting a build."
+        : dispatch === "usage_exhausted"
+          ? "No usage remains for this build request."
+          : dispatch === "stopping"
+            ? "The current task is stopping — choose Build again after it ends."
+            : `${label} request sent to the active model.`;
   }
 
-  private buildPrompt(target: string, instruction: string): string {
+  private buildPrompt(target: "apk" | "software"): string {
     const entry = this.entryPath || "the current project";
-    const project = this.projectRoot ? ` (project: ${this.projectRoot})` : "";
-    return `Convert ${entry}${project} into ${target}.\n\n${instruction}`;
+    const project = this.projectRoot || "the active project";
+    const isApk = target === "apk";
+    const targetName = isApk ? "Android APK" : "desktop software";
+    const packaging = isApk
+      ? "Use the least disruptive Android approach for the existing project (for example Capacitor/Cordova or a native Android wrapper when appropriate). Add Android manifest metadata, app icons, signing-ready Gradle configuration, and an installable APK output."
+      : "Use the least disruptive desktop approach for the existing project (for example Tauri, Electron, or its existing native stack). Add app metadata, an icon, window configuration, and a runnable desktop executable output.";
+
+    return `Build a production-ready ${targetName} from the currently previewed project.\n\n\
+Build context:\n\
+- Project root: ${project}\n\
+- Preview entry: ${entry}\n\n\
+Do the implementation now, not only an explanation:\n\
+1. Inspect the existing project and preserve its current design, behavior, assets, and user data flow.\n\
+2. ${packaging}\n\
+3. Keep the original preview usable while adding the packaging files and build scripts.\n\
+4. Run the most relevant build or validation command and fix issues you find.\n\
+5. Produce the final ${isApk ? ".apk" : "desktop executable"} in a clear output folder and report its exact path.\n\n\
+Continue autonomously until the build is genuinely complete. Do not ask me to type Continue.`;
   }
 
-  private makePublic() {
+  private makeWebsitePublic() {
     const entry = this.entryPath || "the current project";
-    const project = this.projectRoot ? ` (project: ${this.projectRoot})` : "";
-    const prompt = `Make ${entry}${project} public on the internet.
+    const project = this.projectRoot || "the active project";
+    const prompt = `Publish the currently previewed project as a production public website now. Work autonomously: perform the deployment instead of only explaining how to do it.
 
-Walk me through the exact steps to deploy this website live using GitHub, Vercel, and Supabase, then carry them out:
+Publishing context:
+- Project root: ${project}
+- Preview entry: ${entry}
 
-1. GitHub — initialize a git repository (if not already one), stage and commit all files, create a new repository, and push the code to it.
-2. Vercel — connect the GitHub repository, configure the build settings (framework preset, build command, output directory), and deploy the site to a public URL.
-3. Supabase — set up the backend: create a project, run any needed database migrations, configure authentication and storage, and wire the environment variables into the deployment.
+Use this GitHub → Vercel → Supabase flow:
+1. Preflight — inspect the existing project, identify its framework, build command, output directory, and whether it truly uses Supabase. Preserve the current design, functionality, and user data flow.
+2. Connected accounts — check the built-in GitHub, Vercel, and Supabase integrations first. If a required connection is missing, start the secure in-app connection flow for that service and resume as soon as the user completes it. Never ask for or print credentials in chat, and never run an interactive CLI login.
+3. GitHub — reuse an existing repository and remote when present; otherwise initialize only this project, create an appropriately named repository in the connected account, commit the relevant project files, and push the deployment-ready code.
+4. Supabase — only when the project needs database, authentication, edge functions, or storage, reuse its configured Supabase project or create one through the connected account. Apply migrations safely once, configure the required environment variable names securely, and never expose service-role or secret values in the client bundle.
+5. Vercel — create or link the Vercel project from the GitHub repository, set the detected build/output settings and required environment variables, then deploy to Production using the connected Vercel account.
+6. Verification — verify the deployed public URL and the essential website/backend path. Fix deployment configuration errors and re-deploy until the live result works.
 
-When finished, give me the live public URL and a short summary of what was deployed.`;
-    this.onDescribe?.(prompt);
+When the task is complete, report the live public URL, GitHub repository URL, Vercel project, any Supabase project/migrations used, environment-variable names only (never values), and a short list of the deployment steps completed. Do not claim the website is public until the live URL has been verified. Continue autonomously until this is genuinely complete; do not ask me to type Continue.`;
+    this.dispatchGeneratedPrompt(prompt, "Website publication");
   }
 
   private submitDescribe() {

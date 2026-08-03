@@ -463,13 +463,17 @@ function prepareForAppUpdate() {
 /** Active subscription token budget + burn (account-wide via license.json). */
 let activeTokenBudget = SESSION_TOKEN_BUDGET;
 let accountTokensUsed = 0;
-/** "" | "plan" | "4h" | "week" */
+/** "" | "plan" — legacy 4h/week values must never lock the composer. */
 let usageBlockedBy = "";
 /** Dev bypass — usage limits disabled in debug builds. */
 let usageLimitsDisabled = false;
 let planExpiresAt = "";
 let planName = "";
 let planActive = false;
+/** True after the signed-in website has supplied the current paid wallet. */
+let websiteUsageAuthoritative = false;
+/** Installed by init once browser-account sync is available. */
+let refreshAuthoritativeUsage: (() => void) | null = null;
 
 function remainingPct(used: number, budget: number): number {
   if (budget <= 0) return 100;
@@ -485,11 +489,25 @@ function applyLicenseSnapshot(lic: {
   tokensUsed?: number;
   blockedBy?: string;
   limitsDisabled?: boolean;
+  hosted?: boolean;
 }) {
+  // A local license mirror is useful while offline, but it can lag behind a
+  // top-up or usage from another computer. Once the signed-in website has
+  // supplied the account wallet, never let that cache overwrite it.
+  if (websiteUsageAuthoritative) {
+    usageLimitsDisabled = lic.limitsDisabled === true;
+    return;
+  }
   activeTokenBudget = Math.max(1, Math.floor(Number(lic.tokenBudget) || SESSION_TOKEN_BUDGET));
   accountTokensUsed = Math.max(0, Math.floor(Number(lic.tokensUsed) || 0));
   usageLimitsDisabled = lic.limitsDisabled === true;
-  usageBlockedBy = usageLimitsDisabled ? "" : String(lic.blockedBy || "");
+  const reportedBlock = String(lic.blockedBy || "").trim().toLowerCase();
+  const walletEmpty = accountTokensUsed >= activeTokenBudget;
+  // Older installations saved `4h` / `week` in blockedBy. Treat those as
+  // informational history only; a client is blocked exclusively when the
+  // authoritative snapshot says their actual plan wallet is empty.
+  usageBlockedBy =
+    !usageLimitsDisabled && reportedBlock === "plan" && walletEmpty ? "plan" : "";
   planExpiresAt = String(lic.expiresAt || "");
   planName = String(lic.plan || "free");
   planActive = lic.active !== false && planName.toLowerCase() !== "free";
@@ -519,25 +537,13 @@ function enqueueLicenseSync(opts: { haltIfExhausted?: boolean } = {}) {
   return licenseSyncTail;
 }
 
-/** Remaining capacity 0–100% for the plan period pool. */
-function usageRemainingPercent(): number {
-  return remainingPct(accountTokensUsed, activeTokenBudget);
-}
-
 /** True when plan period budget is exhausted. */
 function isUsageExhausted(): boolean {
   if (usageLimitsDisabled) return false;
-  if (usageBlockedBy) return true;
-  return usageRemainingPercent() <= 0;
+  return planActive && usageBlockedBy === "plan";
 }
 
 function usageBlockMessage(): string {
-  if (usageBlockedBy === "4h") {
-    return "You've hit this 4-hour burst limit. It resets automatically in a few hours — or top up via GCash to keep going.";
-  }
-  if (usageBlockedBy === "week") {
-    return "You've hit this week's usage window. It resets automatically — or top up via GCash to keep going.";
-  }
   return "You've used up this plan period. Mag-load via GCash or upgrade to continue.";
 }
 
@@ -548,7 +554,7 @@ function syncUsageBar(_session?: Session | null) {
     percent: pct,
     poolLabel: "plan",
     resetsIn: "",
-    blockedBy: usageLimitsDisabled ? "" : usageBlockedBy || (pct <= 0 && planActive ? "plan" : ""),
+    blockedBy: usageLimitsDisabled ? "" : usageBlockedBy,
     planRemaining: pct,
     planExpiresAt,
     planName,
@@ -569,6 +575,7 @@ function applyWebsitePlanUsage(user: WebsiteAccount) {
   const used = Math.max(0, Math.floor(Number(user.tokensUsed) || 0));
   planName = plan || "free";
   planActive = active;
+  websiteUsageAuthoritative = active && budget > 0;
   planExpiresAt = String(user.expiresAt || "");
   if (active && budget > 0) {
     activeTokenBudget = budget;
@@ -617,6 +624,7 @@ function applyUsageToSession(
       tokensUsed?: number;
       blockedBy?: string;
       limitsDisabled?: boolean;
+      hosted?: boolean;
     } | null;
   },
 ) {
@@ -1354,6 +1362,12 @@ async function sendPrompt(prompt: string) {
     await api.agentRun(prompt, sessionId, history, projectRoot);
   } catch (e: any) {
     const msg = String(e ?? "");
+    // The hosted API returns this only when its own wallet check says empty.
+    // Refresh immediately so the drawer cannot keep showing an old, high
+    // percentage after a request made from another device has consumed usage.
+    if (/\busage_exhausted\b/i.test(msg)) {
+      refreshAuthoritativeUsage?.();
+    }
     // Don't dump "already running" into the transcript — queue handles that path
     const isBusy =
       /already running/i.test(msg) || /wait for it to finish/i.test(msg);
@@ -1560,9 +1574,6 @@ async function init() {
   sitePreview = new SitePreview(document.getElementById("site-preview-slot"));
   smartAgentPanel = new SmartAgentPanel(document.getElementById("smart-agent-status")!);
   syncSmartAgentPanel();
-  sitePreview.setDescribeHandler((prompt) => {
-    void sendPrompt(prompt);
-  });
   sitePreview.setStateChangeHandler((preview) => {
     // The preview component only emits user-driven changes, never a restore of
     // another session. Keep the serialized preview alongside the active chat.
@@ -1583,6 +1594,10 @@ async function init() {
     getSessionId: () => activeSessionId,
     onOpenSettings: openSettings,
   });
+  // Preview actions use Chat's normal send/queue rules. That means a Build
+  // choice always reaches the selected model, even when another task is still
+  // running, instead of being silently dropped by a direct agent_run call.
+  sitePreview.setDescribeHandler((prompt) => chat.submitPreviewPrompt(prompt));
   chat.setProjectReady(false);
   const HOSTED_SITE = "https://hormachuelos.vercel.app";
   let websiteUser: WebsiteAccount | null = null;
@@ -1594,8 +1609,10 @@ async function init() {
       try {
         const lic = await api.applyLicenseKey(user.licenseKey);
         applyLicenseSnapshot(lic);
-        // Website account plan is the source of truth (admin-edited).
-        // Re-apply after local activate so a stale license.json cannot win.
+        // Website account plan and wallet are the source of truth
+        // (including administrator edits and top-ups). Re-apply them after
+        // local activation so an older license.json cannot turn a healthy
+        // server balance into a false limit.
         const mergedPlan = String(user.plan || lic.plan || "free");
         applyWebsitePlanUsage({
           ...user,
@@ -1604,7 +1621,10 @@ async function init() {
             Number(user.tokenBudget) > 0
               ? Number(user.tokenBudget)
               : Number(lic.tokenBudget) || user.tokenBudget,
-          tokensUsed: Math.max(Number(lic.tokensUsed) || 0, Number(user.tokensUsed) || 0),
+          tokensUsed:
+            Number.isFinite(Number(user.tokensUsed)) && Number(user.tokensUsed) >= 0
+              ? Number(user.tokensUsed)
+              : Number(lic.tokensUsed) || 0,
           licenseActive:
             user.licenseActive === true || (lic.active !== false && mergedPlan.toLowerCase() !== "free"),
           expiresAt: user.expiresAt || lic.expiresAt || "",
@@ -1629,6 +1649,7 @@ async function init() {
     const token = await api.getWebsiteSession().catch(() => null);
     if (!token) {
       websiteUser = null;
+      websiteUsageAuthoritative = false;
       sidebar.setAccountStatus({
         state: "signed_out",
         detail: "Sign in on hormachuelos.vercel.app",
@@ -1650,6 +1671,7 @@ async function init() {
       if (isWebsiteSessionRejected(e)) {
         await api.clearWebsiteSession().catch(() => {});
         websiteUser = null;
+        websiteUsageAuthoritative = false;
         sidebar.setAccountStatus({
           state: "signed_out",
           detail: "Session expired — sign in again",
@@ -1663,6 +1685,10 @@ async function init() {
       return null;
     }
   }
+
+  refreshAuthoritativeUsage = () => {
+    void refreshWebsiteAccountStatus({ quiet: true });
+  };
 
   async function manageWebsiteAccount() {
     const current = await refreshWebsiteAccountStatus({ quiet: true });

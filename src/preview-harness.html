@@ -63,6 +63,11 @@
 
       const preview = new SitePreview(document.getElementById("preview-test-host"));
       window.__preview = preview;
+      window.__previewPrompts = [];
+      preview.setDescribeHandler((prompt) => {
+        window.__previewPrompts.push(prompt);
+        return "sent";
+      });
       window.__mergePreviewSessionState = mergePreviewSessionState;
       document.body.dataset.providers = visibleProviders().map((provider) => provider.id).join(",");
       document.body.dataset.cursorModels = getProviderMeta("cursor")?.models.join(",") || "";

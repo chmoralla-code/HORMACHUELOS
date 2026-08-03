@@ -285,7 +285,13 @@ async function handleChat(req, res) {
   const budget = Number(license.token_budget) || 0;
   const used = Number(license.tokens_used) || 0;
   if (budget > 0 && used >= budget) {
-    return json(res, 402, { error: "Hosted credits exhausted" }, req);
+    return json(res, 402, {
+      error: "Hosted credits exhausted",
+      code: "usage_exhausted",
+      blockedBy: "plan",
+      tokenBudget: budget,
+      tokensUsed: used,
+    }, req);
   }
 
   const upstream = await resolveUpstream(providerHint);
