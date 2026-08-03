@@ -307,6 +307,33 @@
   border-color: rgba(110, 155, 240, 0.68);
   box-shadow: 0 0 16px rgba(70, 125, 230, 0.24);
 }
+.site-preview-build-btn {
+  border-color: rgba(255, 255, 255, 0.16);
+  color: rgba(230, 230, 230, 0.9);
+}
+.site-preview-build-btn:hover {
+  border-color: rgba(255, 255, 255, 0.3);
+  color: #fff;
+  background: rgba(255, 255, 255, 0.06);
+}
+.site-preview-build-apk-btn {
+  border-color: rgba(110, 210, 130, 0.4);
+  color: rgba(150, 230, 170, 0.95);
+}
+.site-preview-build-apk-btn:hover {
+  background: linear-gradient(135deg, rgba(51, 168, 83, 0.4), rgba(90, 190, 110, 0.28));
+  border-color: rgba(110, 210, 130, 0.62);
+  color: #fff;
+}
+.site-preview-build-software-btn {
+  border-color: rgba(110, 155, 240, 0.42);
+  color: rgba(170, 200, 255, 0.95);
+}
+.site-preview-build-software-btn:hover {
+  background: linear-gradient(135deg, rgba(70, 125, 230, 0.42), rgba(80, 100, 200, 0.3));
+  border-color: rgba(110, 155, 240, 0.68);
+  color: #fff;
+}
 .site-preview-icon-btn {
   display: grid;
   place-items: center;

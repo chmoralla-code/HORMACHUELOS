@@ -431,6 +431,8 @@ export class SitePreview {
   private designBtn: HTMLButtonElement;
   private androidBtn: HTMLButtonElement;
   private softwareBtn: HTMLButtonElement;
+  private buildApkBtn: HTMLButtonElement;
+  private buildSoftwareBtn: HTMLButtonElement;
   private viewport: HTMLElement;
   private editBar: HTMLElement;
   private editInput: HTMLInputElement;
@@ -551,6 +553,22 @@ export class SitePreview {
     }, ["Software"]) as HTMLButtonElement;
     this.softwareBtn.addEventListener("click", () => this.setSoftwareMode(!this.softwareMode));
 
+    this.buildApkBtn = el("button", {
+      class: "site-preview-design-btn site-preview-build-btn site-preview-build-apk-btn",
+      type: "button",
+      title: "Ask the AI to build this as an Android APK",
+      "aria-label": "Build Android APK",
+    }, ["Build APK"]) as HTMLButtonElement;
+    this.buildApkBtn.addEventListener("click", () => this.buildApk());
+
+    this.buildSoftwareBtn = el("button", {
+      class: "site-preview-design-btn site-preview-build-btn site-preview-build-software-btn",
+      type: "button",
+      title: "Ask the AI to build this as desktop software",
+      "aria-label": "Build desktop software",
+    }, ["Build Software"]) as HTMLButtonElement;
+    this.buildSoftwareBtn.addEventListener("click", () => this.buildSoftware());
+
     const close = el("button", {
       class: "site-preview-icon-btn",
       type: "button",
@@ -561,7 +579,7 @@ export class SitePreview {
     close.addEventListener("click", () => this.close());
 
     const actions = el("div", { class: "site-preview-actions" });
-    actions.append(this.androidBtn, this.softwareBtn, this.designBtn, close);
+    actions.append(this.buildApkBtn, this.buildSoftwareBtn, this.androidBtn, this.softwareBtn, this.designBtn, close);
     toolbar.append(this.backBtn, this.forwardBtn, refresh, this.urlInput, actions);
     chrome.append(tabstrip, toolbar);
 
@@ -1459,6 +1477,28 @@ export class SitePreview {
       if (cur?.tagName === "BODY") break;
     }
     return parts.join(" > ");
+  }
+
+  private buildApk() {
+    const prompt = this.buildPrompt(
+      "Android APK",
+      "Build this project as a packaged Android APK. Scaffold a proper Android project (or a Cordova/Capacitor wrapper around the existing web app), add an AndroidManifest.xml, icons, and a Gradle build config, then produce a ready-to-install .apk file. Keep the existing look and functionality.",
+    );
+    this.onDescribe?.(prompt);
+  }
+
+  private buildSoftware() {
+    const prompt = this.buildPrompt(
+      "desktop software",
+      "Build this project as desktop software. Scaffold a proper desktop application (for example an Electron or Tauri app, or a native windowed app), add a window title bar, app icon, and a build config, then produce a runnable desktop executable. Keep the existing look and functionality.",
+    );
+    this.onDescribe?.(prompt);
+  }
+
+  private buildPrompt(target: string, instruction: string): string {
+    const entry = this.entryPath || "the current project";
+    const project = this.projectRoot ? ` (project: ${this.projectRoot})` : "";
+    return `Convert ${entry}${project} into ${target}.\n\n${instruction}`;
   }
 
   private submitDescribe() {
