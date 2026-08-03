@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.27";
-const BUILTIN_MSI_SHA256 = "f375e8cf406deda794165246bb514415e29f853090b0b4cb6b060fa536bd0dee";
-const BUILTIN_EXE_SHA256 = "11a66a4385d162aecb8ca4347edcee9c73b4dbeb6d3910b39c8cac1fb29da594";
-const BUILTIN_RELEASE_NOTES = "Fixed premature task completion: long-running benchmark, backtest, website, app, APK, and software work now continues automatically after a reasoning-only or incomplete provider pass. The done working voice now plays only after verified completion, never for errors, timeouts, cancellations, or incomplete turns.";
+const BUILTIN_RELEASE_VERSION = "0.1.28";
+const BUILTIN_MSI_SHA256 = "07582054f02e4422e515404c84b2c03d51647d6e2e654a4c7459dbc9d396cb35";
+const BUILTIN_EXE_SHA256 = "c8e5cc7913f7b26d5ba60508acbdf9d765bc474ceae8c22c5f6ccf7818156949";
+const BUILTIN_RELEASE_NOTES = "Smart Agent task planning and verification. Long HORMACHUELOS builds now recover after interrupted streams without a task-wide recovery cutoff. Improved session progress visibility.";
 
 /**
  * A deployment-bundled release keeps the download/update path available even

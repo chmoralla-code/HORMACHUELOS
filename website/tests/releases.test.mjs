@@ -45,5 +45,11 @@ test("database releases remain authoritative at the same or newer version", () =
 test("bundled release never exposes a credential", () => {
   const release = builtinLatestRelease();
   assert.match(release.version, /^\d+\.\d+\.\d+$/);
-  assert.equal(JSON.stringify(release).includes("sk-"), false);
+  // A SHA-256 checksum is allowed to contain the characters `sk-` in the
+  // middle by chance. Detect a real credential-shaped token instead of
+  // rejecting a valid installer checksum through a substring collision.
+  assert.doesNotMatch(
+    JSON.stringify(release),
+    /(?:^|[^A-Za-z0-9_-])sk-[A-Za-z0-9_-]{16,}/,
+  );
 });
