@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.26";
-const BUILTIN_MSI_SHA256 = "bae7a9bda7c5b1ae988dc6a16dddb4e93b32311c86c1e1d70dc4da83de0d24b1";
-const BUILTIN_EXE_SHA256 = "b7d4acfebcd4e73544f197e6a5d19023c0fcb08a09e2f37c5b614d6471152946";
-const BUILTIN_RELEASE_NOTES = "Long-running website, app, APK, and software tasks now continue automatically after provider output limits. Cursor tasks resume from their durable agent state and no longer stop at the old five-minute cutoff.";
+const BUILTIN_RELEASE_VERSION = "0.1.27";
+const BUILTIN_MSI_SHA256 = "f375e8cf406deda794165246bb514415e29f853090b0b4cb6b060fa536bd0dee";
+const BUILTIN_EXE_SHA256 = "11a66a4385d162aecb8ca4347edcee9c73b4dbeb6d3910b39c8cac1fb29da594";
+const BUILTIN_RELEASE_NOTES = "Fixed premature task completion: long-running benchmark, backtest, website, app, APK, and software work now continues automatically after a reasoning-only or incomplete provider pass. The done working voice now plays only after verified completion, never for errors, timeouts, cancellations, or incomplete turns.";
 
 /**
  * A deployment-bundled release keeps the download/update path available even

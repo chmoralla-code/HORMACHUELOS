@@ -558,15 +558,30 @@ pub async fn run_cursor_turn(
             current_agent_id = Some(id);
         }
 
-        if outcome.terminal || !requires_project_completion || outcome.completion_marker_seen {
-            if !outcome.terminal {
-                emit(
-                    &app,
-                    session_id,
-                    "end",
-                    json!({ "reason": "completed", "iteration": continuation_pass }),
-                );
-            }
+        if outcome.terminal {
+            return Ok(current_agent_id);
+        }
+
+        if outcome.completion_marker_seen {
+            emit(
+                &app,
+                session_id,
+                "end",
+                json!({ "reason": "completed", "iteration": continuation_pass }),
+            );
+            return Ok(current_agent_id);
+        }
+
+        if !requires_project_completion {
+            // A regular Cursor reply is not an explicit task-completion
+            // handshake. Keep its terminal reason distinct so the frontend
+            // never announces it as "done working".
+            emit(
+                &app,
+                session_id,
+                "end",
+                json!({ "reason": "no_tool_calls", "iteration": continuation_pass }),
+            );
             return Ok(current_agent_id);
         }
 

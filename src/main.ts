@@ -312,6 +312,19 @@ async function maybeOpenBuildPreview(sessionId: string | undefined, reason: stri
   });
 }
 
+/**
+ * `end` only means that an agent turn stopped. It may be an ordinary prose
+ * answer, a timeout, an error, a cancellation, or a continuation safety
+ * guard. The audible cue is reserved for a real completion handshake.
+ */
+function isVerifiedAgentCompletion(e: AgentEvent): boolean {
+  return e.kind === "done" || (e.kind === "end" && e.payload.reason === "completed");
+}
+
+function isTerminalAgentEvent(e: AgentEvent): boolean {
+  return e.kind === "done" || e.kind === "end" || e.kind === "cancelled";
+}
+
 function refreshSidebar() {
   const runningProjectPaths = new Set(
     [...runningSessions]
@@ -1442,8 +1455,8 @@ function handleAgentEvent(e: AgentEvent) {
     }
     // Background run end events: do NOT remove from runningSessions here.
     // sendPrompt's finally owns that set (avoids "already running" races).
-    if (e.kind === "done" || e.kind === "end" || e.kind === "cancelled") {
-      speakDoneWorking();
+    if (isTerminalAgentEvent(e)) {
+      if (isVerifiedAgentCompletion(e)) speakDoneWorking();
       updateGlobalRunStatus();
       refreshSidebar();
       void maybeOpenBuildPreview(sid, e.kind);
@@ -1486,12 +1499,12 @@ function handleAgentEvent(e: AgentEvent) {
       e.payload.content,
       !!e.payload.streamed,
     );
-  } else if (e.kind === "done" || e.kind === "end" || e.kind === "cancelled") {
+  } else if (isTerminalAgentEvent(e)) {
     // Keep runningSessions + chat.running true until sendPrompt's agentRun
     // await finishes. Early setRunning(false) / runningSessions.delete races
     // the next send (backend still in start_run → "already running").
     // chat.handleEvent already cleared pending + marked userCancelled.
-    speakDoneWorking();
+    if (isVerifiedAgentCompletion(e)) speakDoneWorking();
     updateGlobalRunStatus();
     syncUsageBar();
     refreshSidebar();

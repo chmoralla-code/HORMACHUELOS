@@ -39,7 +39,6 @@ fn emit_cancelled(app: &AppHandle, session_id: &str, iteration: u32) {
 // repeatedly return the exact same truncated reply forever and burn a user's
 // allowance without making any progress.
 const MAX_AUTOMATIC_CONTINUATIONS: u8 = 12;
-const MAX_PREMATURE_COMPLETION_NUDGES: u8 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AutomaticContinuationReason {
@@ -112,6 +111,22 @@ fn contains_task_term(text: &str, term: &str) -> bool {
         .any(|word| word == term)
 }
 
+/// Questions about a workflow must still receive a normal answer rather than
+/// being treated as an instruction to execute that workflow.
+fn starts_as_explanatory_request(text: &str) -> bool {
+    [
+        "what is",
+        "what are",
+        "how do",
+        "how to",
+        "explain",
+        "tell me about",
+        "can you explain",
+    ]
+    .iter()
+    .any(|prefix| text.starts_with(prefix))
+}
+
 /// Treat only clear implementation-oriented requests as tasks that need an
 /// explicit completion handshake. Ordinary questions must still be allowed to
 /// end with a normal text response.
@@ -121,33 +136,105 @@ fn task_likely_requires_project_completion(prompt: &str) -> bool {
         return false;
     }
 
-    if matches!(normalized.as_str(), "continue" | "keep going" | "go on" | "finish it") {
+    if matches!(
+        normalized.as_str(),
+        "continue" | "keep going" | "go on" | "finish it"
+    ) {
         return true;
     }
 
-    let has_action = [
-        "build", "create", "make", "implement", "develop", "scaffold", "generate", "fix",
-        "debug", "repair", "refactor", "upgrade", "update", "release", "publish", "deploy",
-        "finish", "continue",
+    if starts_as_explanatory_request(&normalized) {
+        return false;
+    }
+
+    let has_implementation_action = [
+        "build",
+        "create",
+        "make",
+        "implement",
+        "develop",
+        "scaffold",
+        "generate",
+        "fix",
+        "debug",
+        "repair",
+        "refactor",
+        "upgrade",
+        "update",
+        "release",
+        "publish",
+        "deploy",
+        "finish",
+        "continue",
     ]
     .iter()
     .any(|word| contains_task_term(&normalized, word));
+    let has_execution_action = [
+        "run",
+        "execute",
+        "benchmark",
+        "backtest",
+        "simulate",
+        "test",
+    ]
+    .iter()
+    .any(|word| contains_task_term(&normalized, word));
+    let has_action = has_implementation_action || has_execution_action;
     if !has_action {
         return false;
     }
 
     let has_project_target = [
-        "website", "web app", "webapp", "apk", "android", "ios", "app", "application",
-        "software", "project", "code", "codebase", "repository", "repo", "feature", "file",
-        "frontend", "backend", "api", "database", "game", "installer",
+        "website",
+        "web app",
+        "webapp",
+        "apk",
+        "android",
+        "ios",
+        "app",
+        "application",
+        "software",
+        "project",
+        "code",
+        "codebase",
+        "repository",
+        "repo",
+        "feature",
+        "file",
+        "frontend",
+        "backend",
+        "api",
+        "database",
+        "game",
+        "installer",
+    ]
+    .iter()
+    .any(|word| contains_task_term(&normalized, word));
+
+    // Tasks such as running a bot benchmark, a backtest, or a simulation are
+    // active workspace work even when they do not say "build" or "fix".
+    let has_execution_target = [
+        "benchmark",
+        "backtest",
+        "simulation",
+        "bot",
+        "strategy",
+        "trade",
+        "trading",
+        "script",
+        "test",
+        "tests",
     ]
     .iter()
     .any(|word| contains_task_term(&normalized, word));
 
     has_project_target
-        || ["fix", "debug", "repair", "release", "publish", "deploy", "continue"]
-            .iter()
-            .any(|word| contains_task_term(&normalized, word))
+        || [
+            "fix", "debug", "repair", "release", "publish", "deploy", "continue",
+        ]
+        .iter()
+        .any(|word| contains_task_term(&normalized, word))
+        || (has_execution_action && has_execution_target)
 }
 
 /// Prior session turn for agent memory (from the frontend transcript).
@@ -993,7 +1080,6 @@ Use them as continuous memory for everything that follows.",
     // project task that ended without `done`. This preserves normal concise
     // answers while keeping long implementation work moving autonomously.
     let mut automatic_continuations: u8 = 0;
-    let mut premature_completion_nudges: u8 = 0;
     let requires_project_completion = task_likely_requires_project_completion(&prompt);
     emit(
         &app,
@@ -1251,11 +1337,7 @@ Use them as continuous memory for everything that follows.",
         if resp.tool_calls.is_empty() {
             let continuation_reason = if stop_reason_requires_continuation(&resp.stop_reason) {
                 Some(AutomaticContinuationReason::OutputLimit)
-            } else if requires_project_completion
-                && !auth_request_routed
-                && mode != "plan"
-                && premature_completion_nudges < MAX_PREMATURE_COMPLETION_NUDGES
-            {
+            } else if requires_project_completion && !auth_request_routed && mode != "plan" {
                 Some(AutomaticContinuationReason::CompletionCheck)
             } else {
                 None
@@ -1285,9 +1367,6 @@ Use them as continuous memory for everything that follows.",
                 }
 
                 automatic_continuations = automatic_continuations.saturating_add(1);
-                if reason == AutomaticContinuationReason::CompletionCheck {
-                    premature_completion_nudges = premature_completion_nudges.saturating_add(1);
-                }
                 messages.push(ChatMessage::assistant(
                     resp.text.as_deref().unwrap_or(""),
                     None,
@@ -1893,8 +1972,9 @@ mod tests {
         cursor_computer_use_instructions, cursor_effort_for_request,
         cursor_permission_instructions, display_model_name, display_provider_name,
         identity_instructions, normalized_permission_mode, public_tool_arguments,
-        public_tool_preview_delta, resolve_tool_preview_name, stop_reason_requires_continuation,
-        task_likely_requires_project_completion, tool_confirm_summary, truncate_utf8, uses_cursor_sdk,
+        public_tool_preview_delta, resolve_tool_preview_name, starts_as_explanatory_request,
+        stop_reason_requires_continuation, task_likely_requires_project_completion,
+        tool_confirm_summary, truncate_utf8, uses_cursor_sdk,
     };
     use serde_json::json;
 
@@ -2050,6 +2130,12 @@ mod tests {
             "Fix the APK build error"
         ));
         assert!(task_likely_requires_project_completion("continue"));
+        assert!(task_likely_requires_project_completion(
+            "Use the bot settings to run a benchmark with live Binance charts and save the results"
+        ));
+        assert!(task_likely_requires_project_completion(
+            "Backtest the trading strategy for July and report the final equity"
+        ));
         assert!(!task_likely_requires_project_completion(
             "What is the difference between a website and an app?"
         ));
@@ -2058,6 +2144,10 @@ mod tests {
         ));
         assert!(!task_likely_requires_project_completion(
             "Can you make a happy birthday message?"
+        ));
+        assert!(starts_as_explanatory_request("how do i run a benchmark?"));
+        assert!(!task_likely_requires_project_completion(
+            "How do I run a benchmark with this bot?"
         ));
     }
 }
