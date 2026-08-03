@@ -35,6 +35,29 @@ export interface SessionPreviewState {
   softwareMode: boolean;
 }
 
+export type SmartAgentStepState = "pending" | "active" | "completed" | "paused";
+
+export interface SmartAgentTaskStep {
+  id: string;
+  label: string;
+  state: SmartAgentStepState;
+}
+
+/**
+ * Per-session orchestration state. Unlike a project preview, this reflects the
+ * current task in one conversation and must never leak into another session.
+ */
+export interface SmartAgentTaskState {
+  version: 1;
+  title: string;
+  summary: string;
+  steps: SmartAgentTaskStep[];
+  activeStep: number;
+  status: "working" | "completed" | "paused";
+  detail: string;
+  updatedAt: number;
+}
+
 export interface Session {
   id: string;
   title: string;
@@ -45,6 +68,8 @@ export interface Session {
   sessionTokens?: number;
   /** Per-session build preview, restored only while this session is selected. */
   preview?: SessionPreviewState;
+  /** Per-session Smart Agent plan and its latest progress. */
+  smartAgent?: SmartAgentTaskState;
 }
 
 /** Keep a background session's saved reply as tidy as the live chat renderer. */
@@ -254,6 +279,54 @@ function sanitizeSessionPreview(value: unknown): SessionPreviewState | undefined
   };
 }
 
+const SMART_AGENT_MAX_STEPS = 8;
+const SMART_AGENT_MAX_TEXT = 300;
+const SMART_AGENT_STEP_IDS = new Set(["scope", "inspect", "implement", "validate", "deliver"]);
+
+function clipSmartAgentText(value: unknown, fallback = ""): string {
+  if (typeof value !== "string") return fallback;
+  const text = redactChatCredentials(value.trim()).replace(/\s+/g, " ");
+  return text.slice(0, SMART_AGENT_MAX_TEXT) || fallback;
+}
+
+/** Bound and sanitize persisted Smart Agent state before restoring it into the UI. */
+export function sanitizeSmartAgentTaskState(value: unknown): SmartAgentTaskState | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  const rawSteps = Array.isArray(raw.steps) ? raw.steps.slice(0, SMART_AGENT_MAX_STEPS) : [];
+  const steps: SmartAgentTaskStep[] = [];
+  const seen = new Set<string>();
+  for (const candidate of rawSteps) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+    const step = candidate as Record<string, unknown>;
+    const id = typeof step.id === "string" ? step.id.trim().toLowerCase() : "";
+    if (!SMART_AGENT_STEP_IDS.has(id) || seen.has(id)) continue;
+    const label = clipSmartAgentText(step.label, id);
+    const requested = typeof step.state === "string" ? step.state : "pending";
+    const state: SmartAgentStepState =
+      requested === "active" || requested === "completed" || requested === "paused"
+        ? requested
+        : "pending";
+    seen.add(id);
+    steps.push({ id, label, state });
+  }
+  if (!steps.length) return undefined;
+  const requestedStatus = typeof raw.status === "string" ? raw.status : "working";
+  const status: SmartAgentTaskState["status"] =
+    requestedStatus === "completed" || requestedStatus === "paused" ? requestedStatus : "working";
+  const requestedStep = Math.floor(Number(raw.activeStep) || 0);
+  return {
+    version: 1,
+    title: clipSmartAgentText(raw.title, "Smart Agent"),
+    summary: clipSmartAgentText(raw.summary),
+    steps,
+    activeStep: Math.max(0, Math.min(steps.length - 1, requestedStep)),
+    status,
+    detail: clipSmartAgentText(raw.detail),
+    updatedAt: Math.max(0, Math.floor(Number(raw.updatedAt) || 0)),
+  };
+}
+
 type ProjectUsageMap = Record<string, number>;
 
 function loadProjectUsageMap(): ProjectUsageMap {
@@ -338,11 +411,13 @@ export function loadSessions(projectId: string): Session[] {
 
 function safeSessionForStorage(session: Session): Session {
   const preview = sanitizeSessionPreview(session.preview);
+  const smartAgent = sanitizeSmartAgentTaskState(session.smartAgent);
   return {
     ...session,
     title: redactChatCredentials(session.title),
     messages: session.messages.map(redactSessionMessage),
     preview,
+    smartAgent,
   };
 }
 

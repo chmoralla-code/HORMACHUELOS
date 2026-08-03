@@ -256,6 +256,8 @@ struct StreamAccumulator {
     stop_reason: String,
     usage_tokens: u64,
     saw_event: bool,
+    saw_done: bool,
+    saw_terminal_choice: bool,
 }
 
 impl StreamAccumulator {
@@ -280,7 +282,10 @@ impl StreamAccumulator {
         self.saw_event = true;
 
         if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
-            self.stop_reason = reason.to_string();
+            if !reason.trim().is_empty() {
+                self.stop_reason = reason.to_string();
+                self.saw_terminal_choice = true;
+            }
         }
 
         let delta = choice
@@ -377,7 +382,25 @@ impl StreamAccumulator {
         }
     }
 
+    fn completed(&self) -> bool {
+        self.saw_done || self.saw_terminal_choice
+    }
+
     fn into_response(self) -> Result<LlmResponse> {
+        let completed = self.completed();
+        if !completed {
+            // A proxy or upstream can close a stream after partial text or a
+            // partial tool call. Never execute an incomplete tool payload as
+            // if it were valid; return a resumable stop so the host continues
+            // the same task with the preserved workspace and conversation.
+            return Ok(LlmResponse {
+                text: (!self.text.is_empty()).then_some(self.text),
+                tool_calls: Vec::new(),
+                reasoning_content: (!self.reasoning.is_empty()).then_some(self.reasoning),
+                stop_reason: "stream_interrupted".to_string(),
+                usage_tokens: self.usage_tokens,
+            });
+        }
         let mut tool_calls = Vec::with_capacity(self.tool_calls.len());
         for (index, call) in self.tool_calls.into_iter().enumerate() {
             if call.name.is_empty() {
@@ -427,7 +450,11 @@ fn apply_sse_line(
         return Ok(());
     }
     let data = line.strip_prefix("data:").map(str::trim).unwrap_or(line);
-    if data.is_empty() || data == "[DONE]" {
+    if data.is_empty() {
+        return Ok(());
+    }
+    if data == "[DONE]" {
+        accumulator.saw_done = true;
         return Ok(());
     }
     let value: Value = serde_json::from_str(data)
@@ -685,7 +712,9 @@ impl LlmProvider for OpenAi {
                 return Ok(parsed);
             }
 
-            accumulator.flush_tool_previews(on_tool_call.as_ref());
+            if accumulator.completed() {
+                accumulator.flush_tool_previews(on_tool_call.as_ref());
+            }
             return accumulator.into_response();
         }
         Err(anyhow!(
@@ -802,6 +831,36 @@ mod tests {
         assert_eq!(response.tool_calls[0].name, "list_dir");
         assert_eq!(response.tool_calls[0].arguments, json!({ "path": "." }));
         assert_eq!(response.usage_tokens, 42);
+    }
+
+    #[test]
+    fn interrupted_stream_never_executes_a_partial_tool_call() {
+        let mut accumulator = StreamAccumulator::default();
+        accumulator.apply(
+            &json!({
+                "choices": [{
+                    "delta": {
+                        "content": "I am applying the change...",
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call_partial",
+                            "function": {
+                                "name": "write_file",
+                                "arguments": "{\"path\":\"src/main"
+                            }
+                        }]
+                    }
+                }]
+            }),
+            None,
+            None,
+            None,
+        );
+
+        let response = accumulator.into_response().expect("resumable response");
+        assert_eq!(response.stop_reason, "stream_interrupted");
+        assert!(response.tool_calls.is_empty());
+        assert_eq!(response.text.as_deref(), Some("I am applying the change..."));
     }
 
     #[test]

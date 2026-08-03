@@ -2,6 +2,7 @@
 //! `api.cursor.com` has no OpenAI-compatible `/chat/completions` endpoint.
 
 use crate::agent::HistoryTurn;
+use crate::smart_agent::SmartAgentRun;
 use crate::state::SessionRun;
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -43,9 +44,9 @@ struct BridgeEvent {
     iteration: Option<u32>,
 }
 
-// This guards only automatic Cursor follow-up passes. It does not limit the
-// SDK agent's own tool loop, which may take as many concrete steps as needed.
-const MAX_CURSOR_AUTOMATIC_CONTINUATIONS: u8 = 6;
+// This is not a task or tool-loop limit. It only stops repeated Cursor passes
+// that produce no tool activity at all; every concrete tool action resets it.
+const MAX_CURSOR_CONSECUTIVE_STALLED_RECOVERIES: u8 = 4;
 const CURSOR_FIRST_EVENT_TIMEOUT: Duration = Duration::from_secs(45);
 const CURSOR_IDLE_TIMEOUT: Duration = Duration::from_secs(12 * 60);
 const CURSOR_MAX_ACTIVE_DURATION: Duration = Duration::from_secs(45 * 60);
@@ -59,6 +60,7 @@ struct CursorTurnOutcome {
     agent_id: Option<String>,
     completion_marker_seen: bool,
     terminal: bool,
+    made_concrete_progress: bool,
 }
 
 impl CursorTurnOutcome {
@@ -67,7 +69,27 @@ impl CursorTurnOutcome {
             agent_id,
             completion_marker_seen: false,
             terminal: true,
+            made_concrete_progress: false,
         }
+    }
+}
+
+#[derive(Default)]
+struct CursorPassActivity {
+    made_concrete_progress: bool,
+}
+
+impl CursorPassActivity {
+    fn record_tool_activity(&mut self) {
+        self.made_concrete_progress = true;
+    }
+}
+
+fn next_cursor_stalled_recovery_count(previous: u8, made_concrete_progress: bool) -> u8 {
+    if made_concrete_progress {
+        0
+    } else {
+        previous.saturating_add(1)
     }
 }
 
@@ -395,6 +417,8 @@ fn handle_event(
     agent_id_out: &mut Option<String>,
     completion_marker_seen: &mut bool,
     saw_error: &mut Option<String>,
+    smart_agent: &mut SmartAgentRun,
+    activity: &mut CursorPassActivity,
     model: &str,
 ) -> bool {
     match event.kind.as_str() {
@@ -419,6 +443,9 @@ fn handle_event(
         "tool_call" => {
             let name = event.name.unwrap_or_else(|| "tool".into());
             let id = event.id.unwrap_or_else(|| name.clone());
+            let arguments = event.arguments.unwrap_or_else(|| json!({}));
+            smart_agent.on_tool_call(app, session_id, &id, &name, &arguments);
+            activity.record_tool_activity();
             emit(
                 app,
                 session_id,
@@ -426,13 +453,16 @@ fn handle_event(
                 json!({
                     "id": id,
                     "name": name,
-                    "arguments": event.arguments.unwrap_or(json!({})),
+                    "arguments": arguments,
                 }),
             );
         }
         "tool_result" => {
             let name = event.name.unwrap_or_else(|| "tool".into());
             let id = event.id.unwrap_or_else(|| name.clone());
+            let ok = event.ok.unwrap_or(true);
+            smart_agent.on_tool_result(app, session_id, &id, &name, ok);
+            activity.record_tool_activity();
             emit(
                 app,
                 session_id,
@@ -440,7 +470,7 @@ fn handle_event(
                 json!({
                     "id": id,
                     "name": name,
-                    "ok": event.ok.unwrap_or(true),
+                    "ok": ok,
                     "content": event.content.unwrap_or_default(),
                     "streamed": false,
                 }),
@@ -531,10 +561,14 @@ pub async fn run_cursor_turn(
     history: &[HistoryTurn],
     resume_agent_id: Option<String>,
     requires_project_completion: bool,
+    smart_agent_enabled: bool,
 ) -> Result<Option<String>> {
-    let mut continuation_pass: u8 = 0;
+    let mut continuation_pass: u32 = 0;
+    let mut consecutive_stalled_recoveries: u8 = 0;
     let mut current_prompt = prompt.to_string();
     let mut current_agent_id = resume_agent_id;
+    let mut smart_agent = SmartAgentRun::new(smart_agent_enabled && requires_project_completion);
+    smart_agent.emit_plan(&app, session_id);
 
     loop {
         let outcome = run_cursor_attempt(
@@ -551,6 +585,7 @@ pub async fn run_cursor_turn(
             history,
             current_agent_id.clone(),
             requires_project_completion,
+            &mut smart_agent,
         )
         .await?;
 
@@ -563,6 +598,21 @@ pub async fn run_cursor_turn(
         }
 
         if outcome.completion_marker_seen {
+            if smart_agent.request_final_review(&app, session_id) {
+                continuation_pass = continuation_pass.saturating_add(1);
+                emit(
+                    &app,
+                    session_id,
+                    "reasoning",
+                    json!({
+                        "text": "Verifying the workspace before delivery...",
+                        "iteration": continuation_pass,
+                    }),
+                );
+                current_prompt = SmartAgentRun::final_review_instruction().to_string();
+                continue;
+            }
+            smart_agent.complete(&app, session_id);
             emit(
                 &app,
                 session_id,
@@ -585,7 +635,17 @@ pub async fn run_cursor_turn(
             return Ok(current_agent_id);
         }
 
+        consecutive_stalled_recoveries = next_cursor_stalled_recovery_count(
+            consecutive_stalled_recoveries,
+            outcome.made_concrete_progress,
+        );
+
         if current_agent_id.is_none() {
+            smart_agent.pause(
+                &app,
+                session_id,
+                "The Cursor agent ended without a resumable checkpoint.",
+            );
             emit(
                 &app,
                 session_id,
@@ -603,13 +663,18 @@ pub async fn run_cursor_turn(
             return Ok(None);
         }
 
-        if continuation_pass >= MAX_CURSOR_AUTOMATIC_CONTINUATIONS {
+        if consecutive_stalled_recoveries >= MAX_CURSOR_CONSECUTIVE_STALLED_RECOVERIES {
+            smart_agent.pause(
+                &app,
+                session_id,
+                "Automatic recovery paused after repeated Cursor passes without tool activity.",
+            );
             emit(
                 &app,
                 session_id,
                 "text",
                 json!({
-                    "text": "\n\n— Automatic continuation paused after several incomplete Cursor passes. Your workspace and agent checkpoint are preserved; inspect the latest progress before another pass."
+                    "text": "\n\n— Automatic recovery paused after repeated Cursor passes without a concrete tool action. Your workspace and agent checkpoint are preserved."
                 }),
             );
             emit(
@@ -652,6 +717,7 @@ async fn run_cursor_attempt(
     history: &[HistoryTurn],
     resume_agent_id: Option<String>,
     requires_project_completion: bool,
+    smart_agent: &mut SmartAgentRun,
 ) -> Result<CursorTurnOutcome> {
     let bridge = bridge_script_path()?;
     let node_runtime = node_runtime_path(&bridge);
@@ -778,6 +844,7 @@ async fn run_cursor_attempt(
     let mut agent_id_out: Option<String> = None;
     let mut completion_marker_seen = !requires_project_completion;
     let mut saw_error: Option<String> = None;
+    let mut activity = CursorPassActivity::default();
     let mut saw_bridge_event = false;
     let started = std::time::Instant::now();
     let mut last_bridge_event = started;
@@ -908,6 +975,8 @@ async fn run_cursor_attempt(
                         &mut agent_id_out,
                         &mut completion_marker_seen,
                         &mut saw_error,
+                        smart_agent,
+                        &mut activity,
                         model,
                     );
                     if usage_blocked {
@@ -971,6 +1040,7 @@ async fn run_cursor_attempt(
         agent_id: agent_id_out,
         completion_marker_seen,
         terminal: false,
+        made_concrete_progress: activity.made_concrete_progress,
     })
 }
 
@@ -1054,5 +1124,17 @@ mod tests {
             cursor_permission_enforcement("auto"),
             "cursor_sdk_auto_review"
         );
+    }
+
+    #[test]
+    fn cursor_recovery_watchdog_resets_after_tool_activity() {
+        let mut stalls = 0;
+        for _ in 0..(MAX_CURSOR_CONSECUTIVE_STALLED_RECOVERIES - 1) {
+            stalls = next_cursor_stalled_recovery_count(stalls, false);
+        }
+        assert!(stalls < MAX_CURSOR_CONSECUTIVE_STALLED_RECOVERIES);
+
+        stalls = next_cursor_stalled_recovery_count(stalls, true);
+        assert_eq!(stalls, 0);
     }
 }

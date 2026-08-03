@@ -19,6 +19,8 @@ export type Settings = {
   taglish: boolean;
   /** Allow the Cursor SDK agent to observe and control approved Windows apps. */
   computer_use_enabled: boolean;
+  /** Keep long build tasks on a durable plan and request a final verification pass. */
+  smart_agent_enabled: boolean;
   /** Cursor SDK effort: light | medium | high | xhigh | ultra */
   model_effort?: string;
 };
@@ -269,6 +271,8 @@ export type IntegrationTestResult = {
 
 export type AgentEventPayload =
   | { kind: "start"; payload: { prompt: string } }
+  | { kind: "task_plan"; payload: { title: string; summary: string; steps: { id: string; label: string; state: string }[]; active_step: number; status: string; detail?: string } }
+  | { kind: "task_progress"; payload: { step: number; phase: string; status: string; detail: string; completed_before?: number; complete_all?: boolean } }
   | { kind: "thinking"; payload: { iteration: number } }
   | { kind: "reasoning"; payload: { text: string; iteration?: number } }
   | { kind: "text"; payload: { text: string } }

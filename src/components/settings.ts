@@ -535,6 +535,7 @@ export function defaultSettings(): Settings {
     capability_mode: "thinking",
     taglish: false,
     computer_use_enabled: false,
+    smart_agent_enabled: true,
     model_effort: "high",
   };
 }
@@ -567,6 +568,9 @@ export function normalizeSettings(s: Settings): Settings {
   }
   s.taglish = !!s.taglish;
   s.computer_use_enabled = !!s.computer_use_enabled;
+  // Missing on older desktop settings means enabled: Smart Agent is a safe,
+  // provider-neutral orchestration layer and does not change credentials.
+  s.smart_agent_enabled = s.smart_agent_enabled !== false;
   s.model_effort = normalizeEffortForProvider(s.provider, s.model_effort);
   // Older builds pointed the OpenAI label at Cursor. Keep that path for a
   // genuine Cursor key; an explicit xAI endpoint uses the native xAI route.
@@ -1179,6 +1183,21 @@ export class SettingsModal {
       inp.addEventListener("input", () => (this.settings.command_timeout_secs = parseInt(inp.value) || 120));
       return inp;
     }));
+
+    body.appendChild(this.field("Smart Agent", () => {
+      const wrap = el("label", { class: "set-check", style: "display:flex;align-items:center;gap:8px;cursor:pointer" });
+      const inp = el("input", { type: "checkbox" }) as HTMLInputElement;
+      inp.checked = this.settings.smart_agent_enabled !== false;
+      inp.addEventListener("change", () => {
+        this.settings.smart_agent_enabled = inp.checked;
+      });
+      wrap.appendChild(inp);
+      wrap.appendChild(document.createTextNode("Keep task plans, automatic recovery, and a final verification check"));
+      return wrap;
+    }));
+    body.appendChild(el("div", { class: "set-hint", style: "margin-top:-6px;margin-bottom:12px" }, [
+      "For build, fix, app, website, software, APK, and release work: keeps the same session moving and checks evidence before the AI says it is done. It never changes your selected provider, model, or API key.",
+    ]));
 
     body.appendChild(this.field("Permission mode", () => {
       const sel = el("select", { class: "field" }) as HTMLSelectElement;

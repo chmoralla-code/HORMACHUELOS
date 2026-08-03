@@ -8,6 +8,7 @@ pub mod integration_chat;
 pub mod integrations;
 pub mod license;
 pub mod llm;
+pub mod smart_agent;
 pub mod state;
 pub mod templates;
 pub mod tools;

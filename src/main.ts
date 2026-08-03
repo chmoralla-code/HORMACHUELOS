@@ -6,6 +6,7 @@ import { SettingsModal, displayModelName, displayProviderName, getProviderMeta, 
 import { ModelBar } from "./components/modelbar";
 import { ProjectPicker } from "./components/picker";
 import { WorkspacePanel } from "./components/workspace";
+import { SmartAgentPanel, applySmartAgentEvent } from "./components/smart-agent";
 import {
   SitePreview,
   isPreviewableBuild,
@@ -49,6 +50,7 @@ let settingsModal: SettingsModal;
 let modelBar: ModelBar;
 let workspacePanel: WorkspacePanel;
 let sitePreview: SitePreview;
+let smartAgentPanel: SmartAgentPanel | null = null;
 let currentProjectPath: string | null = null;
 let sessions: Session[] = [];
 let activeSessionId: string | null = null;
@@ -372,6 +374,11 @@ function sessionForId(id: string | null | undefined): Session | undefined {
   return sessionRegistry.get(id) || sessions.find((session) => session.id === id);
 }
 
+/** Keep the visible Smart Agent ledger scoped to the currently selected session. */
+function syncSmartAgentPanel() {
+  smartAgentPanel?.setSession(activeSessionId, sessionForId(activeSessionId)?.smartAgent);
+}
+
 function syncVisiblePreviewIntoSession(session: Session) {
   if (!sitePreview || sitePreview.isRestoring) return;
   const preview = sitePreview.captureSessionState();
@@ -652,6 +659,7 @@ function createNewSession() {
   sessions.unshift(s);
   sessionRegistry.set(s.id, s);
   activeSessionId = s.id;
+  syncSmartAgentPanel();
   restoreActiveSessionPreview();
   chat.startSession("");
   // Clear the empty user message that startSession pushes for a blank session
@@ -672,6 +680,7 @@ function switchSession(id: string) {
   // Keep background runs alive — just switch the visible transcript
   persistCurrentSession();
   activeSessionId = id;
+  syncSmartAgentPanel();
   restoreActiveSessionPreview();
   if (s.messages.length === 0) {
     chat.messages = [];
@@ -728,6 +737,7 @@ function removeSession(id: string) {
   } else {
     refreshSidebar();
   }
+  syncSmartAgentPanel();
   updateGlobalRunStatus();
 }
 function removeAllSessions() {
@@ -807,6 +817,7 @@ function doRemoveAllSessions() {
   // Keep project token usage — do not reset the meter to 100%
   sessions = [];
   activeSessionId = null;
+  syncSmartAgentPanel();
   sitePreview?.clearSessionView();
   chat.messages = [];
   chat.renderEmpty();
@@ -821,6 +832,7 @@ function loadProjectSessions() {
   if (!currentProjectPath) {
     sessions = [];
     activeSessionId = null;
+    syncSmartAgentPanel();
     syncUsageBar();
     return;
   }
@@ -845,6 +857,7 @@ function loadProjectSessions() {
   syncActiveSessionModelLock();
   // Shared budget across every session in this project
   syncUsageBar();
+  syncSmartAgentPanel();
   restoreActiveSessionPreview();
 }
 
@@ -1387,6 +1400,9 @@ async function sendPrompt(prompt: string) {
 function handleAgentEvent(e: AgentEvent) {
   const sid = e.session_id;
   const isActive = !!sid && sid === activeSessionId;
+  const owningSession = sid ? sessionForId(sid) : undefined;
+  const smartStateChanged = owningSession ? applySmartAgentEvent(owningSession, e) : false;
+  if (smartStateChanged && isActive) syncSmartAgentPanel();
 
   // UI-only secure handoff. Inline chat form — never persist credentials to transcript.
   if (e.kind === "integration_auth") {
@@ -1435,6 +1451,7 @@ function handleAgentEvent(e: AgentEvent) {
     if (s) {
       recordAgentEvent(s.messages, e);
       if (
+        smartStateChanged ||
         e.kind === "text" ||
         e.kind === "tool_result" ||
         e.kind === "done" ||
@@ -1474,8 +1491,11 @@ function handleAgentEvent(e: AgentEvent) {
     return;
   }
 
-  chat.handleEvent(e);
-  workspacePanel.handleAgentEvent(e);
+  const isSmartAgentEvent = e.kind === "task_plan" || e.kind === "task_progress";
+  if (!isSmartAgentEvent) {
+    chat.handleEvent(e);
+    workspacePanel.handleAgentEvent(e);
+  }
   if (e.kind === "tool_call") {
     trackRunTouchedFile(sid, e.payload.name, e.payload.arguments);
     const htmlOpen = htmlPathFromOpenArgs(
@@ -1511,7 +1531,7 @@ function handleAgentEvent(e: AgentEvent) {
     void maybeOpenBuildPreview(sid, e.kind);
   }
   // Persist session after meaningful events
-  if (e.kind === "text" || e.kind === "tool_result" || e.kind === "done" || e.kind === "end" || e.kind === "cancelled" || e.kind === "reasoning") {
+  if (smartStateChanged || e.kind === "text" || e.kind === "tool_result" || e.kind === "done" || e.kind === "end" || e.kind === "cancelled" || e.kind === "reasoning") {
     persistCurrentSession(e.kind === "text" || e.kind === "reasoning");
   }
 }
@@ -1532,6 +1552,8 @@ async function init() {
   workspacePanel = new WorkspacePanel();
   consolePanel = new ConsolePanel();
   sitePreview = new SitePreview(document.getElementById("site-preview-slot"));
+  smartAgentPanel = new SmartAgentPanel(document.getElementById("smart-agent-status")!);
+  syncSmartAgentPanel();
   sitePreview.setDescribeHandler((prompt) => {
     void sendPrompt(prompt);
   });

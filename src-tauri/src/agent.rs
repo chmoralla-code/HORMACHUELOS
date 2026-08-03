@@ -34,11 +34,19 @@ fn emit_cancelled(app: &AppHandle, session_id: &str, iteration: u32) {
     );
 }
 
-// These are continuation safety guards, not an agent iteration limit. The
-// normal tool loop intentionally remains unbounded. A provider can otherwise
-// repeatedly return the exact same truncated reply forever and burn a user's
-// allowance without making any progress.
-const MAX_AUTOMATIC_CONTINUATIONS: u8 = 12;
+// The normal tool loop intentionally remains unbounded. This guard applies
+// only to *consecutive* provider replies that took no concrete tool action.
+// A productive tool turn resets it, so a large website, APK, benchmark, or
+// software task never stops merely because it has been running for a while.
+const MAX_CONSECUTIVE_STALLED_RECOVERIES: u8 = 4;
+
+fn next_stalled_recovery_count(previous: u8, made_concrete_progress: bool) -> u8 {
+    if made_concrete_progress {
+        0
+    } else {
+        previous.saturating_add(1)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AutomaticContinuationReason {
@@ -98,6 +106,7 @@ fn stop_reason_requires_continuation(stop_reason: &str) -> bool {
             | "token_limit_reached"
             | "truncated"
             | "incomplete"
+            | "stream_interrupted"
     ) || normalized.contains("max_token")
         || normalized.contains("output_limit")
         || normalized.contains("token_limit")
@@ -596,6 +605,7 @@ pub async fn run_loop(
     let known_integration_secrets = Arc::new(crate::integrations::loaded_tokens());
     let prompt =
         integration_chat::redact_sensitive_text(&prompt, known_integration_secrets.as_ref());
+    let requires_project_completion = task_likely_requires_project_completion(&prompt);
 
     let mut history = history;
     for turn in &mut history {
@@ -626,7 +636,8 @@ pub async fn run_loop(
     if uses_cursor_sdk(&settings.provider) {
         match crate::config::load_cursor_sdk_api_key(&settings.provider) {
             Ok(key) => {
-                let requires_project_completion = task_likely_requires_project_completion(&prompt);
+                let smart_agent_enabled =
+                    settings.smart_agent_enabled && requires_project_completion;
                 let effort = cursor_effort_for_request(
                     &settings.model_effort,
                     &prompt,
@@ -635,6 +646,8 @@ pub async fn run_loop(
                 let model_display = display_model_name(&settings.model);
                 let provider_display = display_provider_name(&settings.provider);
                 let permission_mode = normalized_permission_mode(&settings.permission_mode);
+                let smart_agent_policy =
+                    crate::smart_agent::SmartAgentRun::system_instructions(smart_agent_enabled);
                 let completion_contract = if requires_project_completion {
                     "\n\nAUTONOMOUS LONG-TASK CONTRACT:\n\
 - This is an implementation task. Keep using tools until the requested website, app, APK, software, or fix is actually complete and verified.\n\
@@ -645,7 +658,7 @@ pub async fn run_loop(
                     ""
                 };
                 let wrapped_prompt = format!(
-                    "{identity}\n\n{policy}{computer_policy}{completion_contract}\n\n\
+                    "{identity}\n\n{policy}{computer_policy}{completion_contract}{smart_agent_policy}\n\n\
 IN-APP PREVIEW:\n\
 - Hormachuelos has a built-in Preview panel on the right. Do NOT open websites/games in Chrome or the system browser.\n\
 - After creating or updating HTML (index.html, game pages, etc.), call open_path on that HTML file so the in-app Preview opens.\n\
@@ -655,6 +668,7 @@ Current user request:\n{prompt}",
                     policy = cursor_permission_instructions(&permission_mode),
                     computer_policy = cursor_computer_use_instructions(settings.computer_use_enabled),
                     completion_contract = completion_contract,
+                    smart_agent_policy = smart_agent_policy,
                     prompt = prompt,
                 );
                 return crate::cursor_bridge::run_cursor_turn(
@@ -671,6 +685,7 @@ Current user request:\n{prompt}",
                     &history,
                     cursor_resume_agent_id,
                     requires_project_completion,
+                    smart_agent_enabled,
                 )
                 .await;
             }
@@ -902,6 +917,9 @@ BEHAVIOR:\n\
         } else {
             ""
         };
+    let smart_agent_enabled = settings.smart_agent_enabled && requires_project_completion;
+    let smart_agent_policy =
+        crate::smart_agent::SmartAgentRun::system_instructions(smart_agent_enabled);
     let system = format!(
         "You are Hormachuelos, an autonomous agent embedded in a desktop app with access to the user's computer. \
 You can answer questions, explain concepts, build websites, games, and apps, manage files, run programs, and perform system tasks. \
@@ -916,6 +934,7 @@ ACTIVE RUNTIME (report these values accurately when asked):\n\
 {project_context}\
 {accounts}\
 {computer_policy}\
+{smart_agent_policy}\
 CAPABILITIES:\n\
 - File tools accept ABSOLUTE paths (e.g. C:\\Users\\…) or paths relative to the project root.\n\
 - run_command runs PowerShell hidden — scaffold, install, build, test, system tasks, CLIs. Use `cwd` when needed.\n\
@@ -960,6 +979,7 @@ TOOL REFERENCE: read_file, write_file, edit_file, list_dir, glob, grep, run_comm
         project_context = project_context,
         accounts = accounts,
         computer_policy = computer_policy,
+        smart_agent_policy = smart_agent_policy,
         execution_style = execution_style,
         memory_rules = memory_rules,
     );
@@ -1076,11 +1096,10 @@ Use them as continuous memory for everything that follows.",
     let mut total_tokens: u64 = 0;
     // How many times we've forced plan-mode models to call ask_user after text-only replies.
     let mut plan_ask_nudges: u8 = 0;
-    // A continuation is only injected after a provider output cap or a clear
-    // project task that ended without `done`. This preserves normal concise
-    // answers while keeping long implementation work moving autonomously.
-    let mut automatic_continuations: u8 = 0;
-    let requires_project_completion = task_likely_requires_project_completion(&prompt);
+    // Only repeated replies with no tool action are considered stalled. The
+    // count resets after every tool turn; it is not an iteration limit.
+    let mut consecutive_stalled_recoveries: u8 = 0;
+    let mut smart_agent = crate::smart_agent::SmartAgentRun::new(smart_agent_enabled);
     emit(
         &app,
         &session_id,
@@ -1090,6 +1109,7 @@ Use them as continuous memory for everything that follows.",
             "permission_mode": mode,
         }),
     );
+    smart_agent.emit_plan(&app, &session_id);
     emit(
         &app,
         &session_id,
@@ -1344,13 +1364,22 @@ Use them as continuous memory for everything that follows.",
             };
 
             if let Some(reason) = continuation_reason {
-                if automatic_continuations >= MAX_AUTOMATIC_CONTINUATIONS {
+                consecutive_stalled_recoveries = next_stalled_recovery_count(
+                    consecutive_stalled_recoveries,
+                    false,
+                );
+                if consecutive_stalled_recoveries >= MAX_CONSECUTIVE_STALLED_RECOVERIES {
+                    smart_agent.pause(
+                        &app,
+                        &session_id,
+                        "Automatic recovery paused after repeated provider replies without a tool action.",
+                    );
                     emit(
                         &app,
                         &session_id,
                         "text",
                         json!({
-                            "text": "\n\n— Automatic continuation paused after repeated incomplete provider responses. Your workspace and session progress are preserved; review the latest result before starting another pass."
+                            "text": "\n\n— Automatic recovery paused after repeated replies without a concrete tool action. Your workspace and session progress are preserved."
                         }),
                     );
                     emit(
@@ -1366,7 +1395,6 @@ Use them as continuous memory for everything that follows.",
                     return Ok(None);
                 }
 
-                automatic_continuations = automatic_continuations.saturating_add(1);
                 messages.push(ChatMessage::assistant(
                     resp.text.as_deref().unwrap_or(""),
                     None,
@@ -1429,6 +1457,12 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
             return Ok(None);
         }
 
+        // A provider tool call is concrete forward progress. Reset only the
+        // recovery watchdog, never the task or conversation history.
+        consecutive_stalled_recoveries = next_stalled_recovery_count(
+            consecutive_stalled_recoveries,
+            true,
+        );
         let assistant_msg = ChatMessage::assistant(
             resp.text.as_deref().unwrap_or(""),
             Some(resp.tool_calls.clone()),
@@ -1478,6 +1512,7 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
                 }
             }
 
+            smart_agent.on_tool_call(&app, &session_id, &tc.id, &tc.name, &tc.arguments);
             let public_arguments = public_tool_arguments(&tc.name, &tc.arguments);
             let args_str = serde_json::to_string_pretty(&public_arguments).unwrap_or_default();
 
@@ -1681,6 +1716,38 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
             };
 
             if content.starts_with("__DONE__") {
+                if smart_agent.request_final_review(&app, &session_id) {
+                    let review_message =
+                        crate::smart_agent::SmartAgentRun::final_review_instruction();
+                    messages.push(ChatMessage::tool(
+                        &tc.id,
+                        &tc.name,
+                        "Host requested one final workspace verification pass before delivery.",
+                    ));
+                    emit(
+                        &app,
+                        &session_id,
+                        "tool_result",
+                        json!({
+                            "id": tc.id,
+                            "name": tc.name,
+                            "ok": true,
+                            "content": "Running one final Smart Agent verification pass before delivery.",
+                        }),
+                    );
+                    emit(
+                        &app,
+                        &session_id,
+                        "reasoning",
+                        json!({
+                            "text": "Verifying the workspace before delivery...",
+                            "iteration": iteration,
+                        }),
+                    );
+                    messages.push(ChatMessage::user(review_message));
+                    iteration = iteration.saturating_add(1);
+                    continue;
+                }
                 let summary = content.trim_start_matches("__DONE__").to_string();
                 let title = tc
                     .arguments
@@ -1723,6 +1790,7 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
                     })
                     .unwrap_or_default();
                 messages.push(ChatMessage::tool(&tc.id, &tc.name, &content));
+                smart_agent.complete(&app, &session_id);
                 emit(
                     &app,
                     &session_id,
@@ -1752,6 +1820,7 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
             } else {
                 content.clone()
             };
+            smart_agent.on_tool_result(&app, &session_id, &tc.id, &tc.name, ok);
             // Flag streamed commands so UI can skip re-dumping full output
             let streamed = matches!(tc.name.as_str(), "run_command") || tc.name.starts_with("git_");
             emit(
@@ -1973,8 +2042,9 @@ mod tests {
         cursor_permission_instructions, display_model_name, display_provider_name,
         identity_instructions, normalized_permission_mode, public_tool_arguments,
         public_tool_preview_delta, resolve_tool_preview_name, starts_as_explanatory_request,
-        stop_reason_requires_continuation, task_likely_requires_project_completion,
-        tool_confirm_summary, truncate_utf8, uses_cursor_sdk,
+        next_stalled_recovery_count, stop_reason_requires_continuation,
+        task_likely_requires_project_completion, tool_confirm_summary, truncate_utf8,
+        uses_cursor_sdk, MAX_CONSECUTIVE_STALLED_RECOVERIES,
     };
     use serde_json::json;
 
@@ -2116,9 +2186,42 @@ mod tests {
         assert!(stop_reason_requires_continuation("MAX_TOKENS"));
         assert!(stop_reason_requires_continuation("max output tokens"));
         assert!(stop_reason_requires_continuation("token_limit_reached"));
+        assert!(stop_reason_requires_continuation("stream_interrupted"));
         assert!(!stop_reason_requires_continuation("stop"));
         assert!(!stop_reason_requires_continuation("tool_calls"));
         assert!(!stop_reason_requires_continuation("content_filter"));
+    }
+
+    #[test]
+    fn recovery_watchdog_resets_after_concrete_tool_progress() {
+        let mut stalls = 0;
+        for _ in 0..(MAX_CONSECUTIVE_STALLED_RECOVERIES - 1) {
+            stalls = next_stalled_recovery_count(stalls, false);
+        }
+        assert!(stalls < MAX_CONSECUTIVE_STALLED_RECOVERIES);
+
+        stalls = next_stalled_recovery_count(stalls, true);
+        assert_eq!(stalls, 0);
+
+        for _ in 0..MAX_CONSECUTIVE_STALLED_RECOVERIES {
+            stalls = next_stalled_recovery_count(stalls, false);
+        }
+        assert_eq!(stalls, MAX_CONSECUTIVE_STALLED_RECOVERIES);
+    }
+
+    #[test]
+    fn recovery_watchdog_allows_long_tasks_with_many_recoveries_after_tools() {
+        let mut stalls = 0;
+
+        // This deliberately exceeds the former task-wide 12-pass cap. Every
+        // recovery follows concrete work, so it must remain at zero rather
+        // than ending a valid long-running implementation task.
+        for _ in 0..15 {
+            stalls = next_stalled_recovery_count(stalls, false);
+            assert_eq!(stalls, 1);
+            stalls = next_stalled_recovery_count(stalls, true);
+            assert_eq!(stalls, 0);
+        }
     }
 
     #[test]

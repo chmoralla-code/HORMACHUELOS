@@ -56,6 +56,11 @@ pub struct Settings {
     /// Explicit opt-in for native Windows desktop control through Cursor SDK custom tools.
     #[serde(default)]
     pub computer_use_enabled: bool,
+    /// Provider-neutral task planning and final verification scaffolding.
+    /// Defaults on so existing installations benefit after upgrading, while the
+    /// user can turn it off from Settings for a lighter direct-response flow.
+    #[serde(default = "default_smart_agent_enabled")]
+    pub smart_agent_enabled: bool,
 }
 
 fn default_permission_mode() -> String {
@@ -68,6 +73,10 @@ fn default_capability_mode() -> String {
 
 fn default_model_effort() -> String {
     "high".into()
+}
+
+fn default_smart_agent_enabled() -> bool {
+    true
 }
 
 /// Hosted aliases are selected from the server-managed catalog. Keeping the
@@ -122,6 +131,7 @@ impl Default for Settings {
             taglish: false,
             model_effort: default_model_effort(),
             computer_use_enabled: false,
+            smart_agent_enabled: default_smart_agent_enabled(),
         }
     }
 }
