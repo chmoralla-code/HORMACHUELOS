@@ -593,27 +593,108 @@ export class Chat {
     return Array.from(types).includes("Files");
   }
 
-  private async handleComposerPaste(e: ClipboardEvent) {
-    const items = e.clipboardData?.items;
-    if (!items?.length) return;
-    const files: File[] = [];
-    for (const item of Array.from(items)) {
-      if (!item.type.startsWith("image/")) continue;
-      const file = item.getAsFile();
-      if (file) files.push(file);
+  private isImageFile(file: File): boolean {
+    if (file.type && file.type.startsWith("image/") && !file.type.includes("svg")) return true;
+    return /\.(png|jpe?g|gif|webp|bmp)$/i.test(file.name || "");
+  }
+
+  private pathFromClipboardText(raw: string): string | null {
+    let text = String(raw || "").trim().replace(/^<|>$/g, "");
+    if (!text || text.startsWith("#")) return null;
+    if (text.toLowerCase().startsWith("file:///")) {
+      try {
+        text = decodeURIComponent(text.slice("file:///".length));
+        if (/^[A-Za-z]:\//.test(text)) text = text.replace(/\//g, "\\");
+      } catch {
+        return null;
+      }
     }
-    if (!files.length) return;
-    e.preventDefault();
-    await this.attachImageFiles(files);
+    // Windows absolute path or quoted path from Explorer.
+    text = text.replace(/^"(.*)"$/, "$1");
+    if (!/^[A-Za-z]:[\\/]/.test(text) && !text.startsWith("\\\\")) return null;
+    if (!/\.(png|jpe?g|gif|webp|bmp)$/i.test(text)) return null;
+    return text;
+  }
+
+  private async handleComposerPaste(e: ClipboardEvent) {
+    const cd = e.clipboardData;
+    if (!cd) return;
+
+    const files: File[] = [];
+    if (cd.files?.length) {
+      for (const file of Array.from(cd.files)) {
+        if (this.isImageFile(file)) files.push(file);
+      }
+    }
+    if (!files.length && cd.items?.length) {
+      for (const item of Array.from(cd.items)) {
+        if (item.kind !== "file") continue;
+        const file = item.getAsFile();
+        if (file && this.isImageFile(file)) files.push(file);
+      }
+    }
+    if (files.length) {
+      e.preventDefault();
+      await this.attachImageFiles(files);
+      return;
+    }
+
+    // Explorer "Copy" often puts a file path / URI, not image bytes.
+    const uriList = cd.getData("text/uri-list") || "";
+    const plain = cd.getData("text/plain") || "";
+    const candidates = [...uriList.split(/\r?\n/), ...plain.split(/\r?\n/)]
+      .map((line) => line.trim())
+      .filter(Boolean);
+    for (const candidate of candidates) {
+      const path = this.pathFromClipboardText(candidate);
+      if (!path) continue;
+      e.preventDefault();
+      await this.attachImageFromDiskPath(path);
+      return;
+    }
   }
 
   private async handleComposerDrop(e: DragEvent) {
     const list = e.dataTransfer?.files;
     if (!list?.length) return;
-    const files = Array.from(list).filter((f) => f.type.startsWith("image/"));
+    const files = Array.from(list).filter((f) => this.isImageFile(f));
     if (!files.length) return;
     e.preventDefault();
     await this.attachImageFiles(files);
+  }
+
+  private async attachImageFromDiskPath(path: string) {
+    try {
+      const imported = await api.importImagePath(path);
+      this.insertComposerText(`[Attached image: ${imported}]\n`);
+      const name = path.split(/[/\\]/).pop() || "image.png";
+      const mime = /\.jpe?g$/i.test(name)
+        ? "image/jpeg"
+        : /\.webp$/i.test(name)
+          ? "image/webp"
+          : /\.gif$/i.test(name)
+            ? "image/gif"
+            : "image/png";
+      try {
+        const { convertFileSrc } = await import("@tauri-apps/api/core");
+        const res = await fetch(convertFileSrc(imported));
+        const blob = await res.blob();
+        const file = new File([blob], name, { type: mime });
+        this.addComposerAttachPreview(imported, file);
+      } catch {
+        /* path marker is enough for the agent */
+      }
+    } catch (err) {
+      console.error(err);
+      const toast = document.getElementById("toast");
+      if (toast) {
+        toast.textContent = "Could not attach image file";
+        toast.hidden = false;
+        window.setTimeout(() => {
+          toast.hidden = true;
+        }, 4000);
+      }
+    }
   }
 
   private async attachImageFiles(files: File[]) {

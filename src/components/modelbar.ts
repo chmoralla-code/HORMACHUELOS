@@ -825,7 +825,8 @@ export class ModelBar {
     try {
       const path = await api.openImagePicker();
       if (!path) return;
-      this.insertComposer(`[Attached image: ${path}]\n`);
+      const imported = await api.importImagePath(path);
+      this.insertComposer(`[Attached image: ${imported}]\n`);
       this.setStatus("Image attached");
     } catch (e) {
       console.error(e);

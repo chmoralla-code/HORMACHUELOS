@@ -174,6 +174,9 @@ export const api = {
   /** Save a clipboard/drag-drop image to a temp file; returns absolute path. */
   savePastedImage: (dataBase64: string, mime?: string | null): Promise<string> =>
     invoke("save_pasted_image", { dataBase64, mime: mime ?? null }),
+  /** Copy an on-disk image into the paste dir (Explorer paste / file picker). */
+  importImagePath: (path: string): Promise<string> =>
+    invoke("import_image_path", { path }),
   agentRun: (
     prompt: string,
     sessionId: string,
@@ -213,7 +216,7 @@ export const api = {
       filters: [
         {
           name: "Images",
-          extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"],
+          extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp"],
         },
       ],
     });

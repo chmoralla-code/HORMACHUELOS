@@ -1665,11 +1665,11 @@ fn download_public_file(url: &str, destination: &Path) -> Result<(u64, reqwest::
 
 /// Read an image file and ask a vision-capable model to describe it.
 ///
-/// Uses the shared Command Code route (`xai/grok-4.5`) through the hosted
-/// proxy when a paid plan is active; falls back to a locally saved Command
-/// Code key via the native `/alpha/generate` gateway. The returned text is fed
-/// back to the main agent model so even text-only models can "see" images.
-fn view_image_file(root: &Path, raw_path: &str) -> Result<String> {
+/// Uses a short hosted OpenRouter vision pass first (fast), then Command Code
+/// Grok, then a locally saved Command Code key. Returned text is fed back to
+/// the main agent so text-only models (DeepSeek, Hormachuelos, …) can "see"
+/// images without native multimodal support.
+pub fn view_image_file(root: &Path, raw_path: &str) -> Result<String> {
     let full = resolve_image_read_path(root, raw_path)?;
     let ext = full
         .extension()
@@ -1699,82 +1699,189 @@ fn view_image_file(root: &Path, raw_path: &str) -> Result<String> {
         base64::engine::general_purpose::STANDARD.encode(&bytes)
     );
 
-    let prompt = "Describe this image in detail — what it shows, any visible text, layout, colors, and anything relevant for a coding agent editing a website or app.";
+    // Keep the vision prompt short — coding agents need layout/text, not essays.
+    let prompt = "Describe this image briefly for a coding agent: subject, visible text (verbatim), UI layout, and anything actionable. Max ~120 words.";
 
-    // 1) Hosted proxy path (paid plan, shared server key).
     let settings = crate::config::Settings::load().unwrap_or_default();
     let hosted_base = crate::license::hosted_chat_base_url();
     let license = crate::license::LicenseStatus::load().unwrap_or_default();
     let local_key = crate::config::load_provider_api_key("commandcode")
         .ok()
         .filter(|k| !k.trim().is_empty());
+    let openrouter_key = crate::config::load_provider_api_key("openrouter")
+        .ok()
+        .filter(|k| !k.trim().is_empty());
 
-    let website_session = crate::config::load_website_session().unwrap_or_default();
-    let website_session = website_session.trim().to_string();
+    let website_session = crate::config::load_website_session()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     let hosted_eligible = crate::license::should_use_hosted(&license)
-        || (!website_session.is_empty() && license.active && !license.plan.eq_ignore_ascii_case("free"));
+        || (!website_session.is_empty()
+            && license.active
+            && !license.plan.eq_ignore_ascii_case("free"));
 
-    if local_key.is_none() && hosted_eligible {
-        let client = http_client(120)?;
-        let body = json!({
-            "model": "xai/grok-4.5",
-            "messages": [{
-                "role": "user",
-                "content": [
-                    { "type": "text", "text": prompt },
-                    { "type": "image_url", "image_url": { "url": data_url } },
-                ],
-            }],
-            "max_tokens": 1024,
-        });
-        let mut request = client
-            .post(format!("{hosted_base}/api/v1/chat/completions"))
-            .header("Content-Type", "application/json")
-            .header("X-Horma-Provider", "commandcode");
-        // A signed-in website account (device-link session) works even when no
-        // HORMA- license key is stored locally — the proxy resolves the plan.
-        if !license.license_key.trim().is_empty() {
-            request = request.header("Authorization", format!("Bearer {}", license.license_key));
-        } else if !website_session.is_empty() {
-            request = request
-                .header("Authorization", format!("Bearer {website_session}"))
-                .header("X-Horma-Session", &website_session);
-        } else {
-            anyhow::bail!("No Command Code key is available for image viewing. Save a key in Settings or activate a hosted plan.");
+    let mut errors: Vec<String> = Vec::new();
+
+    // 1) Hosted OpenRouter vision — typically much faster than Grok for screenshots.
+    if hosted_eligible {
+        match describe_image_hosted_openai(
+            &hosted_base,
+            &license,
+            &website_session,
+            "openrouter",
+            "google/gemini-2.0-flash-001",
+            prompt,
+            &data_url,
+        ) {
+            Ok(description) => return Ok(description),
+            Err(err) => errors.push(format!("openrouter/gemini: {err}")),
         }
-        let response = request
-            .json(&body)
-            .send()
-            .with_context(|| "Vision request to the hosted proxy failed.")?;
-        if response.status().is_success() {
-            let text = response.text().unwrap_or_default();
-            if let Ok(parsed) = serde_json::from_str::<Value>(&text) {
-                let content = parsed
-                    .pointer("/choices/0/message/content")
-                    .and_then(Value::as_str)
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty());
-                if let Some(description) = content {
-                    return Ok(description);
-                }
-            }
-            anyhow::bail!("The hosted vision model returned no description.");
+        // 2) Hosted Command Code Grok fallback.
+        match describe_image_hosted_openai(
+            &hosted_base,
+            &license,
+            &website_session,
+            "commandcode",
+            "xai/grok-4.5",
+            prompt,
+            &data_url,
+        ) {
+            Ok(description) => return Ok(description),
+            Err(err) => errors.push(format!("commandcode/grok: {err}")),
         }
-        anyhow::bail!("The hosted vision request failed (HTTP {}).", response.status());
     }
 
-    // 2) Direct Command Code gateway (local BYOK key).
-    let key = local_key.ok_or_else(|| {
-        anyhow::anyhow!(
-            "No Command Code key is available for image viewing. Save a key in Settings or activate a hosted plan."
-        )
-    })?;
+    // 3) Local OpenRouter BYOK (if saved).
+    if let Some(key) = openrouter_key.as_deref() {
+        match describe_image_direct_openai(
+            "https://openrouter.ai/api/v1",
+            key,
+            "google/gemini-2.0-flash-001",
+            prompt,
+            &data_url,
+        ) {
+            Ok(description) => return Ok(description),
+            Err(err) => errors.push(format!("local openrouter: {err}")),
+        }
+    }
+
+    // 4) Direct Command Code gateway (local BYOK key).
+    if let Some(key) = local_key.as_deref() {
+        match describe_image_commandcode_direct(&settings, key, prompt, &data_url, mime) {
+            Ok(description) => return Ok(description),
+            Err(err) => errors.push(format!("local commandcode: {err}")),
+        }
+    }
+
+    if errors.is_empty() {
+        anyhow::bail!(
+            "No vision provider is available for image viewing. Sign in with a hosted plan, or save an OpenRouter / Command Code key in Settings."
+        );
+    }
+    anyhow::bail!(
+        "Vision endpoint failed ({}).",
+        errors.join(" · ")
+    )
+}
+
+fn describe_image_hosted_openai(
+    hosted_base: &str,
+    license: &crate::license::LicenseStatus,
+    website_session: &str,
+    provider: &str,
+    model: &str,
+    prompt: &str,
+    data_url: &str,
+) -> Result<String> {
+    let client = http_client(45)?;
+    let body = json!({
+        "model": model,
+        "messages": [{
+            "role": "user",
+            "content": [
+                { "type": "text", "text": prompt },
+                { "type": "image_url", "image_url": { "url": data_url } },
+            ],
+        }],
+        "max_tokens": 400,
+    });
+    let mut request = client
+        .post(format!("{hosted_base}/chat/completions"))
+        .header("Content-Type", "application/json")
+        .header("X-Horma-Provider", provider);
+    if !license.license_key.trim().is_empty() {
+        request = request.header("Authorization", format!("Bearer {}", license.license_key));
+    } else if !website_session.is_empty() {
+        request = request
+            .header("Authorization", format!("Bearer {website_session}"))
+            .header("X-Horma-Session", website_session);
+    } else {
+        anyhow::bail!("no hosted auth");
+    }
+    let response = request
+        .json(&body)
+        .send()
+        .with_context(|| format!("Vision request via {provider} failed"))?;
+    let status = response.status();
+    let text = response.text().unwrap_or_default();
+    if !status.is_success() {
+        let snippet = text.chars().take(160).collect::<String>();
+        anyhow::bail!("HTTP {status} {snippet}");
+    }
+    extract_openai_vision_text(&text)
+        .ok_or_else(|| anyhow::anyhow!("empty vision response"))
+}
+
+fn describe_image_direct_openai(
+    base: &str,
+    api_key: &str,
+    model: &str,
+    prompt: &str,
+    data_url: &str,
+) -> Result<String> {
+    let client = http_client(45)?;
+    let body = json!({
+        "model": model,
+        "messages": [{
+            "role": "user",
+            "content": [
+                { "type": "text", "text": prompt },
+                { "type": "image_url", "image_url": { "url": data_url } },
+            ],
+        }],
+        "max_tokens": 400,
+    });
+    let response = client
+        .post(format!("{}/chat/completions", base.trim_end_matches('/')))
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {api_key}"))
+        .json(&body)
+        .send()
+        .with_context(|| "Direct vision request failed")?;
+    let status = response.status();
+    let text = response.text().unwrap_or_default();
+    if !status.is_success() {
+        let snippet = text.chars().take(160).collect::<String>();
+        anyhow::bail!("HTTP {status} {snippet}");
+    }
+    extract_openai_vision_text(&text)
+        .ok_or_else(|| anyhow::anyhow!("empty vision response"))
+}
+
+fn describe_image_commandcode_direct(
+    settings: &crate::config::Settings,
+    key: &str,
+    prompt: &str,
+    data_url: &str,
+    mime: &str,
+) -> Result<String> {
     let base = settings
         .base_url
         .clone()
         .filter(|u| u.contains("api.commandcode.ai"))
         .unwrap_or_else(|| crate::config::COMMANDCODE_API_BASE_URL.to_string());
-    let client = http_client(120)?;
+    let client = http_client(45)?;
     let body = json!({
         "config": {
             "workingDir": "/",
@@ -1799,7 +1906,7 @@ fn view_image_file(root: &Path, raw_path: &str) -> Result<String> {
             }],
             "tools": [],
             "system": "",
-            "max_tokens": 1024,
+            "max_tokens": 400,
             "stream": false,
         },
     });
@@ -1817,13 +1924,9 @@ fn view_image_file(root: &Path, raw_path: &str) -> Result<String> {
         .send()
         .with_context(|| "Vision request to the Command Code gateway failed.")?;
     if !response.status().is_success() {
-        anyhow::bail!(
-            "The Command Code vision request failed (HTTP {}).",
-            response.status()
-        );
+        anyhow::bail!("HTTP {}", response.status());
     }
     let text = response.text().unwrap_or_default();
-    // NDJSON events: accumulate text-delta blocks.
     let mut description = String::new();
     for line in text.lines() {
         let line = line.trim();
@@ -1841,15 +1944,40 @@ fn view_image_file(root: &Path, raw_path: &str) -> Result<String> {
                     .get("error")
                     .and_then(Value::as_str)
                     .unwrap_or("unknown vision error");
-                anyhow::bail!("Command Code vision error: {message}");
+                anyhow::bail!("{message}");
             }
         }
     }
     let description = description.trim().to_string();
     if description.is_empty() {
-        anyhow::bail!("The vision model returned no description.");
+        anyhow::bail!("empty vision response");
     }
     Ok(description)
+}
+
+fn extract_openai_vision_text(raw: &str) -> Option<String> {
+    let parsed: Value = serde_json::from_str(raw).ok()?;
+    parsed
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Extract `[Attached image: …]` paths from a user prompt.
+pub fn attached_image_paths(prompt: &str) -> Vec<String> {
+    let re = regex::Regex::new(r"(?i)\[Attached image:\s*(.+?)\]").ok();
+    let Some(re) = re else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for cap in re.captures_iter(prompt) {
+        let path = cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
+        if !path.is_empty() && !out.iter().any(|p: &String| p == path) {
+            out.push(path.to_string());
+        }
+    }
+    out
 }
 
 pub fn execute(

@@ -617,10 +617,40 @@ pub async fn run_loop(
     let known_integration_secrets = Arc::new(crate::integrations::loaded_tokens());
     let mut prompt =
         integration_chat::redact_sensitive_text(&prompt, known_integration_secrets.as_ref());
-    // Surface attached-image markers to the model so it knows to call
-    // view_image on the path even if the marker line is buried in the prompt.
+    // Text-only models (DeepSeek, Hormachuelos, …) cannot see pixels. Describe
+    // attached images once up front so the agent does not waste turns on
+    // failing view_image retries.
     if prompt.contains("[Attached image:") {
-        let mut note = String::from("\n\n[The user attached image(s) — the [Attached image: <path>] markers above give the exact file paths. Call view_image on each attached path to see the image(s).]");
+        let paths = crate::tools::attached_image_paths(&prompt);
+        let mut blocks = Vec::new();
+        for path in &paths {
+            match crate::tools::view_image_file(root, path) {
+                Ok(description) => {
+                    emit(
+                        &app,
+                        &session_id,
+                        "status",
+                        json!({ "message": "Viewed attached image" }),
+                    );
+                    blocks.push(format!(
+                        "[Image already viewed: {path}]\n{description}"
+                    ));
+                }
+                Err(err) => {
+                    blocks.push(format!(
+                        "[Could not auto-view image at {path}: {err}. You may retry with view_image.]"
+                    ));
+                }
+            }
+        }
+        let mut note = String::from(
+            "\n\n[The user attached image(s). Descriptions below were generated automatically — answer from them. Only call view_image again if you need a closer look.]",
+        );
+        if !blocks.is_empty() {
+            note.push('\n');
+            note.push_str(&blocks.join("\n\n"));
+        }
+        note.push_str("\n\n");
         note.push_str(&prompt);
         prompt = note;
     }
@@ -1000,7 +1030,7 @@ CAPABILITIES:\n\
 - ask_user: multiple-choice questions for real decisions (stack, style, scope). Use allow_other when freeform answers help.\n\
 - export_client_pack: zip the project for client handoff (excludes node_modules/.git/target/dist) and write CLIENT_HANDOFF.md.\n\
 - web_search / browse_page: research the public web when local files are not enough.\n\
-- view_image: view/describe an image file (PNG/JPG/WEBP/GIF/BMP). When the user pastes or drops an image (look for a line like [Attached image: <path>]), call view_image on that path so you can see it — even if you are a text-only model.\n\
+- view_image: view/describe an image file (PNG/JPG/WEBP/GIF/BMP). Attached images are usually auto-described already; call view_image only when you need a closer look or a path was not auto-viewed.\n\
 - computer_* tools: protected Windows desktop control when Computer Use is enabled. Observe before each action. For realtime games, use one bounded computer_game_sequence instead of a model turn per key.\n\n\
 BASE RULES (mode rules above win on conflict):\n\
 1. READ THE USER'S INTENT FIRST. Questions and chat get text answers. Build/create/modify requests may use tools per mode.\n\

@@ -631,6 +631,37 @@ fn record_license_usage(tokens: u64) -> Result<license::LicenseStatus, String> {
     license::record_token_usage(tokens).map_err(|e| e.to_string())
 }
 
+fn paste_image_extension(mime: &str, fallback_name: &str) -> &'static str {
+    let mime_l = mime.to_ascii_lowercase();
+    let name_l = fallback_name.to_ascii_lowercase();
+    if mime_l.contains("jpeg") || mime_l.contains("jpg") || name_l.ends_with(".jpg") || name_l.ends_with(".jpeg")
+    {
+        "jpg"
+    } else if mime_l.contains("webp") || name_l.ends_with(".webp") {
+        "webp"
+    } else if mime_l.contains("gif") || name_l.ends_with(".gif") {
+        "gif"
+    } else if mime_l.contains("bmp") || name_l.ends_with(".bmp") {
+        "bmp"
+    } else {
+        "png"
+    }
+}
+
+fn write_paste_image_bytes(bytes: &[u8], ext: &str) -> Result<String, String> {
+    if bytes.is_empty() {
+        return Err("Empty image data.".into());
+    }
+    if bytes.len() > 25 * 1024 * 1024 {
+        return Err("Image is too large (max 25 MB).".into());
+    }
+    let dir = std::env::temp_dir().join("hormachuelos-paste");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(format!("paste-{}.{}", uuid::Uuid::new_v4(), ext));
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 /// Persist a clipboard / drag-drop image so the composer can attach it by path.
 #[tauri::command]
 fn save_pasted_image(data_base64: String, mime: Option<String>) -> Result<String, String> {
@@ -644,31 +675,37 @@ fn save_pasted_image(data_base64: String, mime: Option<String>) -> Result<String
         .decode(b64)
         .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(b64))
         .map_err(|e| format!("Invalid image data: {e}"))?;
-    if bytes.is_empty() {
-        return Err("Empty image data.".into());
+    let ext = paste_image_extension(mime.as_deref().unwrap_or(""), "");
+    write_paste_image_bytes(&bytes, ext)
+}
+
+/// Copy an on-disk image (Explorer paste, file picker) into the app paste dir
+/// so `view_image` can always read it.
+#[tauri::command]
+fn import_image_path(path: String) -> Result<String, String> {
+    let src = std::path::PathBuf::from(path.trim().trim_matches('"'));
+    if !src.is_file() {
+        return Err(format!("Image file not found: {}", src.display()));
     }
-    if bytes.len() > 25 * 1024 * 1024 {
-        return Err("Image is too large (max 25 MB).".into());
+    let name = src
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("image.png");
+    let ext = src
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    if !matches!(
+        ext.as_str(),
+        "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp"
+    ) {
+        return Err(format!(
+            "Unsupported image type .{ext}. Use PNG, JPG, WEBP, GIF, or BMP."
+        ));
     }
-    let mime_l = mime.unwrap_or_default().to_ascii_lowercase();
-    let ext = if mime_l.contains("jpeg") || mime_l.contains("jpg") {
-        "jpg"
-    } else if mime_l.contains("webp") {
-        "webp"
-    } else if mime_l.contains("gif") {
-        "gif"
-    } else if mime_l.contains("bmp") {
-        "bmp"
-    } else if mime_l.contains("svg") {
-        "svg"
-    } else {
-        "png"
-    };
-    let dir = std::env::temp_dir().join("hormachuelos-paste");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let path = dir.join(format!("paste-{}.{}", uuid::Uuid::new_v4(), ext));
-    std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
-    Ok(path.to_string_lossy().into_owned())
+    let bytes = std::fs::read(&src).map_err(|e| format!("Could not read image: {e}"))?;
+    let out_ext = paste_image_extension("", name);
+    write_paste_image_bytes(&bytes, out_ext)
 }
 
 #[tauri::command]
@@ -1024,6 +1061,7 @@ pub fn run() {
             apply_license_key,
             record_license_usage,
             save_pasted_image,
+            import_image_path,
             agent_run,
             agent_stop,
             open_project_in_explorer,

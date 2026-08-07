@@ -24,9 +24,9 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.33";
-const BUILTIN_MSI_SHA256 = "b8b3edeb41e697d9ed86528ec4a2b9390c79ba79aad25ba6472af811a360f592";
-const BUILTIN_EXE_SHA256 = "bd86b9854825b3b250a95b3047642c7f7d7b4e4a069a8dc9a848ea7ea3a04560";
+const BUILTIN_RELEASE_VERSION = "0.1.34";
+const BUILTIN_MSI_SHA256 = "d8648facf9bcc96112645e461d395f12af848cc0de1aeb4fa15f9925f78e8dac";
+const BUILTIN_EXE_SHA256 = "1133bd634cb05bd122883062823ed63d8b02302c246ca9fafed5f65f00cfcdaa";
 const BUILTIN_RELEASE_NOTES = "HORMACHUELOS NEW MODELS now works on paid plans through the shared server key — no API key needed on each client.\n\n- Clients on Starter/Pro and above can use all 33 Command Code-powered models (DeepSeek V4, Kimi, GLM, Qwen, MiniMax, Grok 4.5, and more) automatically through the Hormachuelos proxy\n- The server-side Command Code key is stored encrypted on the website and shared across all paid clients\n- Fixed \"No API key for commandcode\" errors on fresh installs — paid plan holders no longer need to paste a key\n- Direct BYOK still works for users who want their own Command Code key\n- Reliability: timeouts and retries for Anthropic, Gemini, and GLM providers\n- The agent loop no longer treats text-only progress replies as stalls";
 
 /**
