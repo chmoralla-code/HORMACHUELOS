@@ -303,21 +303,30 @@ async function handleChat(req, res) {
     // Paid providers normally require a HORMA- license key as Bearer. A
     // signed-in website account (device-link session) is also accepted for
     // hosted-managed providers: the account's linked license resolves the plan.
+    //
+    // Command Code is an exception: FREE / signed-in accounts may use it for
+    // vision (and Hormachuelos v4's shared key) without a paid wallet.
     let licenseKey = bearerToken(req);
     license = licenseKey ? await getLicenseByKey(licenseKey) : null;
+    const allowCommandCodeFree = providerHint === "commandcode";
     if (
       (!license || !license.active || license.plan === HORMACHUELOS_FREE_PROVIDER) &&
-      providerHint === "commandcode"
+      allowCommandCodeFree
     ) {
       const account = await accountFromRequest(req);
       if (account) {
         license = await authenticatedFreeEntitlement(req);
       }
     }
+    const freeOkForCommandCode =
+      allowCommandCodeFree &&
+      license &&
+      license.active &&
+      license.plan === HORMACHUELOS_FREE_PROVIDER;
     if (
       !license ||
       !license.active ||
-      license.plan === HORMACHUELOS_FREE_PROVIDER
+      (license.plan === HORMACHUELOS_FREE_PROVIDER && !freeOkForCommandCode)
     ) {
       return json(res, 403, { error: "Invalid or inactive license" }, req);
     }

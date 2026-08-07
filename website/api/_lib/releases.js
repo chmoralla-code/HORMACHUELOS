@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.35";
-const BUILTIN_MSI_SHA256 = "b8abf625df7faf09d0b8d0b317933c5d3713b786068fc531302a14087b687e71";
-const BUILTIN_EXE_SHA256 = "4d2e0395ed983b759016898f5583c62434ccd5e76d8701f34c3415f719e517b6";
-const BUILTIN_RELEASE_NOTES = "• DeepSeek V4 Flash moves to HORMACHUELOS FREE as Hormachuelos v4 (VISION), still using the Command Code API key\n• Hide HORMACHUELOS NEW MODELS from the provider picker\n• Repair malformed streamed tool arguments so DeepSeek turns no longer abort\n• Composer shows image thumbnails without long [Attached image: …] paths";
+const BUILTIN_RELEASE_VERSION = "0.1.36";
+const BUILTIN_MSI_SHA256 = "0635657d8b8eb82b4865381b70c78af4eca6adf77653a423b0439114382971ea";
+const BUILTIN_EXE_SHA256 = "185ac254d425cc107e6276f363c6cbde8105515aa70158d3cbfc19314c5a799e";
+const BUILTIN_RELEASE_NOTES = "• Faster image viewing for non-vision models (downscale + shorter timeouts)\n• Hormachuelos v4 (VISION) and FREE signed-in accounts use Command Code vision reliably\n• Attached images still auto-described before the agent runs";
 
 /**
  * A deployment-bundled release keeps the download/update path available even

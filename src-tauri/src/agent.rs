@@ -617,11 +617,17 @@ pub async fn run_loop(
     let known_integration_secrets = Arc::new(crate::integrations::loaded_tokens());
     let mut prompt =
         integration_chat::redact_sensitive_text(&prompt, known_integration_secrets.as_ref());
-    // Text-only models (DeepSeek, Hormachuelos, …) cannot see pixels. Describe
-    // attached images once up front so the agent does not waste turns on
-    // failing view_image retries.
+    // Text-only models (DeepSeek, Hormachuelos v1–v4, …) cannot see pixels.
+    // Describe attached images once up front so vision works for every
+    // non-vision model — including Hormachuelos v4 (VISION).
     if prompt.contains("[Attached image:") {
         let paths = crate::tools::attached_image_paths(&prompt);
+        emit(
+            &app,
+            &session_id,
+            "status",
+            json!({ "message": "Viewing attached image…" }),
+        );
         let mut blocks = Vec::new();
         for path in &paths {
             match crate::tools::view_image_file(root, path) {
@@ -644,7 +650,7 @@ pub async fn run_loop(
             }
         }
         let mut note = String::from(
-            "\n\n[The user attached image(s). Descriptions below were generated automatically — answer from them. Only call view_image again if you need a closer look.]",
+            "\n\n[The user attached image(s). Descriptions below were generated automatically with vision — answer from them. Only call view_image again if you need a closer look.]",
         );
         if !blocks.is_empty() {
             note.push('\n');

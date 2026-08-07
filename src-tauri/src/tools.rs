@@ -861,7 +861,7 @@ pub fn schemas(computer_use_enabled: bool) -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "view_image",
-                "description": "View and describe an image file (PNG/JPG/WEBP/GIF/BMP) at an absolute or project-relative path. Use when the user attached an image (paste or drop) or when you need to see an image's contents. Returns a text description of the image.",
+                "description": "View and describe an image file (PNG/JPG/WEBP/GIF/BMP) at an absolute or project-relative path. Attached images are auto-described with vision before the run (including Hormachuelos v4). Call this only for a closer look or a path that was not auto-viewed.",
                 "parameters": {
                     "type": "object",
                     "properties": { "path": { "type": "string", "description": "Absolute or project-relative path to the image file" } },
@@ -1665,10 +1665,10 @@ fn download_public_file(url: &str, destination: &Path) -> Result<(u64, reqwest::
 
 /// Read an image file and ask a vision-capable model to describe it.
 ///
-/// Uses a short hosted OpenRouter vision pass first (fast), then Command Code
-/// Grok, then a locally saved Command Code key. Returned text is fed back to
-/// the main agent so text-only models (DeepSeek, Hormachuelos, …) can "see"
-/// images without native multimodal support.
+/// Used so text-only models (DeepSeek, Hormachuelos v1–v4, …) can "see"
+/// pasted/attached images. Prefers a fast OpenRouter Gemini pass when a paid
+/// hosted plan is available; otherwise uses Command Code (same key as
+/// Hormachuelos v4) so FREE / signed-in users still get vision.
 pub fn view_image_file(root: &Path, raw_path: &str) -> Result<String> {
     let full = resolve_image_read_path(root, raw_path)?;
     let ext = full
@@ -1693,13 +1693,8 @@ pub fn view_image_file(root: &Path, raw_path: &str) -> Result<String> {
     if bytes.len() > 25 * 1024 * 1024 {
         anyhow::bail!("Image is too large (max 25 MB).");
     }
-    use base64::Engine as _;
-    let data_url = format!(
-        "data:{mime};base64,{}",
-        base64::engine::general_purpose::STANDARD.encode(&bytes)
-    );
 
-    // Keep the vision prompt short — coding agents need layout/text, not essays.
+    let (data_url, vision_mime) = prepare_vision_payload(&bytes, mime);
     let prompt = "Describe this image briefly for a coding agent: subject, visible text (verbatim), UI layout, and anything actionable. Max ~120 words.";
 
     let settings = crate::config::Settings::load().unwrap_or_default();
@@ -1716,15 +1711,15 @@ pub fn view_image_file(root: &Path, raw_path: &str) -> Result<String> {
         .unwrap_or_default()
         .trim()
         .to_string();
-    let hosted_eligible = crate::license::should_use_hosted(&license)
-        || (!website_session.is_empty()
-            && license.active
-            && !license.plan.eq_ignore_ascii_case("free"));
+    let paid_hosted = crate::license::should_use_hosted(&license);
+    // Command Code vision works for signed-in FREE users (Hormachuelos v4 key)
+    // and for paid plans. OpenRouter vision needs a paid hosted wallet.
+    let session_auth = !website_session.is_empty();
 
     let mut errors: Vec<String> = Vec::new();
 
-    // 1) Hosted OpenRouter vision — typically much faster than Grok for screenshots.
-    if hosted_eligible {
+    // 1) Paid: fast Gemini Flash via OpenRouter (short timeout).
+    if paid_hosted {
         match describe_image_hosted_openai(
             &hosted_base,
             &license,
@@ -1733,11 +1728,15 @@ pub fn view_image_file(root: &Path, raw_path: &str) -> Result<String> {
             "google/gemini-2.0-flash-001",
             prompt,
             &data_url,
+            12,
         ) {
             Ok(description) => return Ok(description),
             Err(err) => errors.push(format!("openrouter/gemini: {err}")),
         }
-        // 2) Hosted Command Code Grok fallback.
+    }
+
+    // 2) Command Code Grok — primary path for FREE / Hormachuelos v4 (VISION).
+    if paid_hosted || session_auth {
         match describe_image_hosted_openai(
             &hosted_base,
             &license,
@@ -1746,13 +1745,14 @@ pub fn view_image_file(root: &Path, raw_path: &str) -> Result<String> {
             "xai/grok-4.5",
             prompt,
             &data_url,
+            18,
         ) {
             Ok(description) => return Ok(description),
             Err(err) => errors.push(format!("commandcode/grok: {err}")),
         }
     }
 
-    // 3) Local OpenRouter BYOK (if saved).
+    // 3) Local OpenRouter BYOK.
     if let Some(key) = openrouter_key.as_deref() {
         match describe_image_direct_openai(
             "https://openrouter.ai/api/v1",
@@ -1760,6 +1760,7 @@ pub fn view_image_file(root: &Path, raw_path: &str) -> Result<String> {
             "google/gemini-2.0-flash-001",
             prompt,
             &data_url,
+            12,
         ) {
             Ok(description) => return Ok(description),
             Err(err) => errors.push(format!("local openrouter: {err}")),
@@ -1768,7 +1769,14 @@ pub fn view_image_file(root: &Path, raw_path: &str) -> Result<String> {
 
     // 4) Direct Command Code gateway (local BYOK key).
     if let Some(key) = local_key.as_deref() {
-        match describe_image_commandcode_direct(&settings, key, prompt, &data_url, mime) {
+        match describe_image_commandcode_direct(
+            &settings,
+            key,
+            prompt,
+            &data_url,
+            &vision_mime,
+            18,
+        ) {
             Ok(description) => return Ok(description),
             Err(err) => errors.push(format!("local commandcode: {err}")),
         }
@@ -1776,12 +1784,87 @@ pub fn view_image_file(root: &Path, raw_path: &str) -> Result<String> {
 
     if errors.is_empty() {
         anyhow::bail!(
-            "No vision provider is available for image viewing. Sign in with a hosted plan, or save an OpenRouter / Command Code key in Settings."
+            "No vision provider is available for image viewing. Sign in to Hormachuelos (FREE includes vision for Hormachuelos v4), or save an OpenRouter / Command Code key in Settings."
         );
     }
-    anyhow::bail!(
-        "Vision endpoint failed ({}).",
-        errors.join(" · ")
+    anyhow::bail!("Vision endpoint failed ({}).", errors.join(" · "))
+}
+
+/// Shrink large screenshots before the vision round-trip so Gemini/Grok respond
+/// quickly. Falls back to the original bytes when decode/re-encode fails.
+fn prepare_vision_payload(bytes: &[u8], mime: &str) -> (String, String) {
+    use base64::Engine as _;
+    use image::imageops::FilterType;
+    use image::{GenericImageView, ImageEncoder, ImageFormat};
+
+    const MAX_EDGE: u32 = 1280;
+    const TARGET_JPEG_QUALITY: u8 = 72;
+
+    let fallback = || {
+        (
+            format!(
+                "data:{mime};base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(bytes)
+            ),
+            mime.to_string(),
+        )
+    };
+
+    let Ok(img) = image::load_from_memory(bytes) else {
+        return fallback();
+    };
+    let (width, height) = img.dimensions();
+    let needs_resize = width > MAX_EDGE || height > MAX_EDGE;
+    // Already small enough — skip re-encode cost.
+    if !needs_resize && bytes.len() <= 450_000 {
+        return fallback();
+    }
+
+    let resized = if needs_resize {
+        img.resize(MAX_EDGE, MAX_EDGE, FilterType::Triangle)
+    } else {
+        img
+    };
+
+    let mut encoded = Vec::new();
+    {
+        let mut cursor = std::io::Cursor::new(&mut encoded);
+        let encoder =
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, TARGET_JPEG_QUALITY);
+        let rgb = resized.to_rgb8();
+        if encoder.write_image(
+            rgb.as_raw(),
+            rgb.width(),
+            rgb.height(),
+            image::ExtendedColorType::Rgb8,
+        ).is_err()
+        {
+            encoded.clear();
+            let mut cursor = std::io::Cursor::new(&mut encoded);
+            if resized.write_to(&mut cursor, ImageFormat::Png).is_err() {
+                return fallback();
+            }
+            return (
+                format!(
+                    "data:image/png;base64,{}",
+                    base64::engine::general_purpose::STANDARD.encode(&encoded)
+                ),
+                "image/png".into(),
+            );
+        }
+    }
+
+    // Keep the original when re-encoding somehow got larger.
+    if encoded.len() >= bytes.len() && bytes.len() <= 900_000 {
+        return fallback();
+    }
+
+    (
+        format!(
+            "data:image/jpeg;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&encoded)
+        ),
+        "image/jpeg".into(),
     )
 }
 
@@ -1793,8 +1876,9 @@ fn describe_image_hosted_openai(
     model: &str,
     prompt: &str,
     data_url: &str,
+    timeout_secs: u64,
 ) -> Result<String> {
-    let client = http_client(45)?;
+    let client = http_client(timeout_secs)?;
     let body = json!({
         "model": model,
         "messages": [{
@@ -1804,7 +1888,8 @@ fn describe_image_hosted_openai(
                 { "type": "image_url", "image_url": { "url": data_url } },
             ],
         }],
-        "max_tokens": 400,
+        "max_tokens": 320,
+        "stream": false,
     });
     let mut request = client
         .post(format!("{hosted_base}/chat/completions"))
@@ -1839,8 +1924,9 @@ fn describe_image_direct_openai(
     model: &str,
     prompt: &str,
     data_url: &str,
+    timeout_secs: u64,
 ) -> Result<String> {
-    let client = http_client(45)?;
+    let client = http_client(timeout_secs)?;
     let body = json!({
         "model": model,
         "messages": [{
@@ -1850,7 +1936,8 @@ fn describe_image_direct_openai(
                 { "type": "image_url", "image_url": { "url": data_url } },
             ],
         }],
-        "max_tokens": 400,
+        "max_tokens": 320,
+        "stream": false,
     });
     let response = client
         .post(format!("{}/chat/completions", base.trim_end_matches('/')))
@@ -1875,13 +1962,14 @@ fn describe_image_commandcode_direct(
     prompt: &str,
     data_url: &str,
     mime: &str,
+    timeout_secs: u64,
 ) -> Result<String> {
     let base = settings
         .base_url
         .clone()
         .filter(|u| u.contains("api.commandcode.ai"))
         .unwrap_or_else(|| crate::config::COMMANDCODE_API_BASE_URL.to_string());
-    let client = http_client(45)?;
+    let client = http_client(timeout_secs)?;
     let body = json!({
         "config": {
             "workingDir": "/",
@@ -1906,7 +1994,7 @@ fn describe_image_commandcode_direct(
             }],
             "tools": [],
             "system": "",
-            "max_tokens": 400,
+            "max_tokens": 320,
             "stream": false,
         },
     });
@@ -3068,6 +3156,34 @@ mod security_tests {
         let outside_img = tree.outside.join("shot.png");
         std::fs::write(&outside_img, b"x").unwrap();
         assert!(resolve_image_read_path(&tree.root, &outside_img.to_string_lossy()).is_err());
+    }
+
+    #[test]
+    fn prepare_vision_payload_downscales_large_png() {
+        // Pseudo-noise PNG compresses poorly, so JPEG downscale should win.
+        let mut img = image::RgbImage::new(1600, 1200);
+        for (i, pixel) in img.pixels_mut().enumerate() {
+            let n = (i % 251) as u8;
+            *pixel = image::Rgb([n, n.wrapping_mul(3), n.wrapping_mul(7)]);
+        }
+        let mut png_bytes = Vec::new();
+        {
+            let mut cursor = std::io::Cursor::new(&mut png_bytes);
+            image::DynamicImage::ImageRgb8(img)
+                .write_to(&mut cursor, image::ImageFormat::Png)
+                .unwrap();
+        }
+        assert!(png_bytes.len() > 500_000, "fixture should be large");
+        let (data_url, mime) = prepare_vision_payload(&png_bytes, "image/png");
+        assert_eq!(mime, "image/jpeg");
+        assert!(data_url.starts_with("data:image/jpeg;base64,"));
+        let b64 = data_url.split(',').nth(1).unwrap();
+        use base64::Engine as _;
+        let decoded = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
+        assert!(decoded.len() < png_bytes.len() / 2);
+        let out = image::load_from_memory(&decoded).unwrap();
+        assert!(out.width() <= 1280);
+        assert!(out.height() <= 1280);
     }
 
     #[test]
