@@ -77,6 +77,11 @@ export interface Session {
   preferredProvider?: string;
   preferredModel?: string;
   preferredEffort?: string;
+  /**
+   * Cursor SDK agent id for this conversation only. Never reused across
+   * sessions in the same project — keeps chat memory isolated.
+   */
+  cursorAgentId?: string;
 }
 
 /** Keep a background session's saved reply as tidy as the live chat renderer. */
@@ -429,6 +434,7 @@ function safeSessionForStorage(session: Session): Session {
   const preferredProvider = sanitizeSessionModelId(session.preferredProvider, 64);
   const preferredModel = sanitizeSessionModelId(session.preferredModel, 200);
   const preferredEffort = sanitizeSessionModelId(session.preferredEffort, 32);
+  const cursorAgentId = sanitizeSessionModelId(session.cursorAgentId, 128);
   return {
     ...session,
     title: redactChatCredentials(session.title),
@@ -438,6 +444,7 @@ function safeSessionForStorage(session: Session): Session {
     preferredProvider,
     preferredModel,
     preferredEffort,
+    cursorAgentId,
   };
 }
 

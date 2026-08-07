@@ -3,20 +3,32 @@
  * Cursor SDK local-agent bridge for Hormachuelos.
  * Reads one JSON request from stdin, streams NDJSON events to stdout.
  *
- * Request: { apiKey, model?, effort?, cwd, prompt, history?, agentId?, permissionMode? }
+ * Request: { apiKey, model?, effort?, cwd, prompt, history?, agentId?, sessionId?, permissionMode? }
  * Events:  thinking | text | tool_call | tool_result | done | error
  */
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import readline from "node:readline";
 import { pathToFileURL } from "node:url";
-import { Agent, Cursor } from "@cursor/sdk";
+import { Agent, Cursor, JsonlLocalAgentStore } from "@cursor/sdk";
 
 function write(event) {
   // Must be unbuffered: when stdout is a pipe (Tauri spawn), Node block-buffers
   // and the UI stays stuck on "Thinking..." until the process exits.
   fs.writeSync(1, `${JSON.stringify(event)}\n`);
+}
+
+/** One on-disk Cursor store per Hormachuelos session — never share across chats. */
+function sessionAgentStore(sessionId) {
+  const safe = String(sessionId || "anon")
+    .replace(/[^a-zA-Z0-9_-]/g, "_")
+    .slice(0, 96) || "anon";
+  const root = path.join(os.homedir(), ".hormachuelos", "cursor-agents", safe);
+  fs.mkdirSync(root, { recursive: true });
+  return new JsonlLocalAgentStore(root);
 }
 
 function createDuplexProtocol(input = process.stdin) {
@@ -813,13 +825,18 @@ async function runMain(protocol) {
   const policy = resolveExecutionPolicy(req.permissionMode);
   const customTools = createComputerUseTools(req, policy, protocol);
   const hasComputerUse = Object.keys(customTools).length > 0;
+  const sessionId = String(req.sessionId || "").trim();
+  const agentStore = sessionAgentStore(sessionId);
   const options = {
     apiKey,
+    name: sessionId ? `Hormachuelos ${sessionId.slice(0, 12)}` : "Hormachuelos session",
     mode: policy.sdkMode,
     local: {
       cwd,
       autoReview: policy.autoReview,
       sandboxOptions: resolveSandboxOptions(),
+      // Per-session store so chats in the same project never share Cursor memory.
+      store: agentStore,
       // Do not import ambient user/plugin instructions into the host policy boundary.
       settingSources: [],
     },
@@ -845,6 +862,8 @@ async function runMain(protocol) {
 
   write({ type: "thinking" });
 
+  // Fresh agents get Hormachuelos transcript only; resumed agents keep SDK memory.
+  // Never inject another session's history into this agent.
   const basePrompt = buildAgentPrompt(prompt, resumed ? [] : req.history);
   const agentPrompt = hasComputerUse
     ? `${computerUsePrompt(policy)}\n\n${basePrompt}`
@@ -852,7 +871,7 @@ async function runMain(protocol) {
   const sendOptions = {
     mode: policy.sdkMode,
     // Expire a run left active by a killed bridge before starting the follow-up.
-    local: { force: resumed },
+    local: { force: resumed, store: agentStore },
   };
   if (hasComputerUse) sendOptions.local.customTools = customTools;
   if (model) sendOptions.model = model;

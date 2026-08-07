@@ -746,6 +746,7 @@ function createNewSession() {
     preferredProvider: profile?.provider,
     preferredModel: profile?.model,
     preferredEffort: profile?.effort,
+    // Fresh chat — never inherit another session's Cursor agent memory.
   };
   sessions.unshift(s);
   sessionRegistry.set(s.id, s);
@@ -1451,7 +1452,7 @@ async function sendPrompt(prompt: string) {
   }
 
   const sessionId = activeSessionId!;
-  // Maximize memory: send prior turns in this session (user, AI, tools, decisions)
+  // Maximize memory: send prior turns in this session only (never other chats).
   const history = buildLlmHistory(chat.getMessages(), prompt);
   if (modelBar.settings) {
     const profile = {
@@ -1489,7 +1490,22 @@ async function sendPrompt(prompt: string) {
   syncUsageBar();
   refreshSidebar();
   try {
-    await api.agentRun(prompt, sessionId, history, projectRoot);
+    const resumeAgentId = sessionForId(sessionId)?.cursorAgentId || null;
+    const nextAgentId = await api.agentRun(
+      prompt,
+      sessionId,
+      history,
+      projectRoot,
+      resumeAgentId,
+    );
+    if (typeof nextAgentId === "string" && nextAgentId.trim()) {
+      const owning = sessionForId(sessionId);
+      if (owning && owning.cursorAgentId !== nextAgentId) {
+        owning.cursorAgentId = nextAgentId.trim();
+        sessionRegistry.set(owning.id, owning);
+        saveSession(owning);
+      }
+    }
   } catch (e: any) {
     const msg = String(e ?? "");
     // The hosted API returns this only when its own wallet check says empty.

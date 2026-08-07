@@ -193,7 +193,15 @@ export const api = {
       name?: string;
     }> = [],
     projectRoot?: string,
-  ): Promise<void> => invoke("agent_run", { prompt, sessionId, history, projectRoot }),
+    cursorAgentId?: string | null,
+  ): Promise<string | null> =>
+    invoke("agent_run", {
+      prompt,
+      sessionId,
+      history,
+      projectRoot,
+      cursorAgentId: cursorAgentId ?? null,
+    }),
   agentStop: (sessionId: string): Promise<void> => invoke("agent_stop", { sessionId }),
   openProjectInExplorer: (relativePath: string | null = null): Promise<void> =>
     invoke("open_project_in_explorer", { relativePath }),

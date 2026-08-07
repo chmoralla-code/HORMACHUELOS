@@ -743,6 +743,7 @@ async fn run_cursor_attempt(
         "prompt": prompt,
         "history": bounded_history,
         "agentId": resume_agent_id,
+        "sessionId": session_id,
         "completionMarker": requires_project_completion.then_some("[[HORMACHUELOS_TASK_COMPLETE]]"),
         "computerUseEnabled": computer_use_active,
         "computerHelperPath": computer_helper_path,

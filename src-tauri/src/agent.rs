@@ -954,16 +954,21 @@ BEHAVIOR:\n\
     let has_history = history.iter().any(|t| !t.content.trim().is_empty());
     let memory_rules = if has_history {
         "\n\nSESSION MEMORY (critical):\n\
-- This is a continuing conversation. Prior user messages, your replies, tool results, and decisions are included above/below as history.\n\
-- Treat history as ground truth for what was already discussed, built, chosen, and tried.\n\
-- Connect the new request to earlier work: same files, stack, product goals, naming, and constraints.\n\
-- Do not re-ask for decisions the user already made unless they conflict with the new request.\n\
-- Do not rebuild from scratch if history shows work already done â€” extend, fix, or continue.\n\
-- If history mentions paths, tech, or errors, reuse that context; re-read files only when you need current contents.\n\
-- When the user says \"that\", \"it\", \"same as before\", \"continue\", or \"fix the bug\", resolve references from history.\n"
+- This is a continuing conversation in THIS chat session only.\n\
+- Prior user messages, your replies, tool results, and decisions below are ground truth for this session.\n\
+- Connect the new request to earlier work in this same chat: same files, stack, product goals, naming, and constraints.\n\
+- Do not re-ask for decisions the user already made in this chat unless they conflict with the new request.\n\
+- Do not rebuild from scratch if this session's history shows work already done — extend, fix, or continue.\n\
+- If this session's history mentions paths, tech, or errors, reuse that context; re-read files only when you need current contents.\n\
+- When the user says \"that\", \"it\", \"same as before\", \"continue\", or \"fix the bug\", resolve references from THIS session's history.\n\
+- Other Hormachuelos sessions that share this project folder are separate chats. Do not import their conversation memory.\n\
+- Files on disk may come from other sessions or earlier work — treat them as workspace artifacts, not as this chat's memory, unless the user points at them.\n"
     } else {
-        "\n\nSESSION MEMORY:\n\
-- This is the start of the session. Remember everything the user says going forward for later turns.\n"
+        "\n\nSESSION MEMORY / ISOLATION (critical):\n\
+- This is a brand-new chat session. It has no prior conversation memory.\n\
+- Other sessions in this same project folder are independent. Do not assume their goals, decisions, plans, or chat history.\n\
+- Files already on disk may have been created by other sessions or earlier work — treat them as workspace artifacts only. Inspect or reuse them only when the current user request needs them.\n\
+- Remember everything the user says from this point forward for later turns in THIS session only.\n"
     };
 
     let accounts = crate::integrations::prompt_summary();

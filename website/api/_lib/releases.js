@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.42";
-const BUILTIN_MSI_SHA256 = "2eae7a5961008c082b020abd4bd26b8ed7aa8baa78e0ac41ea6743bb63b95f4a";
-const BUILTIN_EXE_SHA256 = "d0d65c324976314c7904246231a9e6fdab5490bb0825506026852818f980f53b";
-const BUILTIN_RELEASE_NOTES = "Reconnecting keeps runs alive offline. Live thoughts stay expanded while the model is thinking, then collapse when done — all models.";
+const BUILTIN_RELEASE_VERSION = "0.1.43";
+const BUILTIN_MSI_SHA256 = "096d3b80dc987306585a7efefe0ab2c11b2ee29c947a405973880ad6876d7ed1";
+const BUILTIN_EXE_SHA256 = "9877b4eb1dcfbe07614f39560dea91a3d4d1d3fb48addb9335dd8bf481703122";
+const BUILTIN_RELEASE_NOTES = "Each chat session in a project keeps its own memory. New sessions no longer inherit conversation context from other sessions in the same folder.";
 
 /**
  * A deployment-bundled release keeps the download/update path available even

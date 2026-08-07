@@ -764,9 +764,10 @@ async fn agent_run(
     session_id: String,
     history: Option<Vec<agent::HistoryTurn>>,
     project_root: Option<String>,
+    cursor_agent_id: Option<String>,
     app: tauri::AppHandle,
     state: tauri::State<'_, state::AppState>,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     if session_id.trim().is_empty() {
         return Err("Missing session id.".into());
     }
@@ -845,7 +846,12 @@ async fn agent_run(
 
     let run = state.start_run(&session_id)?;
     let app_handle = Arc::new(app);
-    let cursor_resume = state.cursor_agent_id(&session_id);
+    // Prefer the session-bound Cursor agent id from the frontend so each chat
+    // in the same project keeps its own durable memory across app restarts.
+    let cursor_resume = cursor_agent_id
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .or_else(|| state.cursor_agent_id(&session_id));
     let result = agent::run_loop(
         app_handle,
         project_root,
@@ -863,7 +869,7 @@ async fn agent_run(
         Err(_) => {}
     }
     state.finish_run(&session_id);
-    result.map(|_| ()).map_err(|e| e.to_string())
+    result.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
