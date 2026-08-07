@@ -2013,10 +2013,11 @@ function renderAdmin() {
       });
 
       root.querySelectorAll(".admin-model-row").forEach((row) => {
+        if (row.getAttribute("data-virtual") === "1") return;
         const save = row.querySelector(".admin-model-save");
         const clear = row.querySelector(".admin-model-clear");
         const remove = row.querySelector(".admin-model-delete");
-        save.addEventListener("click", async () => {
+        save?.addEventListener("click", async () => {
           const key = row.querySelector(".admin-model-key").value.trim();
           save.disabled = true;
           save.textContent = "Saving…";
@@ -2032,7 +2033,7 @@ function renderAdmin() {
             save.textContent = "Save alias";
           }
         });
-        clear.addEventListener("click", async () => {
+        clear?.addEventListener("click", async () => {
           if (!confirm("Clear this route-specific API key? The model will use the provider default key if one is configured.")) return;
           clear.disabled = true;
           try {
@@ -2047,7 +2048,7 @@ function renderAdmin() {
             clear.disabled = false;
           }
         });
-        remove.addEventListener("click", async () => {
+        remove?.addEventListener("click", async () => {
           const modelName = row.querySelector(".admin-model-name").value.trim() || "this model alias";
           if (!confirm(`Delete ${modelName}? It will no longer appear in the desktop app.`)) return;
           remove.disabled = true;
@@ -2093,7 +2094,7 @@ function renderAdmin() {
         });
       });
 
-      root.querySelector("#admin-provider-new-form").addEventListener("submit", async (event) => {
+      root.querySelector("#admin-provider-new-form")?.addEventListener("submit", async (event) => {
         event.preventDefault();
         const form = event.currentTarget;
         const btn = form.querySelector('button[type="submit"]');
