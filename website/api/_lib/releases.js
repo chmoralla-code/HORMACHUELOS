@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.39";
-const BUILTIN_MSI_SHA256 = "ae4ea25eeb3b4eb62ffa99888a669f043c27b47208e4f7dc0368f551e5a30782";
-const BUILTIN_EXE_SHA256 = "f4b2a53801b66af87fda45e4987a685867f3fcc405625b92f25c7ddc50c68171";
-const BUILTIN_RELEASE_NOTES = "• Admin AI allowlists now fully enforced in the desktop picker\n• Restricted accounts can only see and use permitted providers/models\n• Hosted catalog marks restricted accounts so builtin fallbacks cannot bypass admin limits";
+const BUILTIN_RELEASE_VERSION = "0.1.40";
+const BUILTIN_MSI_SHA256 = "60ac339af8cb024fb4796c179bf4e6ff068d2754905ee5d1bd28a630c3c5ca34";
+const BUILTIN_EXE_SHA256 = "8ef86fbe1aecff30df6c281dabe1fc958b52ae97a3cb87d6400b8c9f02f1dc86";
+const BUILTIN_RELEASE_NOTES = "• Hormachuelos FREE uses the new whale provider logo\n• Vision works for DeepSeek-only allowlisted accounts via the shared vision helper";
 
 /**
  * A deployment-bundled release keeps the download/update path available even

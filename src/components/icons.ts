@@ -66,6 +66,9 @@ export function logo(name: keyof typeof logos, size = 18): string {
   if (name === "claude") {
     return `<img class="logo-ico" src="./logos/claude.png" alt="" width="${size}" height="${size}" draggable="false" style="width:${size}px;height:${size}px;object-fit:contain;flex-shrink:0;display:inline-block" />`;
   }
+  if (name === "hormachuelos") {
+    return `<img class="logo-ico" src="./logos/hormachuelos-free.png" alt="" width="${size}" height="${size}" draggable="false" style="width:${size}px;height:${size}px;object-fit:contain;flex-shrink:0;display:inline-block" />`;
+  }
   if (name === "openai") {
     return `<img class="logo-ico" src="./logos/openai.svg" alt="" width="${size}" height="${size}" draggable="false" style="width:${size}px;height:${size}px;object-fit:contain;flex-shrink:0;display:inline-block" />`;
   }
