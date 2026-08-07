@@ -64,6 +64,8 @@ fn next_stalled_recovery_count(previous: u8, made_concrete_progress: bool) -> u8
 enum AutomaticContinuationReason {
     OutputLimit,
     CompletionCheck,
+    /// Model narrated an imminent tool action ("Let me find…") but called none.
+    AnnouncedAction,
 }
 
 impl AutomaticContinuationReason {
@@ -74,6 +76,9 @@ impl AutomaticContinuationReason {
             }
             Self::CompletionCheck => {
                 "Checking the in-progress task and continuing automatically if work remains..."
+            }
+            Self::AnnouncedAction => {
+                "The model described the next step but did not run a tool. Continuing automatically..."
             }
         }
     }
@@ -94,8 +99,84 @@ Continue the SAME task now. Inspect the workspace and prior tool results; if any
 Do not stop at a progress update and do not ask the user to type \"continue\". \n\
 If and only if everything requested is actually complete, call done with the final summary."
             }
+            Self::AnnouncedAction => {
+                "[System - Automatic continuation]\n\
+You just told the user you would take an action (for example finding credentials, reading a file, running a command, or signing in), but you did not call any tool. \n\
+Do NOT only narrate the next step again. Call the appropriate tool(s) NOW to actually perform that action. \n\
+If you need information from the codebase or the computer, use tools immediately. Then continue until the user's request is handled."
+            }
         }
     }
+}
+
+/// True when the assistant's prose promises an imminent tool action but the
+/// turn ended with zero tool calls — the classic "Let me find X." then stop.
+fn reply_announces_pending_action(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    // Short answers / questions to the user are legitimate endings.
+    if lower.ends_with('?') && trimmed.chars().count() < 320 {
+        return false;
+    }
+    let starters = [
+        "let me ",
+        "i'll ",
+        "i will ",
+        "i am going to ",
+        "i'm going to ",
+        "im going to ",
+        "going to ",
+        "next i'll ",
+        "now i'll ",
+        "now i will ",
+        "i'll check",
+        "i'll find",
+        "i'll look",
+        "i'll search",
+        "i'll open",
+        "i'll read",
+        "i'll run",
+        "i'll sign",
+        "i'll try",
+        "i'll inspect",
+        "i'll scan",
+        "i'll grab",
+        "looking for ",
+        "searching for ",
+        "searching the ",
+        "checking the ",
+        "checking for ",
+        "finding the ",
+        "finding ",
+        "hang on",
+        "one sec",
+        "one moment",
+        "give me a second",
+        "give me a moment",
+    ];
+    if starters.iter().any(|p| lower.starts_with(p) || lower.contains(&format!("\n{p}"))) {
+        return true;
+    }
+    // Trailing intent without a tool call, e.g. "…to sign in." after "Let me find…"
+    let intent_tails = [
+        " from the codebase",
+        " in the codebase",
+        " to sign in",
+        " and sign in",
+        " and check",
+        " and open",
+        " and run",
+        " right now",
+        " momentarily",
+    ];
+    if starters.iter().any(|p| lower.contains(p)) && intent_tails.iter().any(|t| lower.contains(t))
+    {
+        return true;
+    }
+    false
 }
 
 /// Providers use different spellings for an answer that ended because the
@@ -1056,6 +1137,7 @@ BASE RULES (mode rules above win on conflict):\n\
 10. Only do what the user asked (or what they approved in Plan mode). No unrelated changes.\n\
 11. For deploy/git hosting: use connected integrations first. If missing, call connect_account (in-chat secure form + browser) — do not run interactive CLI login via run_command and do not request credentials in the chat message box.\n\
 12. Format final prose as clean Markdown: use a short Result heading followed by clear sections and bullets; use Markdown tables only for comparisons. Every table must include a header row and separator row; never use unaligned plain-text columns. Never print raw JSON, function-call syntax, tool arguments, or a literal `done` payload for the user. When work is complete, call the done tool instead of repeating its title, files, and features as loose prose.\n\
+13. Never stop after only announcing the next step (e.g. \"Let me find…\", \"I'll check…\", \"Looking for…\"). If you need to act, call a tool in the SAME turn. Narration without tools is incomplete.\n\
 {memory_rules}\n\
 TOOL REFERENCE: read_file, write_file, edit_file, list_dir, glob, grep, run_command, git_init, git_add_all, git_commit, git_status, list_drives, sys_info, env_vars, list_processes, kill_process, open_url, open_path, download_file, move_file, copy_file, delete_file, make_dir, file_info, view_image, connect_account, integration_status, web_search, browse_page, export_client_pack, computer_list_windows, computer_observe, computer_focus_window, computer_click, computer_type_text, computer_press_key, computer_scroll, computer_drag, computer_game_sequence, ask_user, done.",
         root = root.display(),
@@ -1466,17 +1548,25 @@ Use them as continuous memory for everything that follows.",
         }
 
         if resp.tool_calls.is_empty() {
+            let announced = reply_announces_pending_action(resp.text.as_deref().unwrap_or(""));
             let continuation_reason = if stop_reason_requires_continuation(&resp.stop_reason) {
                 Some(AutomaticContinuationReason::OutputLimit)
             } else if requires_project_completion && !auth_request_routed && mode != "plan" {
                 Some(AutomaticContinuationReason::CompletionCheck)
+            } else if announced && !auth_request_routed && mode != "plan" {
+                Some(AutomaticContinuationReason::AnnouncedAction)
             } else {
                 None
             };
 
             if let Some(reason) = continuation_reason {
+                // Narrating "Let me…" without tools is not concrete progress.
+                let made_concrete_progress = match reason {
+                    AutomaticContinuationReason::AnnouncedAction => false,
+                    _ => !reply_looks_stalled(&resp),
+                };
                 consecutive_stalled_recoveries =
-                    next_stalled_recovery_count(consecutive_stalled_recoveries, !reply_looks_stalled(&resp));
+                    next_stalled_recovery_count(consecutive_stalled_recoveries, made_concrete_progress);
                 if consecutive_stalled_recoveries >= MAX_CONSECUTIVE_STALLED_RECOVERIES {
                     smart_agent.pause(
                         &app,
@@ -2151,10 +2241,10 @@ mod tests {
         cursor_computer_use_instructions, cursor_effort_for_request,
         cursor_permission_instructions, display_model_name, display_provider_name,
         identity_instructions, next_stalled_recovery_count, normalized_permission_mode,
-        public_tool_arguments, public_tool_preview_delta, reply_looks_stalled,
-        resolve_tool_preview_name, starts_as_explanatory_request, stop_reason_requires_continuation,
-        task_likely_requires_project_completion, tool_confirm_summary, truncate_utf8,
-        uses_cursor_sdk, MAX_CONSECUTIVE_STALLED_RECOVERIES,
+        public_tool_arguments, public_tool_preview_delta, reply_announces_pending_action,
+        reply_looks_stalled, resolve_tool_preview_name, starts_as_explanatory_request,
+        stop_reason_requires_continuation, task_likely_requires_project_completion,
+        tool_confirm_summary, truncate_utf8, uses_cursor_sdk, MAX_CONSECUTIVE_STALLED_RECOVERIES,
     };
     use crate::llm::LlmResponse;
     use serde_json::json;
@@ -2377,6 +2467,26 @@ mod tests {
             stalls = next_stalled_recovery_count(stalls, !reply_looks_stalled(&with_text));
         }
         assert_eq!(stalls, 0);
+    }
+
+    #[test]
+    fn narrated_tool_intent_without_tools_is_detected() {
+        assert!(reply_announces_pending_action(
+            "Let me find the supervisor credentials from the codebase to sign in."
+        ));
+        assert!(reply_announces_pending_action(
+            "I'll search the project for the default password next."
+        ));
+        assert!(reply_announces_pending_action(
+            "Looking for the login config in the repo."
+        ));
+        assert!(!reply_announces_pending_action(
+            "Want me to sign in as the supervisor account and check the dashboard?"
+        ));
+        assert!(!reply_announces_pending_action(
+            "The login page is a split-screen layout with brand logos."
+        ));
+        assert!(!reply_announces_pending_action(""));
     }
 
     #[test]

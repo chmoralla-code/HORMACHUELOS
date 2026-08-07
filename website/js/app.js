@@ -17,17 +17,17 @@ const ASSET_BASE =
 
 /** Desktop installer files (uploaded to Supabase after `npm run desktop:build`). */
 const DESKTOP_DOWNLOADS = {
-  version: "0.1.44",
+  version: "0.1.45",
   windows: {
     msi: {
       label: "Windows installer (MSI)",
-      href: "/downloads/Hormachuelos_0.1.44_x64_en-US.msi",
-      file: "Hormachuelos_0.1.44_x64_en-US.msi",
+      href: "/downloads/Hormachuelos_0.1.45_x64_en-US.msi",
+      file: "Hormachuelos_0.1.45_x64_en-US.msi",
     },
     setup: {
       label: "Windows setup (EXE)",
-      href: "/downloads/Hormachuelos_0.1.44_x64-setup.exe",
-      file: "Hormachuelos_0.1.44_x64-setup.exe",
+      href: "/downloads/Hormachuelos_0.1.45_x64-setup.exe",
+      file: "Hormachuelos_0.1.45_x64-setup.exe",
     },
   },
 };
