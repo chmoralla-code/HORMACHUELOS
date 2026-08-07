@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.45";
-const BUILTIN_MSI_SHA256 = "4bb059733f219481c9f0b04b5feda9a82398d758295fffbe90be5522e60d1954";
-const BUILTIN_EXE_SHA256 = "9a127132b801986c13aca82c7f06d2c43c9588dbb5c4d964d099e3b96b0f4b45";
-const BUILTIN_RELEASE_NOTES = "Auto-continue when the model says it will act (Let me find…) but stops without calling tools.";
+const BUILTIN_RELEASE_VERSION = "0.1.46";
+const BUILTIN_MSI_SHA256 = "4e3186cae5749fafe5fe9f1369d34d24d46efeb37eec639485ee425c416120d8";
+const BUILTIN_EXE_SHA256 = "1a43c0994137e613251983e72bd558e8da6c02894096dff65461ea1d9c88531a";
+const BUILTIN_RELEASE_NOTES = "Recover mid-task from provider HTTP 502 instead of ending the run. More provider retries, auto-continue after capped reconnects, and a quick hosted gateway retry before fallback.";
 
 /**
  * A deployment-bundled release keeps the download/update path available even

@@ -165,8 +165,11 @@ pub fn reconnect_attempt_limit(error: &anyhow::Error) -> Option<u32> {
     match code {
         // Machine is offline / DNS / TCP — wait for the network to return.
         "connection_failed" => Some(0),
-        "rate_limited" => Some(6),
-        "provider_timeout" | "provider_unavailable" | "network_error" => Some(4),
+        "rate_limited" => Some(8),
+        // Upstream 502/503 blips are common on long hosted turns — retry more
+        // before giving up, then the agent loop can still auto-continue.
+        "provider_unavailable" => Some(10),
+        "provider_timeout" | "network_error" => Some(6),
         _ => None,
     }
 }
@@ -905,7 +908,7 @@ impl LlmProvider for OpenAi {
         );
         body["stream"] = Value::Bool(true);
 
-        for attempt in 0..3 {
+        for attempt in 0..5 {
             let mut request = self
                 .client
                 .post(format!("{}/chat/completions", self.base_url));
@@ -924,8 +927,8 @@ impl LlmProvider for OpenAi {
                 Ok(response) => response,
                 Err(error) => {
                     let err = request_error(&error);
-                    if attempt < 2 && is_transient_provider_error(&err) {
-                        tokio::time::sleep(Duration::from_millis(400 * (1 << attempt))).await;
+                    if attempt < 4 && is_transient_provider_error(&err) {
+                        tokio::time::sleep(Duration::from_millis(500 * (1 << attempt))).await;
                         continue;
                     }
                     return Err(err);
@@ -937,8 +940,8 @@ impl LlmProvider for OpenAi {
                     anyhow!("invalid_response: The provider response could not be read.")
                 })?;
                 let retryable = matches!(status.as_u16(), 429 | 502 | 503 | 504);
-                if retryable && attempt < 2 {
-                    tokio::time::sleep(Duration::from_millis(400 * (1 << attempt))).await;
+                if retryable && attempt < 4 {
+                    tokio::time::sleep(Duration::from_millis(600 * (1 << attempt))).await;
                     continue;
                 }
                 return Err(provider_http_error(status, &text));
@@ -1091,7 +1094,7 @@ mod tests {
             reconnect_attempt_limit(&anyhow!(
                 "network_error: The provider request could not be completed."
             )),
-            Some(4)
+            Some(6)
         );
         assert_eq!(
             reconnect_attempt_limit(&anyhow!(
@@ -1103,7 +1106,13 @@ mod tests {
             reconnect_attempt_limit(&anyhow!(
                 "provider_timeout: The provider did not respond before the timeout."
             )),
-            Some(4)
+            Some(6)
+        );
+        assert_eq!(
+            reconnect_attempt_limit(&anyhow!(
+                "provider_unavailable: The provider is temporarily unavailable. (HTTP 502)"
+            )),
+            Some(10)
         );
         assert!(reconnect_attempt_limit(&anyhow!(
             "authentication_failed: Invalid API key."

@@ -465,13 +465,21 @@ async function handleChat(req, res) {
     };
   }
 
-  const primaryRoute = {
+  let primaryRoute = {
     upstreamModel: modelResolution.upstreamModel,
     baseUrl: modelResolution.base || upstream.base,
     apiKey: modelResolution.apiKey || upstream.apiKey,
     headers: modelResolution.headers || {},
   };
   let upstreamAttempt = await requestUpstream(primaryRoute);
+  // One quick retry on transient gateway failures before switching routes.
+  if (
+    !upstreamAttempt.response.ok &&
+    [502, 503, 504].includes(upstreamAttempt.response.status)
+  ) {
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    upstreamAttempt = await requestUpstream(primaryRoute);
+  }
   if (
     isHormachuelosFree &&
     shouldUseHostedFallback(upstreamAttempt.response, upstreamAttempt.errorText)

@@ -66,6 +66,8 @@ enum AutomaticContinuationReason {
     CompletionCheck,
     /// Model narrated an imminent tool action ("Let me find…") but called none.
     AnnouncedAction,
+    /// Hosted/upstream 502 (or similar) after the run already made progress.
+    ProviderBlip,
 }
 
 impl AutomaticContinuationReason {
@@ -79,6 +81,9 @@ impl AutomaticContinuationReason {
             }
             Self::AnnouncedAction => {
                 "The model described the next step but did not run a tool. Continuing automatically..."
+            }
+            Self::ProviderBlip => {
+                "The provider briefly failed. Continuing automatically from the next unfinished step..."
             }
         }
     }
@@ -105,9 +110,51 @@ You just told the user you would take an action (for example finding credentials
 Do NOT only narrate the next step again. Call the appropriate tool(s) NOW to actually perform that action. \n\
 If you need information from the codebase or the computer, use tools immediately. Then continue until the user's request is handled."
             }
+            Self::ProviderBlip => {
+                "[System - Automatic continuation]\n\
+The upstream provider returned a temporary error (for example HTTP 502). The workspace and prior tool results are preserved. \n\
+Continue the SAME task now. Do not restart from scratch or ask the user to type \"continue\". \n\
+Inspect the latest files/commands if needed, take the next concrete tool action, and finish the requested work."
+            }
         }
     }
 }
+
+/// True when a provider blip should resume the agent loop instead of ending the run.
+fn can_recover_from_provider_blip(err: &anyhow::Error, iteration: u32, messages: &[ChatMessage]) -> bool {
+    let Some(limit) = crate::llm::reconnect_attempt_limit(err) else {
+        return false;
+    };
+    // connection_failed uses unlimited reconnect already; only recover after
+    // capped transient errors (502 / timeout / network cut).
+    if limit == 0 {
+        return false;
+    }
+    let code = err
+        .to_string()
+        .split_once(':')
+        .map(|(code, _)| code.trim().to_string())
+        .unwrap_or_default();
+    if !matches!(
+        code.as_str(),
+        "provider_unavailable" | "provider_timeout" | "network_error" | "rate_limited"
+    ) {
+        return false;
+    }
+    if iteration > 0 {
+        return true;
+    }
+    messages.iter().any(|message| {
+        message.role == "tool"
+            || message
+                .tool_calls
+                .as_ref()
+                .map(|calls| !calls.is_empty())
+                .unwrap_or(false)
+    })
+}
+
+const MAX_PROVIDER_BLIP_RECOVERIES: u8 = 4;
 
 /// True when the assistant's prose promises an imminent tool action but the
 /// turn ended with zero tool calls — the classic "Let me find X." then stop.
@@ -1270,6 +1317,7 @@ Use them as continuous memory for everything that follows.",
     // Only repeated replies with no tool action are considered stalled. The
     // count resets after every tool turn; it is not an iteration limit.
     let mut consecutive_stalled_recoveries: u8 = 0;
+    let mut provider_blip_recoveries: u8 = 0;
     let mut smart_agent = crate::smart_agent::SmartAgentRun::new(smart_agent_enabled);
     emit(
         &app,
@@ -1399,7 +1447,8 @@ Use them as continuous memory for everything that follows.",
             // Stay alive across brief offline blips. Cap retries for stream cuts /
             // proxy timeouts so continuing a session never loops on Reconnecting….
             let mut reconnect_attempt: u32 = 0;
-            loop {
+            let mut recover_after_blip = false;
+            let response = loop {
                 let result = tokio::select! {
                     biased;
                     _ = wait_until_cancelled(&cancel) => {
@@ -1415,14 +1464,28 @@ Use them as continuous memory for everything that follows.",
                     ) => result,
                 };
                 match result {
-                    Ok(response) => break response,
+                    Ok(response) => {
+                        provider_blip_recoveries = 0;
+                        break response;
+                    }
                     Err(err) => {
                         let Some(limit) = crate::llm::reconnect_attempt_limit(&err) else {
                             return Err(err);
                         };
                         reconnect_attempt = reconnect_attempt.saturating_add(1);
-                        // limit == 0 means keep waiting for real connectivity.
                         if limit > 0 && reconnect_attempt > limit {
+                            if provider_blip_recoveries < MAX_PROVIDER_BLIP_RECOVERIES
+                                && can_recover_from_provider_blip(&err, iteration, &messages)
+                            {
+                                recover_after_blip = true;
+                                break LlmResponse {
+                                    text: None,
+                                    tool_calls: Vec::new(),
+                                    reasoning_content: None,
+                                    stop_reason: "provider_blip".into(),
+                                    usage_tokens: 0,
+                                };
+                            }
                             return Err(err);
                         }
                         let delay_ms = (1_000u64
@@ -1454,7 +1517,35 @@ Use them as continuous memory for everything that follows.",
                         }
                     }
                 }
+            };
+
+            if recover_after_blip {
+                provider_blip_recoveries = provider_blip_recoveries.saturating_add(1);
+                let reason = AutomaticContinuationReason::ProviderBlip;
+                emit(
+                    &app,
+                    &session_id,
+                    "status",
+                    json!({
+                        "message": "Provider hiccup — continuing…",
+                        "attempt": provider_blip_recoveries,
+                    }),
+                );
+                emit(
+                    &app,
+                    &session_id,
+                    "reasoning",
+                    json!({
+                        "text": reason.status_text(),
+                        "iteration": iteration,
+                    }),
+                );
+                messages.push(ChatMessage::user(reason.instruction()));
+                iteration = iteration.saturating_add(1);
+                continue;
             }
+
+            response
         };
         resp.text = resp.text.map(|text| {
             integration_chat::redact_sensitive_text(&text, known_integration_secrets.as_ref())
@@ -1560,9 +1651,9 @@ Use them as continuous memory for everything that follows.",
             };
 
             if let Some(reason) = continuation_reason {
-                // Narrating "Let me…" without tools is not concrete progress.
                 let made_concrete_progress = match reason {
-                    AutomaticContinuationReason::AnnouncedAction => false,
+                    AutomaticContinuationReason::AnnouncedAction
+                    | AutomaticContinuationReason::ProviderBlip => false,
                     _ => !reply_looks_stalled(&resp),
                 };
                 consecutive_stalled_recoveries =
@@ -2238,15 +2329,17 @@ fn project_context_block(root: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        cursor_computer_use_instructions, cursor_effort_for_request,
-        cursor_permission_instructions, display_model_name, display_provider_name,
-        identity_instructions, next_stalled_recovery_count, normalized_permission_mode,
-        public_tool_arguments, public_tool_preview_delta, reply_announces_pending_action,
-        reply_looks_stalled, resolve_tool_preview_name, starts_as_explanatory_request,
-        stop_reason_requires_continuation, task_likely_requires_project_completion,
-        tool_confirm_summary, truncate_utf8, uses_cursor_sdk, MAX_CONSECUTIVE_STALLED_RECOVERIES,
+        can_recover_from_provider_blip, cursor_computer_use_instructions,
+        cursor_effort_for_request, cursor_permission_instructions, display_model_name,
+        display_provider_name, identity_instructions, next_stalled_recovery_count,
+        normalized_permission_mode, public_tool_arguments, public_tool_preview_delta,
+        reply_announces_pending_action, reply_looks_stalled, resolve_tool_preview_name,
+        starts_as_explanatory_request, stop_reason_requires_continuation,
+        task_likely_requires_project_completion, tool_confirm_summary, truncate_utf8,
+        uses_cursor_sdk, MAX_CONSECUTIVE_STALLED_RECOVERIES,
     };
-    use crate::llm::LlmResponse;
+    use crate::llm::{ChatMessage, LlmResponse};
+    use anyhow::anyhow;
     use serde_json::json;
 
     const TYPED_SENTINEL: &str = "typed-secret-SENTINEL-agent-4b83";
@@ -2487,6 +2580,32 @@ mod tests {
             "The login page is a split-screen layout with brand logos."
         ));
         assert!(!reply_announces_pending_action(""));
+    }
+
+    #[test]
+    fn mid_task_provider_502_can_auto_recover() {
+        let blip = anyhow!(
+            "provider_unavailable: The provider is temporarily unavailable. (HTTP 502)"
+        );
+        assert!(can_recover_from_provider_blip(&blip, 1, &[]));
+        assert!(!can_recover_from_provider_blip(&blip, 0, &[]));
+        assert!(can_recover_from_provider_blip(
+            &blip,
+            0,
+            &[ChatMessage {
+                role: "tool".into(),
+                content: json!("ok"),
+                tool_calls: None,
+                tool_call_id: Some("t1".into()),
+                name: Some("shell".into()),
+                reasoning_content: None,
+            }]
+        ));
+        assert!(!can_recover_from_provider_blip(
+            &anyhow!("auth_error: Invalid key"),
+            3,
+            &[]
+        ));
     }
 
     #[test]
