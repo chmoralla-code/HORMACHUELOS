@@ -211,6 +211,62 @@ export function publicHostedModelConfig(row) {
   };
 }
 
+/** Synthetic FREE Vision alias that borrows the Command Code credential at runtime. */
+export const HORMACHUELOS_V4_ALIAS = "hormachuelos-v4";
+const HORMACHUELOS_V4_DISPLAY_NAME = "Hormachuelos v4 (VISION)";
+const HORMACHUELOS_V4_UPSTREAM_MODEL = "deepseek/deepseek-v4-flash";
+const HORMACHUELOS_V4_BASE_URL = "https://api.commandcode.ai";
+const HORMACHUELOS_V4_VIRTUAL_ID = "virtual:hormachuelos-v4";
+
+function commandCodeCredentialConfigured(rows) {
+  const hasStoredKey = (Array.isArray(rows) ? rows : []).some((row) => {
+    const provider = String(row?.provider_id || "").trim().toLowerCase();
+    return provider === COMMANDCODE_PROVIDER && Boolean(String(row?.api_key_ciphertext || "").trim());
+  });
+  if (hasStoredKey) return true;
+  return Boolean(String(process.env.COMMANDCODE_API_KEY || "").trim());
+}
+
+function hasHormachuelosV4Alias(configs) {
+  return (Array.isArray(configs) ? configs : []).some((config) => {
+    return (
+      String(config?.providerId || "").trim().toLowerCase() === HORMACHUELOS_FREE_PROVIDER &&
+      String(config?.alias || "").trim().toLowerCase() === HORMACHUELOS_V4_ALIAS
+    );
+  });
+}
+
+export function syntheticHormachuelosV4AdminConfig({ available = false } = {}) {
+  return {
+    id: HORMACHUELOS_V4_VIRTUAL_ID,
+    providerId: HORMACHUELOS_FREE_PROVIDER,
+    alias: HORMACHUELOS_V4_ALIAS,
+    displayName: HORMACHUELOS_V4_DISPLAY_NAME,
+    upstreamModel: HORMACHUELOS_V4_UPSTREAM_MODEL,
+    baseUrl: HORMACHUELOS_V4_BASE_URL,
+    active: Boolean(available),
+    keyConfigured: Boolean(available),
+    virtual: true,
+    systemManaged: true,
+    note: available
+      ? "Uses the HORMACHUELOS NEW MODELS (Command Code) API key at runtime"
+      : "Configure HORMACHUELOS NEW MODELS with an API key to enable Vision",
+    createdAt: null,
+    updatedAt: null,
+  };
+}
+
+function withSyntheticHormachuelosV4(configs, rows) {
+  const list = (Array.isArray(configs) ? configs : []).filter(Boolean);
+  if (hasHormachuelosV4Alias(list)) return list;
+  return [
+    ...list,
+    syntheticHormachuelosV4AdminConfig({
+      available: commandCodeCredentialConfigured(rows),
+    }),
+  ];
+}
+
 /** Public-safe provider profile. Credentials are write-only and never serialized. */
 export function publicHostedProviderConfig(row, { modelCount = 0, providerId: fallbackProviderId = "" } = {}) {
   const providerId = String(row?.provider_id || fallbackProviderId || "").trim().toLowerCase();
@@ -278,10 +334,14 @@ export function invalidateHostedModelRouteCache() {
 export async function adminListHostedModelConfigs() {
   const rows = await listHostedModelConfigs();
   const modelRows = rows.filter((row) => !isHostedProviderProfileRow(row));
+  const configs = withSyntheticHormachuelosV4(
+    modelRows.map(publicHostedModelConfig),
+    rows,
+  );
   return {
     credentialStorageReady: hostedModelCredentialStorageReady(),
     providerOptions: hostedProviderOptions(),
-    configs: modelRows.map(publicHostedModelConfig),
+    configs,
   };
 }
 
@@ -297,9 +357,13 @@ export async function adminListHostedProviderConfigs() {
   const profileByProvider = new Map(
     profileRows.map((row) => [String(row.provider_id || "").trim().toLowerCase(), row]),
   );
+  const configs = withSyntheticHormachuelosV4(
+    modelRows.map(publicHostedModelConfig),
+    rows,
+  );
   const modelCountByProvider = new Map();
-  for (const row of modelRows) {
-    const provider = String(row.provider_id || "").trim().toLowerCase();
+  for (const config of configs) {
+    const provider = String(config.providerId || "").trim().toLowerCase();
     modelCountByProvider.set(provider, (modelCountByProvider.get(provider) || 0) + 1);
   }
   const providerIds = new Set([
@@ -318,7 +382,7 @@ export async function adminListHostedProviderConfigs() {
     credentialStorageReady: hostedModelCredentialStorageReady(),
     providerOptions: providers.map(({ providerId, displayName }) => ({ id: providerId, label: displayName })),
     providers,
-    configs: modelRows.map(publicHostedModelConfig),
+    configs,
   };
 }
 
@@ -343,8 +407,19 @@ function applyCredentialChange(body, patch) {
 }
 
 export async function adminSaveHostedModelConfig(body) {
-  const input = normalizeConfig(body || {});
   const id = String(body?.id || "").trim();
+  const alias = String(body?.alias || body?.model || "").trim().toLowerCase();
+  if (id === HORMACHUELOS_V4_VIRTUAL_ID || alias === HORMACHUELOS_V4_ALIAS) {
+    // Vision is synthesized from the Command Code credential; keep it out of the
+    // editable alias table so admins do not store a duplicate broken route.
+    throw Object.assign(
+      new Error(
+        "Hormachuelos v4 is managed automatically from HORMACHUELOS NEW MODELS. Configure that provider's API key instead of editing this alias.",
+      ),
+      { status: 400 },
+    );
+  }
+  const input = normalizeConfig(body || {});
 
   let existing = null;
   if (id) {
@@ -422,7 +497,14 @@ export async function adminDeleteHostedProviderConfig(providerId) {
 }
 
 export async function adminDeleteHostedModelConfig(id) {
-  const existing = await getHostedModelConfigById(String(id || "").trim());
+  const configId = String(id || "").trim();
+  if (configId === HORMACHUELOS_V4_VIRTUAL_ID) {
+    throw Object.assign(
+      new Error("Hormachuelos v4 is managed automatically and cannot be deleted from this list."),
+      { status: 400 },
+    );
+  }
+  const existing = await getHostedModelConfigById(configId);
   if (!existing) throw Object.assign(new Error("Hosted model configuration not found."), { status: 404 });
   if (isHostedProviderProfileRow(existing)) {
     throw Object.assign(new Error("Use the provider controls to remove a provider profile."), { status: 400 });

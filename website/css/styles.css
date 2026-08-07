@@ -1123,6 +1123,16 @@ button, input, select, textarea {
   background: rgba(201, 160, 160, 0.045);
 }
 
+.admin-state.is-virtual {
+  border-color: rgba(125, 185, 255, 0.28);
+  color: rgba(180, 215, 255, 0.92);
+  background: rgba(70, 125, 230, 0.1);
+}
+
+.admin-model-row.is-virtual {
+  border-color: rgba(125, 185, 255, 0.16);
+}
+
 .admin-provider-grid,
 .admin-model-grid {
   display: grid;

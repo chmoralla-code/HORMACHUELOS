@@ -1831,28 +1831,34 @@ function renderAdmin() {
 
       const modelRow = (model, provider) => {
         const inheritedEndpoint = !String(model.baseUrl || "").trim();
-        const keyStatus = model.keyConfigured
-          ? "Route-specific key saved"
-          : provider.keyConfigured
-            ? "Uses the provider default key"
-            : "No key configured";
-        return `<div class="admin-model-row" data-model-id="${escapeHtml(model.id)}" data-provider-id="${escapeHtml(provider.providerId)}">
+        const isVirtual = Boolean(model.virtual || model.systemManaged);
+        const keyStatus = isVirtual
+          ? (model.note || "Uses the HORMACHUELOS NEW MODELS key")
+          : model.keyConfigured
+            ? "Route-specific key saved"
+            : provider.keyConfigured
+              ? "Uses the provider default key"
+              : "No key configured";
+        return `<div class="admin-model-row${isVirtual ? " is-virtual" : ""}" data-model-id="${escapeHtml(model.id)}" data-provider-id="${escapeHtml(provider.providerId)}" data-virtual="${isVirtual ? "1" : "0"}">
           <div class="admin-model-row-head">
             <strong>${escapeHtml(model.displayName || model.alias)}</strong>
             <span class="admin-state ${model.active ? "is-active" : "is-paused"}">${model.active ? "Active" : "Paused"}</span>
+            ${isVirtual ? `<span class="admin-state is-virtual">Vision route</span>` : ""}
           </div>
           <div class="admin-model-grid">
-            <div class="field"><label>Model alias shown in app</label><input class="field admin-model-alias mono" value="${escapeHtml(model.alias)}" maxlength="81" pattern="[a-z0-9][a-z0-9._-]*" required /></div>
-            <div class="field"><label>Model display name</label><input class="field admin-model-name" value="${escapeHtml(model.displayName)}" maxlength="120" required /></div>
-            <div class="field"><label>Upstream model ID</label><input class="field admin-model-upstream mono" value="${escapeHtml(model.upstreamModel)}" maxlength="200" required /></div>
-            <div class="field"><label>Endpoint override <span class="muted">(optional)</span></label><input class="field admin-model-base mono" type="url" value="${escapeHtml(model.baseUrl || "")}" maxlength="400" placeholder="${inheritedEndpoint ? "Uses provider endpoint" : "https://provider.example/v1"}" /><p class="muted small">${inheritedEndpoint ? "Inherited from provider" : "This model overrides the provider endpoint"}</p></div>
-            <div class="field admin-key-field"><label>Route API key override <span class="muted">(optional)</span></label><input class="field admin-model-key" type="password" autocomplete="new-password" placeholder="${model.keyConfigured ? "•••••••• (leave blank to keep)" : "Use provider key"}" /><p class="muted small">${keyStatus}</p></div>
-            <label class="admin-active admin-toggle-field"><input type="checkbox" class="admin-model-active" ${model.active ? "checked" : ""} /> Model active</label>
+            <div class="field"><label>Model alias shown in app</label><input class="field admin-model-alias mono" value="${escapeHtml(model.alias)}" maxlength="81" pattern="[a-z0-9][a-z0-9._-]*" required ${isVirtual ? "readonly" : ""} /></div>
+            <div class="field"><label>Model display name</label><input class="field admin-model-name" value="${escapeHtml(model.displayName)}" maxlength="120" required ${isVirtual ? "readonly" : ""} /></div>
+            <div class="field"><label>Upstream model ID</label><input class="field admin-model-upstream mono" value="${escapeHtml(model.upstreamModel)}" maxlength="200" required ${isVirtual ? "readonly" : ""} /></div>
+            <div class="field"><label>Endpoint override <span class="muted">(optional)</span></label><input class="field admin-model-base mono" type="url" value="${escapeHtml(model.baseUrl || "")}" maxlength="400" placeholder="${inheritedEndpoint ? "Uses provider endpoint" : "https://provider.example/v1"}" ${isVirtual ? "readonly" : ""} /><p class="muted small">${isVirtual ? escapeHtml(model.note || "Managed Vision route") : inheritedEndpoint ? "Inherited from provider" : "This model overrides the provider endpoint"}</p></div>
+            <div class="field admin-key-field"><label>Route API key override <span class="muted">(optional)</span></label><input class="field admin-model-key" type="password" autocomplete="new-password" ${isVirtual ? "disabled" : ""} placeholder="${isVirtual ? "Uses HORMACHUELOS NEW MODELS key" : model.keyConfigured ? "•••••••• (leave blank to keep)" : "Use provider key"}" /><p class="muted small">${escapeHtml(keyStatus)}</p></div>
+            <label class="admin-active admin-toggle-field"><input type="checkbox" class="admin-model-active" ${model.active ? "checked" : ""} ${isVirtual ? "disabled" : ""} /> Model active</label>
           </div>
           <div class="admin-row-actions">
-            <button type="button" class="btn btn-sm btn-primary admin-model-save">Save alias</button>
+            ${isVirtual
+              ? `<p class="muted small" style="margin:0">Managed automatically. Enable Vision by configuring the HORMACHUELOS NEW MODELS provider key.</p>`
+              : `<button type="button" class="btn btn-sm btn-primary admin-model-save">Save alias</button>
             <button type="button" class="btn btn-sm admin-model-clear" ${model.keyConfigured ? "" : "disabled"}>Clear route key</button>
-            <button type="button" class="btn btn-sm danger admin-model-delete">Delete alias</button>
+            <button type="button" class="btn btn-sm danger admin-model-delete">Delete alias</button>`}
           </div>
         </div>`;
       };
