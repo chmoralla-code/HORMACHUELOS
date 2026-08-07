@@ -61,19 +61,27 @@ function wireMessages(openaiMessages) {
       continue;
     }
     if (role === "user" || role === "system") {
-      // System messages are carried in the top-level `system` field; user text
-      // becomes a text block. Arrays of content parts (images etc.) are
-      // simplified to their text parts.
-      let text = message.content;
-      if (Array.isArray(text)) {
-        text = text
-          .filter((part) => part?.type === "text")
-          .map((part) => part.text)
-          .join("\n");
+      // System messages are carried in the top-level `system` field. User
+      // content may be a string or an array of parts (text + image_url for
+      // vision). Image parts are forwarded as Command Code `image` blocks.
+      const parts = Array.isArray(message.content) ? message.content : [];
+      const blocks = [];
+      for (const part of parts) {
+        if (part?.type === "text" && typeof part.text === "string" && part.text.trim()) {
+          blocks.push({ type: "text", text: part.text });
+        } else if (part?.type === "image_url") {
+          const url = typeof part.image_url === "string" ? part.image_url : part.image_url?.url;
+          if (typeof url === "string" && url.startsWith("data:")) {
+            const mime = (url.match(/^data:([^;,]+)/) || [])[1] || "image/png";
+            blocks.push({ type: "image", image: url, mimeType: mime });
+          }
+        }
       }
-      if (typeof text === "string" && text.trim()) {
-        out.push({ role: "user", content: [{ type: "text", text }] });
+      if (!blocks.length) {
+        const text = typeof message.content === "string" ? message.content : "";
+        if (text.trim()) blocks.push({ type: "text", text });
       }
+      if (blocks.length) out.push({ role: "user", content: blocks });
     }
   }
   return out;

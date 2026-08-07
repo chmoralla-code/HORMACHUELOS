@@ -741,10 +741,15 @@ Current user request:\n{prompt}",
         };
     let use_hosted = byok_key.is_none()
         && crate::license::should_use_hosted_for_provider(&license, &settings.provider);
+    // Signed-in website account session (device-link token). The hosted proxy
+    // resolves the account's plan server-side, so a paid plan works even when
+    // the local license cache has no HORMA- key (e.g. Starter/Pro bought via
+    // the website without a manual license activation).
+    let website_session = crate::config::load_website_session().unwrap_or_default();
+    let website_session = website_session.trim().to_string();
     let (key, base_url_override) = if uses_hormachuelos_free {
-        let session = crate::config::load_website_session().unwrap_or_default();
-        if !session.trim().is_empty() {
-            (session, Some(crate::license::hosted_chat_base_url()))
+        if !website_session.is_empty() {
+            (website_session.clone(), Some(crate::license::hosted_chat_base_url()))
         } else if crate::license::should_use_hosted(&license) {
             (
                 license.license_key.clone(),
@@ -760,6 +765,14 @@ Current user request:\n{prompt}",
             license.license_key.clone(),
             Some(crate::license::hosted_chat_base_url()),
         )
+    } else if (settings.provider.eq_ignore_ascii_case("commandcode")
+        || is_managed_alias)
+        && !website_session.is_empty()
+    {
+        // Hosted-managed provider with a signed-in website account but no local
+        // HORMA- key: let the proxy resolve the account's plan from the
+        // session token.
+        (website_session, Some(crate::license::hosted_chat_base_url()))
     } else if is_managed_alias {
         return Err(anyhow::anyhow!(
             "'{}' is managed by your Hormachuelos administrator. Sign in with an active hosted plan before using this provider alias.",

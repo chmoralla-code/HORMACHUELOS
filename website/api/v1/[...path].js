@@ -274,11 +274,20 @@ async function handleChat(req, res) {
       license = paid;
     }
   } else {
-    const licenseKey = bearerToken(req);
-    if (!licenseKey) {
-      return json(res, 401, { error: "Missing license key (Authorization: Bearer HORMA-…)" }, req);
+    // Paid providers normally require a HORMA- license key as Bearer. A
+    // signed-in website account (device-link session) is also accepted for
+    // hosted-managed providers: the account's linked license resolves the plan.
+    let licenseKey = bearerToken(req);
+    license = licenseKey ? await getLicenseByKey(licenseKey) : null;
+    if (
+      (!license || !license.active || license.plan === HORMACHUELOS_FREE_PROVIDER) &&
+      providerHint === "commandcode"
+    ) {
+      const account = await accountFromRequest(req);
+      if (account) {
+        license = await authenticatedFreeEntitlement(req);
+      }
     }
-    license = await getLicenseByKey(licenseKey);
     if (
       !license ||
       !license.active ||

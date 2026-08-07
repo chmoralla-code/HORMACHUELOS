@@ -1709,7 +1709,12 @@ fn view_image_file(root: &Path, raw_path: &str) -> Result<String> {
         .ok()
         .filter(|k| !k.trim().is_empty());
 
-    if local_key.is_none() && crate::license::should_use_hosted(&license) {
+    let website_session = crate::config::load_website_session().unwrap_or_default();
+    let website_session = website_session.trim().to_string();
+    let hosted_eligible = crate::license::should_use_hosted(&license)
+        || (!website_session.is_empty() && license.active && !license.plan.eq_ignore_ascii_case("free"));
+
+    if local_key.is_none() && hosted_eligible {
         let client = http_client(120)?;
         let body = json!({
             "model": "xai/grok-4.5",
@@ -1722,11 +1727,22 @@ fn view_image_file(root: &Path, raw_path: &str) -> Result<String> {
             }],
             "max_tokens": 1024,
         });
-        let response = client
+        let mut request = client
             .post(format!("{hosted_base}/api/v1/chat/completions"))
             .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", license.license_key))
-            .header("X-Horma-Provider", "commandcode")
+            .header("X-Horma-Provider", "commandcode");
+        // A signed-in website account (device-link session) works even when no
+        // HORMA- license key is stored locally — the proxy resolves the plan.
+        if !license.license_key.trim().is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", license.license_key));
+        } else if !website_session.is_empty() {
+            request = request
+                .header("Authorization", format!("Bearer {website_session}"))
+                .header("X-Horma-Session", &website_session);
+        } else {
+            anyhow::bail!("No Command Code key is available for image viewing. Save a key in Settings or activate a hosted plan.");
+        }
+        let response = request
             .json(&body)
             .send()
             .with_context(|| "Vision request to the hosted proxy failed.")?;
