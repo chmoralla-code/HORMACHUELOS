@@ -400,7 +400,10 @@ async function handleChat(req, res) {
 
   const requestedModel = body.model || (isHormachuelosFree ? HORMACHUELOS_FREE_MODEL : "deepseek/deepseek-chat");
   const access = await resolveAccountAccess(req, license);
-  const accessDenied = accountAccessDeniedMessage(access, providerHint, requestedModel);
+  const visionAssist = String(req.headers["x-horma-vision-assist"] || "").trim() === "1";
+  const accessDenied = accountAccessDeniedMessage(access, providerHint, requestedModel, {
+    visionAssist,
+  });
   if (accessDenied) return json(res, 403, { error: accessDenied, code: "provider_restricted" }, req);
   const modelResolution = resolveHostedModel(upstream, requestedModel);
   if (modelResolution.error) return json(res, 400, { error: modelResolution.error }, req);

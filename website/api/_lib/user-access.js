@@ -166,10 +166,19 @@ export function filterCatalogByAccountAccess(catalog, access) {
     .filter((provider) => Array.isArray(provider.models) && provider.models.length > 0);
 }
 
+/** Providers used only as internal view_image helpers — never offered in the picker. */
+const VISION_ASSIST_PROVIDERS = new Set(["commandcode"]);
+
 /** @returns {string|null} error message when blocked */
-export function accountAccessDeniedMessage(access, providerId, modelId) {
+export function accountAccessDeniedMessage(access, providerId, modelId, options = {}) {
   if (!access?.restricted) return null;
   const provider = cleanProviderId(providerId);
+  // Command Code powers Hormachuelos Vision (view_image) for every chat model.
+  // Admins restrict which providers appear in the picker — not this helper route.
+  if (VISION_ASSIST_PROVIDERS.has(provider)) return null;
+  if (options.visionAssist && (provider === "openrouter" || VISION_ASSIST_PROVIDERS.has(provider))) {
+    return null;
+  }
   if (!provider || !(access.providers || []).includes(provider)) {
     return "This AI provider is not enabled for your account.";
   }

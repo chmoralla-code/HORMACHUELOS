@@ -1736,6 +1736,8 @@ pub fn view_image_file(root: &Path, raw_path: &str) -> Result<String> {
     }
 
     // 2) Command Code Grok — primary path for FREE / Hormachuelos v4 (VISION).
+    // Allowed even when the account's chat allowlist is DeepSeek-only: this is
+    // the shared vision helper, not a user-selectable chat provider.
     if paid_hosted || session_auth {
         match describe_image_hosted_openai(
             &hosted_base,
@@ -1752,7 +1754,28 @@ pub fn view_image_file(root: &Path, raw_path: &str) -> Result<String> {
         }
     }
 
-    // 3) Local OpenRouter BYOK.
+    // 3) Hosted DeepSeek when the user is on DeepSeek (or has a DeepSeek key).
+    let deepseek_key = crate::config::load_provider_api_key("deepseek")
+        .ok()
+        .filter(|k| !k.trim().is_empty());
+    let prefer_deepseek = settings.provider == "deepseek" || deepseek_key.is_some();
+    if prefer_deepseek && (paid_hosted || session_auth) {
+        match describe_image_hosted_openai(
+            &hosted_base,
+            &license,
+            &website_session,
+            "deepseek",
+            "deepseek-v4-flash",
+            prompt,
+            &data_url,
+            18,
+        ) {
+            Ok(description) => return Ok(description),
+            Err(err) => errors.push(format!("hosted deepseek: {err}")),
+        }
+    }
+
+    // 4) Local OpenRouter BYOK.
     if let Some(key) = openrouter_key.as_deref() {
         match describe_image_direct_openai(
             "https://openrouter.ai/api/v1",
@@ -1767,7 +1790,22 @@ pub fn view_image_file(root: &Path, raw_path: &str) -> Result<String> {
         }
     }
 
-    // 4) Direct Command Code gateway (local BYOK key).
+    // 5) Local DeepSeek BYOK.
+    if let Some(key) = deepseek_key.as_deref() {
+        match describe_image_direct_openai(
+            "https://api.deepseek.com",
+            key,
+            "deepseek-chat",
+            prompt,
+            &data_url,
+            18,
+        ) {
+            Ok(description) => return Ok(description),
+            Err(err) => errors.push(format!("local deepseek: {err}")),
+        }
+    }
+
+    // 6) Direct Command Code gateway (local BYOK key).
     if let Some(key) = local_key.as_deref() {
         match describe_image_commandcode_direct(
             &settings,
@@ -1894,7 +1932,10 @@ fn describe_image_hosted_openai(
     let mut request = client
         .post(format!("{hosted_base}/chat/completions"))
         .header("Content-Type", "application/json")
-        .header("X-Horma-Provider", provider);
+        .header("X-Horma-Provider", provider)
+        // Marks this as the desktop view_image helper so admin chat-provider
+        // allowlists do not block the shared Vision backend (Command Code).
+        .header("X-Horma-Vision-Assist", "1");
     if !license.license_key.trim().is_empty() {
         request = request.header("Authorization", format!("Bearer {}", license.license_key));
     } else if !website_session.is_empty() {

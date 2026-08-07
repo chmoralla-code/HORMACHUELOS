@@ -43,6 +43,11 @@ const catalog = [
     ],
   );
   assert.equal(accountAccessDeniedMessage(access, "openrouter", "any"), "This AI provider is not enabled for your account.");
+  assert.equal(accountAccessDeniedMessage(access, "commandcode", "xai/grok-4.5"), null);
+  assert.equal(
+    accountAccessDeniedMessage(access, "openrouter", "google/gemini-2.0-flash-001", { visionAssist: true }),
+    null,
+  );
   assert.equal(accountAccessDeniedMessage(access, "hormachuelos_free", "hormachuelos-v4"), "This model is not enabled for your account.");
   assert.equal(accountAccessDeniedMessage(access, "hormachuelos_free", "hormachuelos-v1"), null);
 }
