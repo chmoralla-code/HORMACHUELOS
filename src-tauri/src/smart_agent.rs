@@ -11,13 +11,7 @@ use std::collections::HashSet;
 use tauri::{AppHandle, Emitter};
 
 const STEP_IDS: [&str; 5] = ["scope", "inspect", "implement", "validate", "deliver"];
-const STEP_LABELS: [&str; 5] = [
-    "Understand the request",
-    "Inspect the workspace",
-    "Implement the requested work",
-    "Validate the result",
-    "Deliver the result",
-];
+const STEP_LABELS: [&str; 5] = ["Scope", "Inspect", "Build", "Check", "Done"];
 
 #[derive(Clone, Serialize)]
 struct SmartAgentEvent {

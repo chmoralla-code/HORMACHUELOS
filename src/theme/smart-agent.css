@@ -1,179 +1,166 @@
-/* Session-scoped Smart Agent task ledger. Kept separate from chat styles so
-   transcript rendering remains untouched. */
+/* Compact Smart Agent strip above chat — short step words only. */
 .smart-agent-status {
   position: absolute;
   z-index: 12;
-  top: 10px;
+  top: 8px;
   right: 0;
   left: 0;
-  width: min(760px, calc(100% - 32px));
+  width: min(420px, calc(100% - 24px));
   margin: 0 auto;
   pointer-events: none;
 }
 
-/* The ledger is deliberately outside the stage grid flow so it cannot push
-   the chat or composer into implicit rows during a long transcript. Keep a
-   dedicated reading lane under it whenever it is visible. */
 .stage:has(.smart-agent-status:not([hidden])) .chat {
-  padding-top: 178px;
-  scroll-padding-top: 178px;
+  padding-top: 56px;
+  scroll-padding-top: 56px;
 }
 
 .smart-agent-card {
-  padding: 12px 14px;
-  border: 1px solid rgba(110, 175, 255, 0.24);
-  border-radius: 12px;
-  background:
-    linear-gradient(130deg, rgba(70, 125, 230, 0.10), rgba(20, 25, 35, 0.38) 58%, rgba(255, 255, 255, 0.018)),
-    var(--raised);
-  box-shadow: inset 0 1px rgba(255, 255, 255, 0.025), 0 8px 24px rgba(0, 0, 0, 0.12);
+  padding: 6px 10px;
+  border: 1px solid rgba(110, 175, 255, 0.18);
+  border-radius: 999px;
+  background: rgba(18, 22, 30, 0.78);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.14);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: nowrap;
 }
 
 .smart-agent-card.smart-agent-completed {
-  border-color: rgba(120, 210, 160, 0.26);
-  background:
-    linear-gradient(130deg, rgba(70, 170, 120, 0.085), rgba(20, 25, 35, 0.36) 60%, rgba(255, 255, 255, 0.018)),
-    var(--raised);
+  border-color: rgba(120, 210, 160, 0.22);
 }
 
 .smart-agent-card.smart-agent-paused {
-  border-color: rgba(235, 184, 100, 0.25);
-  background:
-    linear-gradient(130deg, rgba(185, 125, 55, 0.09), rgba(20, 25, 35, 0.36) 60%, rgba(255, 255, 255, 0.018)),
-    var(--raised);
+  border-color: rgba(235, 184, 100, 0.22);
 }
 
 .smart-agent-head {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  gap: 6px;
+  flex: 0 0 auto;
 }
 
 .smart-agent-title {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  color: var(--text);
+  color: var(--text-muted);
   font-family: var(--font-display);
-  font-size: 11px;
+  font-size: 9px;
   font-weight: 750;
-  letter-spacing: 0.085em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
-}
-
-.smart-agent-spark {
-  color: #83b9ff;
-  font-size: 15px;
-  line-height: 1;
-  text-shadow: 0 0 12px rgba(105, 170, 255, 0.75);
+  white-space: nowrap;
 }
 
 .smart-agent-badge {
   flex: 0 0 auto;
-  padding: 3px 8px;
-  border: 1px solid rgba(125, 185, 255, 0.24);
+  padding: 1px 6px;
+  border: 1px solid rgba(125, 185, 255, 0.2);
   border-radius: 999px;
-  color: rgba(180, 215, 255, 0.94);
-  background: rgba(70, 125, 230, 0.10);
+  color: rgba(180, 215, 255, 0.9);
+  background: rgba(70, 125, 230, 0.1);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 8px;
   font-weight: 700;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 
 .smart-agent-badge.completed {
-  border-color: rgba(120, 210, 160, 0.25);
-  color: rgba(175, 235, 195, 0.92);
-  background: rgba(70, 170, 120, 0.10);
+  border-color: rgba(120, 210, 160, 0.22);
+  color: rgba(175, 235, 195, 0.9);
+  background: rgba(70, 170, 120, 0.1);
 }
 
 .smart-agent-badge.paused {
-  border-color: rgba(235, 184, 100, 0.24);
-  color: rgba(245, 210, 150, 0.92);
-  background: rgba(185, 125, 55, 0.10);
-}
-
-.smart-agent-summary {
-  margin: 6px 0 0;
-  color: var(--text-muted);
-  font-size: 11px;
-  line-height: 1.42;
+  border-color: rgba(235, 184, 100, 0.22);
+  color: rgba(245, 210, 150, 0.9);
+  background: rgba(185, 125, 55, 0.1);
 }
 
 .smart-agent-steps {
   display: flex;
-  flex-wrap: wrap;
-  gap: 5px 10px;
-  margin: 10px 0 0;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 2px;
+  margin: 0;
   padding: 0;
   list-style: none;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .smart-agent-step {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 3px;
   min-width: 0;
+  padding: 2px 5px;
+  border-radius: 999px;
   color: var(--text-faint);
-  font-size: 10px;
-  line-height: 1.25;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1.1;
+  white-space: nowrap;
 }
 
 .smart-agent-step-mark {
   display: inline-grid;
   place-items: center;
-  width: 14px;
-  height: 14px;
+  width: 10px;
+  height: 10px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 999px;
   color: var(--text-faint);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 8px;
   line-height: 1;
 }
 
-.smart-agent-step.completed { color: rgba(190, 235, 205, 0.9); }
+.smart-agent-step.completed { color: rgba(190, 235, 205, 0.88); }
 .smart-agent-step.completed .smart-agent-step-mark {
   border-color: rgba(120, 210, 160, 0.34);
   color: rgba(190, 245, 210, 0.95);
   background: rgba(70, 170, 120, 0.12);
 }
 
-.smart-agent-step.active { color: rgba(205, 225, 255, 0.96); }
+.smart-agent-step.active {
+  color: rgba(205, 225, 255, 0.96);
+  background: rgba(70, 125, 230, 0.12);
+}
 .smart-agent-step.active .smart-agent-step-mark {
-  border-color: rgba(120, 185, 255, 0.52);
+  border-color: rgba(120, 185, 255, 0.5);
   color: #d7ebff;
   background: rgba(70, 125, 230, 0.18);
-  box-shadow: 0 0 10px rgba(95, 165, 255, 0.20);
 }
 
 .smart-agent-step.paused { color: rgba(245, 210, 150, 0.9); }
 .smart-agent-step.paused .smart-agent-step-mark {
-  border-color: rgba(235, 184, 100, 0.42);
+  border-color: rgba(235, 184, 100, 0.4);
   color: rgba(255, 222, 170, 0.95);
   background: rgba(185, 125, 55, 0.14);
 }
 
-.smart-agent-detail {
-  margin-top: 9px;
-  padding-top: 8px;
-  border-top: 1px solid rgba(255, 255, 255, 0.065);
-  color: var(--text-muted);
-  font-family: var(--font-mono);
-  font-size: 10px;
-  line-height: 1.4;
+/* Summary/detail intentionally unused in the compact strip. */
+.smart-agent-summary,
+.smart-agent-detail,
+.smart-agent-spark {
+  display: none;
 }
 
 @media (max-width: 640px) {
   .smart-agent-status {
-    width: calc(100% - 20px);
-    top: 8px;
+    width: calc(100% - 16px);
+    top: 6px;
   }
-  .stage:has(.smart-agent-status:not([hidden])) .chat { padding-top: 164px; scroll-padding-top: 164px; }
-  .smart-agent-card { padding: 10px 11px; }
-  .smart-agent-steps { gap: 5px 8px; }
+  .stage:has(.smart-agent-status:not([hidden])) .chat {
+    padding-top: 50px;
+    scroll-padding-top: 50px;
+  }
+  .smart-agent-title { display: none; }
+  .smart-agent-card { padding: 5px 8px; gap: 6px; }
+  .smart-agent-step { padding: 2px 4px; font-size: 8px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

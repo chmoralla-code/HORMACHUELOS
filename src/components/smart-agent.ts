@@ -9,12 +9,28 @@ import {
 } from "./session";
 
 const FALLBACK_STEPS = [
-  ["scope", "Understand the request"],
-  ["inspect", "Inspect the workspace"],
-  ["implement", "Implement the requested work"],
-  ["validate", "Validate the result"],
-  ["deliver", "Deliver the result"],
+  ["scope", "Scope"],
+  ["inspect", "Inspect"],
+  ["implement", "Build"],
+  ["validate", "Check"],
+  ["deliver", "Done"],
 ] as const;
+
+/** Map verbose/legacy step labels to short UI words. */
+function shortStepLabel(id: string, label: string): string {
+  const byId: Record<string, string> = {
+    scope: "Scope",
+    inspect: "Inspect",
+    implement: "Build",
+    validate: "Check",
+    deliver: "Done",
+  };
+  if (byId[id]) return byId[id];
+  const words = label.trim().split(/\s+/).filter(Boolean);
+  if (words.length <= 1) return label.slice(0, 12) || "Step";
+  // Prefer the first meaningful word for unknown custom steps.
+  return words[0]!.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 12) || "Step";
+}
 
 function cleanText(value: unknown, fallback = ""): string {
   if (typeof value !== "string") return fallback;
@@ -33,10 +49,11 @@ function makePlan(payload: Record<string, unknown>): SmartAgentTaskState {
         const raw = candidate && typeof candidate === "object"
           ? candidate as Record<string, unknown>
           : {};
-        const fallback = FALLBACK_STEPS[index] || ["implement", "Implement the requested work"];
+        const fallback = FALLBACK_STEPS[index] || ["implement", "Build"];
+        const id = cleanText(raw.id, fallback[0]).toLowerCase();
         return {
-          id: cleanText(raw.id, fallback[0]).toLowerCase(),
-          label: cleanText(raw.label, fallback[1]),
+          id,
+          label: shortStepLabel(id, cleanText(raw.label, fallback[1])),
           state: stepState(raw.state),
         };
       })
@@ -158,9 +175,9 @@ export function applySmartAgentEvent(session: Session, event: AgentEvent): boole
 }
 
 function statusLabel(status: SmartAgentTaskState["status"]): string {
-  if (status === "completed") return "Verified";
+  if (status === "completed") return "Done";
   if (status === "paused") return "Paused";
-  return "Working";
+  return "On";
 }
 
 function stepMark(status: SmartAgentStepState): string {
@@ -196,25 +213,25 @@ export class SmartAgentPanel {
     clear(this.node);
     const card = div(`smart-agent-card smart-agent-${state.status}`);
     const head = div("smart-agent-head");
-    const title = div("smart-agent-title");
-    title.appendChild(el("span", { class: "smart-agent-spark", "aria-hidden": "true" }, ["✦"]));
-    title.appendChild(el("span", {}, [state.title || "Smart Agent"]));
-    head.appendChild(title);
+    head.appendChild(el("span", { class: "smart-agent-title" }, ["Smart Agent"]));
     head.appendChild(el("span", { class: `smart-agent-badge ${state.status}`, role: "status" }, [
       statusLabel(state.status),
     ]));
     card.appendChild(head);
-    if (state.summary) card.appendChild(el("p", { class: "smart-agent-summary" }, [state.summary]));
 
     const list = el("ol", { class: "smart-agent-steps", "aria-label": "Task progress" });
     for (const step of state.steps) {
-      const item = el("li", { class: `smart-agent-step ${step.state}` });
+      const item = el("li", {
+        class: `smart-agent-step ${step.state}`,
+        title: step.label,
+      });
       item.appendChild(el("span", { class: "smart-agent-step-mark", "aria-hidden": "true" }, [stepMark(step.state)]));
-      item.appendChild(el("span", { class: "smart-agent-step-label" }, [step.label]));
+      item.appendChild(el("span", { class: "smart-agent-step-label" }, [
+        shortStepLabel(step.id, step.label),
+      ]));
       list.appendChild(item);
     }
     card.appendChild(list);
-    if (state.detail) card.appendChild(el("div", { class: "smart-agent-detail", role: "status" }, [state.detail]));
     this.node.appendChild(card);
   }
 }

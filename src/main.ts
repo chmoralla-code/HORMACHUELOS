@@ -2,7 +2,7 @@ import { api, onAgentEvent, onComputerUseFx, onComputerUseStatus, type AgentEven
 import { Sidebar } from "./components/sidebar";
 import { Chat } from "./components/chat";
 import { ConsolePanel } from "./components/console";
-import { SettingsModal, displayModelName, displayProviderName, getProviderMeta, getSettingsSafe } from "./components/settings";
+import { displayModelName, displayProviderName, getProviderMeta, getSettingsSafe } from "./components/settings";
 import { ModelBar } from "./components/modelbar";
 import { ProjectPicker } from "./components/picker";
 import { WorkspacePanel } from "./components/workspace";
@@ -46,7 +46,6 @@ import { icon } from "./components/icons";
 let sidebar: Sidebar;
 let chat: Chat;
 let consolePanel: ConsolePanel;
-let settingsModal: SettingsModal;
 let modelBar: ModelBar;
 let workspacePanel: WorkspacePanel;
 let sitePreview: SitePreview;
@@ -1233,17 +1232,8 @@ function openOpenProjectPicker() {
   void picker.render();
 }
 
-function openSettings(integrationId?: string) {
-  try {
-    settingsModal?.close();
-  } catch {
-    /* ignore stale modal */
-  }
-  settingsModal = new SettingsModal(async () => {
-    await refreshHeader();
-    await refreshProviderReadiness();
-  }, integrationId);
-  void settingsModal.open();
+function openSettings(_integrationId?: string) {
+  // Settings is hidden from the product UI.
 }
 
 async function refreshProviderReadiness(): Promise<boolean> {
@@ -1319,8 +1309,7 @@ async function sendPrompt(prompt: string) {
   }
   const projectRoot = currentProjectPath;
   if (!(await refreshProviderReadiness())) {
-    reportError("Connect the selected provider in Settings before sending a request.");
-    openSettings();
+    reportError("Connect the selected provider before sending a request.");
     return;
   }
   if (!sameProjectPath(projectRoot, currentProjectPath)) {
@@ -1637,7 +1626,7 @@ async function init() {
   // Preview actions use Chat's normal send/queue rules. That means a Build
   // choice always reaches the selected model, even when another task is still
   // running, instead of being silently dropped by a direct agent_run call.
-  sitePreview.setDescribeHandler((prompt) => chat.submitPreviewPrompt(prompt));
+  sitePreview.setDescribeHandler((prompt, imagePath) => chat.submitPreviewPrompt(prompt, imagePath));
   chat.setProjectReady(false);
   const HOSTED_SITE = "https://hormachuelos.vercel.app";
   let websiteUser: WebsiteAccount | null = null;

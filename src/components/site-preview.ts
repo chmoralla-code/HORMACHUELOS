@@ -13,6 +13,17 @@ export type PreviewOpenOptions = {
   autoPickEntry?: boolean;
 };
 
+type SelectedEl = {
+  tag: string;
+  text: string;
+  path: string;
+  selector: string;
+  /** Same-origin preview node used for the design-mode screenshot. */
+  element: HTMLElement | null;
+  /** data:image/… screenshot of the clicked control, captured on select. */
+  shotDataUrl: string | null;
+};
+
 /** Result returned by the chat shell after a preview action creates a prompt. */
 export type PreviewPromptDispatch =
   | "sent"
@@ -21,15 +32,106 @@ export type PreviewPromptDispatch =
   | "usage_exhausted"
   | "stopping";
 
-type SelectedEl = {
-  tag: string;
-  text: string;
-  path: string;
-  selector: string;
-};
+export type PreviewDescribeHandler = (
+  prompt: string,
+  imagePath?: string | null,
+) => PreviewPromptDispatch | void;
 
 const PREVIEWABLE_EXT = /\.(html?|xhtml|css|js|mjs|ts|tsx|jsx|vue|svelte|apk|aab|ipa|exe|msi|dmg|wasm)$/i;
 const HTML_EXT = /\.html?$/i;
+
+/**
+ * Rasterize a same-origin preview element (with padding) to a PNG data URL.
+ * Design-mode chrome should be hidden by the caller before invoking this.
+ */
+async function rasterizePreviewElement(target: HTMLElement, pad = 24): Promise<string | null> {
+  const rect = target.getBoundingClientRect();
+  const width = Math.max(1, Math.ceil(rect.width + pad * 2));
+  const height = Math.max(1, Math.ceil(rect.height + pad * 2));
+  const scale = Math.min(2, typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1);
+
+  const clone = inlineElementClone(target);
+  clone.style.margin = "0";
+  clone.style.position = "static";
+  clone.style.transform = "none";
+  clone.style.left = "auto";
+  clone.style.top = "auto";
+
+  const wrapper = target.ownerDocument.createElement("div");
+  wrapper.setAttribute("xmlns", "http://www.w3.org/1999/xhtml");
+  wrapper.style.cssText = [
+    `width:${Math.max(1, Math.ceil(rect.width))}px`,
+    `height:${Math.max(1, Math.ceil(rect.height))}px`,
+    `padding:${pad}px`,
+    "box-sizing:content-box",
+    "background:#ffffff",
+    "display:flex",
+    "align-items:flex-start",
+    "justify-content:flex-start",
+    "overflow:hidden",
+    "font-family:system-ui,-apple-system,Segoe UI,sans-serif",
+  ].join(";");
+  wrapper.appendChild(clone);
+
+  const serialized = new XMLSerializer().serializeToString(wrapper);
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">` +
+    `<foreignObject width="100%" height="100%">${serialized}</foreignObject></svg>`;
+  const svgUrl = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+
+  const img = new Image();
+  img.decoding = "sync";
+  const loaded = new Promise<void>((resolve, reject) => {
+    img.onload = () => resolve();
+    img.onerror = () => reject(new Error("preview snapshot failed"));
+  });
+  img.src = svgUrl;
+  await loaded;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(width * scale));
+  canvas.height = Math.max(1, Math.round(height * scale));
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  ctx.scale(scale, scale);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, width, height);
+  ctx.drawImage(img, 0, 0, width, height);
+  return canvas.toDataURL("image/png");
+}
+
+function inlineElementClone(source: HTMLElement): HTMLElement {
+  const clone = source.cloneNode(true) as HTMLElement;
+  const walk = (src: Element, dst: Element) => {
+    if (src instanceof HTMLElement && dst instanceof HTMLElement) {
+      const cs = src.ownerDocument.defaultView?.getComputedStyle(src);
+      if (cs) {
+        let cssText = "";
+        for (let i = 0; i < cs.length; i++) {
+          const prop = cs.item(i);
+          if (!prop) continue;
+          cssText += `${prop}:${cs.getPropertyValue(prop)};`;
+        }
+        dst.style.cssText = cssText;
+      }
+      dst.classList.remove("horma-design-selected", "horma-design-hover");
+      if (dst instanceof HTMLImageElement && src instanceof HTMLImageElement) {
+        try {
+          dst.src = src.currentSrc || src.src;
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+    const srcKids = Array.from(src.children);
+    const dstKids = Array.from(dst.children);
+    for (let i = 0; i < srcKids.length && i < dstKids.length; i++) {
+      walk(srcKids[i]!, dstKids[i]!);
+    }
+  };
+  walk(source, clone);
+  return clone;
+}
 
 function decodePath(value: string): string {
   let path = value.trim();
@@ -453,7 +555,7 @@ export class SitePreview {
   private tabs: PreviewTab[] = [];
   private activeTabId = "";
   private selected: SelectedEl | null = null;
-  private onDescribe: ((prompt: string) => PreviewPromptDispatch | void) | null = null;
+  private onDescribe: PreviewDescribeHandler | null = null;
   private onStateChange: ((state: SessionPreviewState | null) => void) | null = null;
   private closing = false;
   private closeTimer: number | null = null;
@@ -665,7 +767,7 @@ export class SitePreview {
     this.editInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") {
         e.preventDefault();
-        this.submitDescribe();
+        void this.submitDescribe();
       }
     });
     const send = el("button", {
@@ -673,7 +775,7 @@ export class SitePreview {
       type: "button",
       title: "Apply with AI",
     }, ["Ask AI"]) as HTMLButtonElement;
-    send.addEventListener("click", () => this.submitDescribe());
+    send.addEventListener("click", () => void this.submitDescribe());
     this.editBar.append(tag, this.editInput, send);
 
     const resizeHandle = el("button", {
@@ -814,7 +916,7 @@ export class SitePreview {
     }
   }
 
-  setDescribeHandler(cb: (prompt: string) => PreviewPromptDispatch | void) {
+  setDescribeHandler(cb: PreviewDescribeHandler) {
     this.onDescribe = cb;
   }
 
@@ -1494,7 +1596,7 @@ export class SitePreview {
         ? "Software window"
         : "Desktop";
     if (this.designMode) {
-      return `${mode} · Design mode · click to select, describe a change`;
+      return `${mode} · Design mode · click an element, describe the change (sends a screenshot)`;
     }
     return assetMode
       ? `${mode} · Ready (asset mode)`
@@ -1594,13 +1696,20 @@ export class SitePreview {
       const t = e.target as HTMLElement | null;
       if (!t || t === doc.body || t === doc.documentElement) return;
       // Clicking the edit chip itself should not reselect.
-      if (t.classList.contains("horma-edit-chip")) return;
+      if (t.classList.contains("horma-edit-chip") || t.closest?.(".horma-edit-chip")) return;
       doc.querySelectorAll(".horma-design-selected").forEach((n) => n.classList.remove("horma-design-selected"));
       t.classList.add("horma-design-selected");
       const tag = (t.tagName || "el").toLowerCase();
       const text = (t.innerText || t.textContent || "").trim().replace(/\s+/g, " ").slice(0, 80);
       const selector = this.cssPath(t);
-      this.selected = { tag, text, path: this.entryPath, selector };
+      this.selected = {
+        tag,
+        text,
+        path: this.entryPath,
+        selector,
+        element: t,
+        shotDataUrl: null,
+      };
       const tagEl = this.editBar.querySelector("#site-preview-edit-tag");
       if (tagEl) tagEl.textContent = tag;
       this.editInput.placeholder = text ? `Change “${text.slice(0, 40)}”…` : "Describe the change";
@@ -1640,6 +1749,11 @@ export class SitePreview {
         doc.removeEventListener("scroll", reposition, true);
         doc.defaultView?.removeEventListener("resize", reposition);
       };
+
+      // Capture the clicked control (without the edit chrome) for the AI.
+      void this.captureSelectionShot(t).then((shot) => {
+        if (this.selected?.element === t) this.selected.shotDataUrl = shot;
+      });
     };
     doc.addEventListener("mousemove", onMove, true);
     doc.addEventListener("click", onClick, true);
@@ -1672,6 +1786,33 @@ export class SitePreview {
       if (cur?.tagName === "BODY") break;
     }
     return parts.join(" > ");
+  }
+
+  /**
+   * Snapshot the clicked preview control (design chrome hidden) so the AI can
+   * see exactly what the user selected instead of relying on CSS selectors.
+   */
+  private async captureSelectionShot(target: HTMLElement): Promise<string | null> {
+    const doc = target.ownerDocument;
+    if (!doc) return null;
+    const chip = doc.querySelector(".horma-edit-chip") as HTMLElement | null;
+    const chipDisplay = chip?.style.display;
+    const hadSelected = target.classList.contains("horma-design-selected");
+    const hadHover = target.classList.contains("horma-design-hover");
+    try {
+      if (chip) chip.style.display = "none";
+      target.classList.remove("horma-design-selected", "horma-design-hover");
+      doc.querySelectorAll(".horma-design-hover").forEach((n) => n.classList.remove("horma-design-hover"));
+      // Let the browser paint without the design outline/chip.
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      return await rasterizePreviewElement(target, 28);
+    } catch {
+      return null;
+    } finally {
+      if (chip) chip.style.display = chipDisplay || "";
+      if (hadSelected) target.classList.add("horma-design-selected");
+      if (hadHover) target.classList.add("horma-design-hover");
+    }
   }
 
   private requestBuild(target: "apk" | "software") {
@@ -1742,14 +1883,52 @@ When the task is complete, report the live public URL, GitHub repository URL, Ve
     this.dispatchGeneratedPrompt(prompt, "Website publication");
   }
 
-  private submitDescribe() {
+  private async submitDescribe() {
     const text = this.editInput.value.trim();
     if (!text) return;
     const sel = this.selected;
-    const prompt = sel
-      ? `In the preview (${sel.path}), update the <${sel.tag}> element${sel.text ? ` that says “${sel.text}”` : ""} (selector: ${sel.selector}).\n\nRequested change: ${text}`
-      : `In the preview (${this.entryPath}), apply this design change:\n\n${text}`;
     this.editInput.value = "";
-    this.onDescribe?.(prompt);
+    this.statusEl.textContent = "Capturing selection for AI…";
+
+    let shot = sel?.shotDataUrl || null;
+    if (!shot && sel?.element?.isConnected) {
+      shot = await this.captureSelectionShot(sel.element);
+      if (this.selected === sel) this.selected.shotDataUrl = shot;
+    }
+
+    let imagePath: string | null = null;
+    if (shot) {
+      try {
+        const raw = shot.includes(",") ? shot.split(",")[1] : shot;
+        imagePath = await api.savePastedImage(raw, "image/png");
+      } catch {
+        imagePath = null;
+      }
+    }
+
+    const previewLabel = sel?.path || this.entryPath || "the current preview";
+    const prompt = imagePath
+      ? `In the preview (${previewLabel}), update the element shown in the attached screenshot (the control I clicked in Design mode).\n\nRequested change: ${text}`
+      : sel
+        ? `In the preview (${previewLabel}), update the clicked <${sel.tag}>${sel.text ? ` (“${sel.text}”)` : ""} element.\n\nRequested change: ${text}`
+        : `In the preview (${previewLabel}), apply this design change:\n\n${text}`;
+
+    if (!this.onDescribe) {
+      this.statusEl.textContent = "Preview actions are not available until chat is ready.";
+      return;
+    }
+    const dispatch = this.onDescribe(prompt, imagePath) || "sent";
+    this.statusEl.textContent =
+      dispatch === "queued"
+        ? "Design change queued — it will start after the active task finishes."
+        : dispatch === "needs_project"
+          ? "Open or create a project before sending a design change."
+          : dispatch === "usage_exhausted"
+            ? "No usage remains for this design change."
+            : dispatch === "stopping"
+              ? "The current task is stopping — ask again after it ends."
+              : imagePath
+                ? "Design change + screenshot sent to the active model."
+                : "Design change sent to the active model.";
   }
 }

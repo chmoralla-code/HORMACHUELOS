@@ -969,9 +969,15 @@ export class Chat {
   /**
    * Send a prompt generated outside the composer while preserving the same
    * project, usage, stop, and pending-queue rules as a typed chat message.
+   * Optional `imagePath` is attached like a pasted screenshot so vision models
+   * (and auto-describe) can see the clicked preview control.
    */
-  submitPreviewPrompt(prompt: string): ComposerPromptDispatch {
-    const text = prompt.trim();
+  submitPreviewPrompt(prompt: string, imagePath?: string | null): ComposerPromptDispatch {
+    const trimmedImage = String(imagePath || "").trim();
+    const body = prompt.trim();
+    const text = trimmedImage
+      ? (body ? `[Attached image: ${trimmedImage}]\n${body}` : `[Attached image: ${trimmedImage}]`)
+      : body;
     if (!text) return "stopping";
     if (!this.projectReady) {
       this.onNeedProject();
@@ -1249,7 +1255,7 @@ export class Chat {
     if (!this.projectReady) {
       this.input.placeholder = "Open or create a project, then ask anything…";
     } else if (!this.providerReady) {
-      this.input.placeholder = `Connect ${this.providerLabel} in Settings to start…`;
+      this.input.placeholder = `Connect ${this.providerLabel} to start…`;
     } else if (this.usageExhausted && this.running) {
       this.input.placeholder =
         this.usageExhaustedReason ||
@@ -1292,7 +1298,7 @@ export class Chat {
     this.sendBtn.title = blocked
       ? this.usageExhausted
         ? this.usageExhaustedReason || "Usage limit reached. Cannot continue until it resets."
-        : `Connect ${this.providerLabel} in Settings`
+        : `Connect ${this.providerLabel}`
       : "Send";
     this.composer.classList.toggle("usage-exhausted", this.usageExhausted);
     this.composer.querySelector(".composer")?.classList.toggle("usage-exhausted", this.usageExhausted);
@@ -1315,9 +1321,6 @@ export class Chat {
       empty.appendChild(el("p", { class: "chat-empty-provider" }, [
         `Connect ${this.providerLabel} before sending your first request.`,
       ]));
-      const connect = el("button", { class: "btn primary", type: "button" }, ["Connect provider"]);
-      connect.addEventListener("click", () => this.onOpenSettings());
-      empty.appendChild(connect);
     }
     this.node.appendChild(empty);
   }

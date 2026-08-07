@@ -654,7 +654,7 @@ export class Sidebar {
     addAction("new", "New Build", this.onNewProject);
     addAction("open", "Open Project", this.onOpenProject);
     addAction("export", "Client Pack", this.onExportClientPack);
-    addAction("settings", "Settings", this.onOpenSettings);
+    // Settings is intentionally hidden from the product UI.
 
     const updateToggleState = () => {
       const open = menu.open;
