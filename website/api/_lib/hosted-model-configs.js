@@ -15,6 +15,7 @@ import {
 
 export const HORMACHUELOS_FREE_PROVIDER = "hormachuelos_free";
 export const XAI_PROVIDER = "xai";
+export const COMMANDCODE_PROVIDER = "commandcode";
 // A provider profile is stored alongside model aliases in the existing
 // encrypted, service-role-only table. Keeping it in the same protected store
 // means a dashboard upgrade does not require a public schema change before an
@@ -30,6 +31,7 @@ export const PROVIDER_PROFILE_ALIAS = "hormachuelos-provider-profile-v1";
 export const BUILTIN_HOSTED_PROVIDERS = Object.freeze([
   HORMACHUELOS_FREE_PROVIDER,
   XAI_PROVIDER,
+  COMMANDCODE_PROVIDER,
   "openai",
   "deepseek",
   "openrouter",
@@ -43,7 +45,10 @@ export const BUILTIN_HOSTED_PROVIDERS = Object.freeze([
 // can be safely represented as a server-side OpenAI-compatible route.
 const LOCAL_ONLY_PROVIDERS = new Set(["cursor", "ollama"]);
 const PROVIDER_ALIAS_RE = /^[a-z][a-z0-9_-]{0,48}$/;
-const ALIAS_RE = /^[a-z0-9][a-z0-9._-]{0,80}$/;
+// Model aliases may include provider-prefixed ids (e.g. "deepseek/deepseek-v4-pro")
+// so the desktop's real model ids can be used as public aliases. The alias is
+// used only as an exact-map lookup key, never in a URL, path, or SQL value.
+const ALIAS_RE = /^[a-zA-Z0-9][a-zA-Z0-9._\/-]{0,100}$/;
 let routeCache = null;
 let routeCacheAt = 0;
 const CACHE_MS = 10_000;
@@ -54,6 +59,12 @@ const PROVIDER_DEFAULTS = Object.freeze({
     baseUrl: "https://api.neuralwatt.com/v1",
   },
   [XAI_PROVIDER]: { displayName: "xAI", baseUrl: "https://api.x.ai/v1" },
+  // Command Code uses its own hosted gateway, which is not OpenAI-compatible.
+  // The v1 proxy translates requests into the /alpha/generate envelope.
+  [COMMANDCODE_PROVIDER]: {
+    displayName: "HORMACHUELOS NEW MODELS",
+    baseUrl: "https://api.commandcode.ai",
+  },
   openai: { displayName: "OpenAI", baseUrl: "https://api.openai.com/v1" },
   deepseek: { displayName: "DeepSeek", baseUrl: "https://api.deepseek.com/v1" },
   openrouter: { displayName: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1" },
@@ -132,10 +143,12 @@ function normalizeProvider(value) {
 }
 
 function normalizeAlias(value) {
-  const alias = String(value || "").trim().toLowerCase();
+  // Preserve case: Command Code model ids are case-sensitive (e.g.
+  // "Qwen/Qwen3.6-Max-Preview", "MiniMaxAI/MiniMax-M3").
+  const alias = String(value || "").trim();
   if (!ALIAS_RE.test(alias)) {
     throw Object.assign(
-      new Error("Model alias must use lowercase letters, numbers, dots, dashes, or underscores."),
+      new Error("Model alias uses unsupported characters."),
       { status: 400 },
     );
   }
@@ -222,6 +235,7 @@ export function hostedProviderDisplayName(providerId) {
   const known = {
     [HORMACHUELOS_FREE_PROVIDER]: "HORMACHUELOS FREE",
     [XAI_PROVIDER]: "xAI",
+    [COMMANDCODE_PROVIDER]: "HORMACHUELOS NEW MODELS",
     openai: "OpenAI",
     cursor: "OpenAI",
     deepseek: "DeepSeek",

@@ -33,7 +33,17 @@
           <div class="workspace-menu-anchor" id="workspace-menu-anchor">
             <button
               type="button"
-              class="drawer-btn workspace-menu-btn"
+              class="drawer-btn drawer-btn-right"
+              id="drawer-right-btn"
+              aria-pressed="true"
+              title="Hide right panels"
+              aria-label="Hide right panels"
+            >
+              <span class="drawer-btn-bars" aria-hidden="true"><i></i><i></i><i></i></span>
+            </button>
+            <button
+              type="button"
+              class="workspace-menu-btn workspace-menu-caret"
               id="workspace-menu-btn"
               aria-haspopup="menu"
               aria-expanded="false"
@@ -41,7 +51,7 @@
               title="Workspace menu"
               aria-label="Workspace menu"
             >
-              <span class="drawer-btn-bars" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span class="workspace-menu-caret-sym" aria-hidden="true">▾</span>
             </button>
             <div class="workspace-menu" id="workspace-menu" role="menu" aria-label="Workspace actions" hidden></div>
           </div>

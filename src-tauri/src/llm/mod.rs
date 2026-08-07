@@ -118,9 +118,12 @@ pub struct LlmResponse {
 }
 
 pub mod anthropic;
+pub mod commandcode;
 pub mod gemini;
 pub mod glm;
 pub mod openai;
+
+pub use openai::{build_client, request_error};
 
 pub fn provider_needs_key(provider: &str) -> bool {
     if crate::config::is_custom_hosted_provider_alias(provider) {
@@ -146,6 +149,7 @@ pub fn provider_default_base_url(provider: &str) -> Option<&'static str> {
         "hormachuelos_free" => Some("https://hormachuelos.vercel.app/api/v1"),
         "anthropic" => Some("https://api.anthropic.com"),
         "gemini" => Some("https://generativelanguage.googleapis.com"),
+        "commandcode" => Some(crate::config::COMMANDCODE_API_BASE_URL),
         _ => None,
     }
 }
@@ -213,6 +217,21 @@ pub fn build_provider_with_effort(
         }
         "anthropic" => Ok(Box::new(anthropic::Anthropic::new(api_key, base, model))),
         "gemini" | "google" => Ok(Box::new(gemini::Gemini::new(api_key, base, model))),
+        "commandcode" => {
+            // Through the Hormachuelos hosted proxy the OpenAI-compatible
+            // chat/completions endpoint is used (the proxy translates to the
+            // Command Code gateway). Only a direct BYOK connection speaks the
+            // native /alpha/generate protocol.
+            let is_hosted_proxy = base.is_some_and(|url| url.contains("hormachuelos.vercel.app"));
+            if is_hosted_proxy {
+                Ok(Box::new(
+                    openai::OpenAi::new(&key, base, model, &prov)
+                        .with_reasoning_effort(model_effort),
+                ))
+            } else {
+                Ok(Box::new(commandcode::CommandCode::new(api_key, base, model)))
+            }
+        }
         "ollama" => Ok(Box::new(openai::OpenAi::new(&key, base, model, &prov))),
         "openrouter" => Ok(Box::new(openai::OpenAi::new(&key, base, model, &prov))),
         "pollinations" => Ok(Box::new(openai::OpenAi::new(&key, base, model, &prov))),
@@ -258,6 +277,7 @@ mod tests {
             "pollinations",
             "deepseek",
             "glm",
+            "commandcode",
         ] {
             assert!(
                 provider_default_base_url(provider).is_some(),

@@ -1,11 +1,13 @@
 use crate::llm::{
-    ChatMessage, ContentSink, LlmProvider, LlmResponse, ReasoningSink, ToolCall, ToolCallSink,
+    build_client, request_error, ChatMessage, ContentSink, LlmProvider, LlmResponse, ReasoningSink,
+    ToolCall, ToolCallSink,
 };
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use hmac::{Hmac, Mac};
 use serde_json::{json, Value};
 use sha2::Sha256;
+use std::time::Duration;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -47,7 +49,7 @@ impl Glm {
     pub fn new(api_key: &str, base_url: Option<&str>, model: &str) -> Self {
         let default_base = "https://open.bigmodel.cn/api/paas/v4";
         Self {
-            client: reqwest::Client::new(),
+            client: build_client(),
             raw_key: api_key.to_string(),
             base_url: base_url
                 .unwrap_or(default_base)
@@ -109,19 +111,46 @@ impl LlmProvider for Glm {
             body["tool_choice"] = json!("auto");
         }
 
-        let res = self
-            .client
-            .post(format!("{}/chat/completions", self.base_url))
-            .bearer_auth(&token)
-            .json(&body)
-            .send()
-            .await?;
-
-        let status = res.status();
-        let text = res.text().await.context("failed reading GLM response")?;
-        if !status.is_success() {
-            return Err(anyhow!("GLM error {status}: {text}"));
+        // Retry transient upstream failures (429/5xx) with short backoff so a
+        // blip does not abort an active run.
+        let mut response = None;
+        for attempt in 0..3 {
+            let result = self
+                .client
+                .post(format!("{}/chat/completions", self.base_url))
+                .bearer_auth(&token)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|error| request_error(&error));
+            match result {
+                Ok(res) => {
+                    let status = res.status();
+                    let retryable = matches!(status.as_u16(), 429 | 502 | 503 | 504);
+                    let text = res
+                        .text()
+                        .await
+                        .context("failed reading GLM response")?;
+                    if retryable && attempt < 2 {
+                        tokio::time::sleep(Duration::from_millis(400 * (1 << attempt))).await;
+                        continue;
+                    }
+                    if !status.is_success() {
+                        return Err(anyhow!("GLM error {status}: {text}"));
+                    }
+                    response = Some(text);
+                    break;
+                }
+                Err(error) => {
+                    if attempt < 2 {
+                        tokio::time::sleep(Duration::from_millis(400 * (1 << attempt))).await;
+                        continue;
+                    }
+                    return Err(error);
+                }
+            }
         }
+        let text = response.ok_or_else(|| anyhow!("GLM did not return a response."))?;
 
         let v: Value = serde_json::from_str(&text)?;
         let choice = v

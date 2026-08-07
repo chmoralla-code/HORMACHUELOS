@@ -423,6 +423,12 @@ async fn list_provider_models(
             .await
             .map_err(|e| e.to_string());
     }
+    if provider.eq_ignore_ascii_case("commandcode") {
+        return Ok(llm::commandcode::KNOWN_MODELS
+            .iter()
+            .map(|model| model.to_string())
+            .collect());
+    }
     let license = license::LicenseStatus::load().unwrap_or_default();
     let use_hosted = license::should_use_hosted_for_provider(&license, &provider);
     if config::is_custom_hosted_provider_alias(&provider) && !use_hosted {

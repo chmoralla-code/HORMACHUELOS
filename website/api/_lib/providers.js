@@ -2,6 +2,7 @@
 import {
   activeAllHostedModelRoutes,
   activeHostedModelRoutes,
+  COMMANDCODE_PROVIDER,
   HORMACHUELOS_FREE_PROVIDER,
   XAI_PROVIDER,
 } from "./hosted-model-configs.js";
@@ -42,6 +43,12 @@ const PROVIDERS = {
     base: "https://gen.pollinations.ai/v1",
     env: ["POLLINATIONS_API_KEY"],
     optionalKey: true,
+  },
+  // Command Code is a managed provider: its credential lives in the encrypted
+  // provider-profile row and the proxy translates to /alpha/generate. There is
+  // no environment key and no OpenAI-compatible fallback.
+  [COMMANDCODE_PROVIDER]: {
+    noFallback: true,
   },
   // Backward-compatible route for installations published before managed
   // configurations. New HORMACHUELOS models use encrypted database rows or
@@ -162,6 +169,13 @@ function environmentUpstream(providerId) {
   }
   const cfg = PROVIDERS[id];
   if (!cfg) return { error: `Unsupported hosted provider: ${id}` };
+
+  // Managed-only providers (e.g. commandcode) have no environment credential;
+  // their key lives in the encrypted provider-profile row. Report the missing
+  // key so resolveUpstream's managed-route lookup still wins when configured.
+  if (!Array.isArray(cfg.env)) {
+    return { error: `Server missing API key for provider '${id}'.`, managedOnly: true };
+  }
 
   let apiKey = "";
   for (const name of cfg.env) {

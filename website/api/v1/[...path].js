@@ -12,6 +12,12 @@ import {
 import { billableTokens } from "../_lib/plans.js";
 import { resolveHostedModel, resolveUpstream } from "../_lib/providers.js";
 import { publicHostedProviderCatalog } from "../_lib/hosted-model-configs.js";
+import {
+  buildCommandCodeRequest,
+  commandCodeGenerateUrl,
+  commandCodeHeaders,
+  relayCommandCodeStream,
+} from "../_lib/commandcode-proxy.js";
 import { accountFromRequest } from "../_lib/auth.js";
 
 export const config = {
@@ -311,6 +317,7 @@ async function handleChat(req, res) {
   if (modelResolution.error) return json(res, 400, { error: modelResolution.error }, req);
   const model = modelResolution.requestedModel;
   const stream = Boolean(body.stream);
+  const isCommandCode = providerHint === "commandcode";
   const forwardBody = { ...body, model: modelResolution.upstreamModel, stream };
   delete forwardBody.provider;
   delete forwardBody.horma_provider;
@@ -321,6 +328,31 @@ async function handleChat(req, res) {
   }
 
   async function requestUpstream(route) {
+    // Command Code is not OpenAI-compatible: translate the OpenAI-style body
+    // into the /alpha/generate envelope and send the gateway's required
+    // headers. `isCommandCodeRoute` tells the streaming relay to translate the
+    // NDJSON stream back into OpenAI SSE.
+    if (isCommandCode) {
+      const ccBody = buildCommandCodeRequest({
+        model: route.upstreamModel,
+        messages: forwardBody.messages,
+        tools: forwardBody.tools,
+        system: forwardBody.system,
+        maxTokens: forwardBody.max_tokens || forwardBody.max_completion_tokens,
+        temperature: forwardBody.temperature,
+      });
+      const response = await fetch(commandCodeGenerateUrl(route.baseUrl), {
+        method: "POST",
+        headers: commandCodeHeaders(route.apiKey),
+        body: JSON.stringify(ccBody),
+      });
+      return {
+        response,
+        errorText: response.ok ? "" : await response.text(),
+        route,
+        isCommandCodeRoute: true,
+      };
+    }
     const routeBody = { ...forwardBody, model: route.upstreamModel };
     const response = await fetch(`${route.baseUrl}/chat/completions`, {
       method: "POST",
@@ -336,6 +368,7 @@ async function handleChat(req, res) {
       response,
       errorText: response.ok ? "" : await response.text(),
       route,
+      isCommandCodeRoute: false,
     };
   }
 
@@ -371,6 +404,59 @@ async function handleChat(req, res) {
   const upstreamRes = upstreamAttempt.response;
 
   if (!stream) {
+    // Command Code always streams NDJSON upstream; translate the streamed
+    // events into a single OpenAI-style JSON response for non-stream clients.
+    if (upstreamAttempt.isCommandCodeRoute) {
+      if (!upstreamRes.ok) {
+        return json(
+          res,
+          upstreamRes.status,
+          { error: "Upstream error", detail: (upstreamAttempt.errorText || "").slice(0, 800) },
+          req,
+        );
+      }
+      let textOut = "";
+      let usageRaw = 0;
+      const toolCalls = [];
+      await relayCommandCodeStream({
+        reader: upstreamRes.body.getReader(),
+        onSse: (line) => {
+          try {
+            const parsed = JSON.parse(line.replace(/^data: /, "").trim());
+            const delta = parsed?.choices?.[0]?.delta;
+            if (delta?.content) textOut += delta.content;
+            if (Array.isArray(delta?.tool_calls)) {
+              for (const tc of delta.tool_calls) {
+                toolCalls.push({
+                  id: tc.id || "call",
+                  type: "function",
+                  function: { name: tc.function?.name || "", arguments: tc.function?.arguments || "{}" },
+                });
+              }
+            }
+            const usage = parsed?.usage?.total_tokens;
+            if (usage) usageRaw = Math.max(usageRaw, usage);
+          } catch { /* ignore */ }
+        },
+      });
+      const data = {
+        id: `chatcmpl-horma-cc-${Date.now()}`,
+        object: "chat.completion",
+        model,
+        choices: [{
+          index: 0,
+          message: { role: "assistant", content: textOut, tool_calls: toolCalls.length ? toolCalls : undefined },
+          finish_reason: toolCalls.length ? "tool_calls" : "stop",
+        }],
+        usage: { total_tokens: usageRaw },
+      };
+      await recordUsage(license, providerHint, model, usageRaw || 500);
+      for (const [k, v] of Object.entries(corsHeaders(req))) res.setHeader(k, v);
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/json");
+      res.setHeader("X-Horma-Tokens-Used", String(license.tokens_used));
+      return res.end(JSON.stringify(data));
+    }
     const text = upstreamRes.ok ? await upstreamRes.text() : upstreamAttempt.errorText;
     let data;
     try {
@@ -437,6 +523,17 @@ async function handleChat(req, res) {
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
   res.setHeader("X-Accel-Buffering", "no");
+
+  // Command Code streams NDJSON events; translate them into OpenAI SSE so the
+  // desktop client can consume the stream exactly like any other provider.
+  if (upstreamAttempt.isCommandCodeRoute) {
+    const usageRaw = await relayCommandCodeStream({
+      reader: upstreamRes.body.getReader(),
+      onSse: (line) => res.write(line),
+    });
+    await recordUsage(license, providerHint, model, usageRaw || 800);
+    return res.end();
+  }
 
   const reader = upstreamRes.body.getReader();
   const decoder = new TextDecoder();

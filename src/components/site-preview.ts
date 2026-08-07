@@ -1528,14 +1528,43 @@ export class SitePreview {
     style.textContent = `
       html.horma-design, html.horma-design body { cursor: crosshair !important; }
       .horma-design-hover {
-        outline: 2px solid rgba(90, 160, 255, 0.85) !important;
+        outline: 2px solid rgba(90, 160, 255, 0.9) !important;
         outline-offset: 2px !important;
+        box-shadow: 0 0 0 4px rgba(90, 160, 255, 0.22) !important;
+        cursor: pointer !important;
       }
       .horma-design-selected {
-        outline: 2px solid #5aa0ff !important;
+        outline: 3px solid #5aa0ff !important;
         outline-offset: 2px !important;
-        box-shadow: 0 0 0 1px rgba(90, 160, 255, 0.35) !important;
+        box-shadow: 0 0 0 6px rgba(90, 160, 255, 0.35), 0 4px 24px rgba(0, 0, 0, 0.3) !important;
+        transition: outline-color 0.15s ease, box-shadow 0.15s ease !important;
+        animation: hormaDesignPulse 1.6s ease-in-out infinite !important;
       }
+      @keyframes hormaDesignPulse {
+        0%, 100% { outline-color: #5aa0ff; }
+        50% { outline-color: #8fc2ff; }
+      }
+      .horma-edit-chip {
+        position: fixed !important;
+        z-index: 2147483647 !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        gap: 6px !important;
+        padding: 7px 12px !important;
+        border-radius: 999px !important;
+        background: #181818 !important;
+        border: 1px solid rgba(90, 160, 255, 0.6) !important;
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45) !important;
+        color: #e8e6df !important;
+        font: 600 12px/1 system-ui, -apple-system, "Segoe UI", sans-serif !important;
+        letter-spacing: 0.01em !important;
+        cursor: pointer !important;
+        user-select: none !important;
+        pointer-events: auto !important;
+        transition: transform 0.12s ease, box-shadow 0.12s ease !important;
+      }
+      .horma-edit-chip:hover { transform: translateY(-1px) !important; box-shadow: 0 8px 26px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(90, 160, 255, 0.9) !important; }
+      .horma-edit-chip .horma-edit-chip-ico { color: #5aa0ff !important; font-size: 13px !important; }
     `;
     doc.head.appendChild(style);
     doc.documentElement.classList.add("horma-design");
@@ -1546,11 +1575,26 @@ export class SitePreview {
       doc.querySelectorAll(".horma-design-hover").forEach((n) => n.classList.remove("horma-design-hover"));
       t.classList.add("horma-design-hover");
     };
+    const positionEditChip = (chip: HTMLElement, target: HTMLElement) => {
+      const rect = target.getBoundingClientRect();
+      const top = Math.max(6, rect.top - 44);
+      const left = Math.min(
+        Math.max(6, rect.left + rect.width - 150),
+        (doc.defaultView?.innerWidth || 0) - 156,
+      );
+      chip.style.top = `${top}px`;
+      chip.style.left = `${left}px`;
+    };
+    const removeEditChip = () => {
+      doc.querySelector(".horma-edit-chip")?.remove();
+    };
     const onClick = (e: MouseEvent) => {
       e.preventDefault();
       e.stopPropagation();
       const t = e.target as HTMLElement | null;
       if (!t || t === doc.body || t === doc.documentElement) return;
+      // Clicking the edit chip itself should not reselect.
+      if (t.classList.contains("horma-edit-chip")) return;
       doc.querySelectorAll(".horma-design-selected").forEach((n) => n.classList.remove("horma-design-selected"));
       t.classList.add("horma-design-selected");
       const tag = (t.tagName || "el").toLowerCase();
@@ -1559,14 +1603,52 @@ export class SitePreview {
       this.selected = { tag, text, path: this.entryPath, selector };
       const tagEl = this.editBar.querySelector("#site-preview-edit-tag");
       if (tagEl) tagEl.textContent = tag;
-      this.editInput.focus();
       this.editInput.placeholder = text ? `Change “${text.slice(0, 40)}”…` : "Describe the change";
+
+      // Floating "Edit this element" chip near the selection.
+      removeEditChip();
+      const chip = doc.createElement("div");
+      chip.className = "horma-edit-chip";
+      chip.setAttribute("role", "button");
+      chip.setAttribute("tabindex", "0");
+      const ico = doc.createElement("span");
+      ico.className = "horma-edit-chip-ico";
+      ico.textContent = "✎";
+      const label = doc.createElement("span");
+      label.textContent = "Edit this element";
+      chip.append(ico, label);
+      chip.addEventListener("click", (ce: MouseEvent) => {
+        ce.preventDefault();
+        ce.stopPropagation();
+        removeEditChip();
+        this.editInput.focus();
+      });
+      chip.addEventListener("keydown", (ke: KeyboardEvent) => {
+        if (ke.key === "Enter" || ke.key === " ") {
+          ke.preventDefault();
+          removeEditChip();
+          this.editInput.focus();
+        }
+      });
+      doc.body.appendChild(chip);
+      positionEditChip(chip, t);
+      // Reposition as the page scrolls / resizes so the chip follows the element.
+      const reposition = () => positionEditChip(chip, t);
+      doc.addEventListener("scroll", reposition, true);
+      doc.defaultView?.addEventListener("resize", reposition);
+      (chip as any).__hormaReposition = () => {
+        doc.removeEventListener("scroll", reposition, true);
+        doc.defaultView?.removeEventListener("resize", reposition);
+      };
     };
     doc.addEventListener("mousemove", onMove, true);
     doc.addEventListener("click", onClick, true);
     (doc as any).__hormaDesignCleanup = () => {
       doc.removeEventListener("mousemove", onMove, true);
       doc.removeEventListener("click", onClick, true);
+      const chip = doc.querySelector(".horma-edit-chip") as (HTMLElement & { __hormaReposition?: () => void }) | null;
+      (chip as any)?.__hormaReposition?.();
+      chip?.remove();
       doc.documentElement.classList.remove("horma-design");
     };
   }

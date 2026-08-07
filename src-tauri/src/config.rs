@@ -6,6 +6,9 @@ use std::path::PathBuf;
 /// truth so an xAI key is never accidentally sent to the Cursor or OpenAI API.
 pub const XAI_API_BASE_URL: &str = "https://api.x.ai/v1";
 
+/// Command Code's hosted API. The chat endpoint is `/alpha/generate`.
+pub const COMMANDCODE_API_BASE_URL: &str = "https://api.commandcode.ai";
+
 const BUILTIN_PROVIDER_IDS: &[&str] = &[
     "deepseek",
     "openrouter",
@@ -18,6 +21,7 @@ const BUILTIN_PROVIDER_IDS: &[&str] = &[
     "gemini",
     "ollama",
     "pollinations",
+    "commandcode",
 ];
 
 fn settings_path() -> Result<PathBuf> {
@@ -289,6 +293,21 @@ impl Settings {
         {
             s.base_url = Some("https://gen.pollinations.ai/v1".into());
         }
+        if s.provider == "commandcode" {
+            // The direct Command Code gateway is the BYOK endpoint; the
+            // Hormachuelos hosted proxy serves paid plans with the shared
+            // server-side key. Preserve whichever is configured.
+            let hosted = crate::license::hosted_chat_base_url();
+            if s.base_url.as_deref().is_none_or(|url| {
+                !url.eq_ignore_ascii_case(hosted.as_str())
+                    && !url.eq_ignore_ascii_case(COMMANDCODE_API_BASE_URL)
+            }) {
+                s.base_url = Some(hosted);
+            }
+            if s.model.trim().is_empty() {
+                s.model = "deepseek/deepseek-v4-flash".into();
+            }
+        }
         s.validate()?;
         Ok(s)
     }
@@ -364,6 +383,17 @@ impl Settings {
             ensure!(
                 self.base_url.as_deref() == Some(crate::license::hosted_chat_base_url().as_str()),
                 "Server-managed provider aliases use the protected Hormachuelos endpoint."
+            );
+        }
+        if self.provider == "commandcode" {
+            let hosted = crate::license::hosted_chat_base_url();
+            let allowed = matches!(
+                self.base_url.as_deref(),
+                Some(COMMANDCODE_API_BASE_URL)
+            ) || self.base_url.as_deref().is_some_and(|url| url.eq_ignore_ascii_case(&hosted));
+            ensure!(
+                allowed,
+                "COMMANDCODE uses the Command Code gateway or the Hormachuelos hosted proxy."
             );
         }
         Ok(())

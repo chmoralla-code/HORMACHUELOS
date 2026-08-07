@@ -251,6 +251,9 @@ pub fn should_use_hosted(status: &LicenseStatus) -> bool {
 /// Whether a selected provider should be routed through the hosted proxy.
 /// Ollama always uses its configured local host. Cursor always uses its local
 /// SDK because Cursor model ids are not OpenAI-compatible proxy model ids.
+/// Command Code (HORMACHUELOS NEW MODELS) uses the shared server-side key
+/// through the hosted proxy when a paid plan is active; a locally saved BYOK
+/// key takes precedence upstream in agent.rs.
 pub fn should_use_hosted_for_provider(status: &LicenseStatus, provider: &str) -> bool {
     !provider.eq_ignore_ascii_case("ollama")
         && !provider.eq_ignore_ascii_case("cursor")

@@ -19,7 +19,8 @@ export type ProviderDef = {
     | "ollama"
     | "openai"
     | "grok"
-    | "hormachuelos";
+    | "hormachuelos"
+    | "commandcode";
   logoSrc: string;
   defaultModel: string;
   defaultBaseUrl: string;
@@ -152,6 +153,57 @@ export const PROVIDERS: ProviderDef[] = [
       "big-pickle",
     ],
     hidden: true,
+  },
+  {
+    id: "commandcode",
+    label: "HORMACHUELOS NEW MODELS",
+    logoKey: "commandcode",
+    logoSrc: "./logos/commandcode.svg",
+    defaultModel: "deepseek/deepseek-v4-flash",
+    // Hosted through the shared server-side key on paid plans; direct BYOK
+    // with a local key also works (agent.rs picks the native gateway).
+    defaultBaseUrl: "https://hormachuelos.vercel.app/api/v1",
+    keyUrl: "https://commandcode.ai",
+    // Clients on a paid Hormachuelos plan use the shared server-side key
+    // through the hosted proxy. A local BYOK key is optional.
+    keyRequired: false,
+    hostedManaged: true,
+    // The gateway accepts the same model ids as `cmd --list-models`.
+    models: [
+      "gpt-5.6-luna",
+      "moonshotai/Kimi-K3",
+      "thinkingmachines/inkling",
+      "thinkingmachines/inkling-small",
+      "deepseek/deepseek-v4-pro",
+      "deepseek/deepseek-v4-flash",
+      "moonshotai/Kimi-K2.7-Code",
+      "moonshotai/Kimi-K2.7-Code-Highspeed",
+      "moonshotai/Kimi-K2.6",
+      "moonshotai/Kimi-K2.5",
+      "zai-org/GLM-5.2",
+      "zai-org/GLM-5.2-Fast",
+      "zai-org/GLM-5.1",
+      "zai-org/GLM-5",
+      "MiniMaxAI/MiniMax-M3",
+      "MiniMaxAI/MiniMax-M2.7",
+      "MiniMaxAI/MiniMax-M2.5",
+      "xiaomi/mimo-v2.5-pro",
+      "xiaomi/mimo-v2.5",
+      "Qwen/Qwen3.6-Max-Preview",
+      "Qwen/Qwen3.6-Plus",
+      "Qwen/Qwen3.7-Max",
+      "Qwen/Qwen3.7-Plus",
+      "Qwen/Qwen3.8-Max",
+      "Qwen/Qwen3.7-Flash",
+      "stepfun/Step-3.7-Flash",
+      "stepfun/Step-3.5-Flash",
+      "tencent/hy3-paid",
+      "xai/grok-4.5",
+      "meta/muse-spark-1.2",
+      "meta/muse-spark-1.2-contributor",
+      "nvidia/nemotron-3-ultra-550b-a55b",
+      "poolside/laguna-s-2.1-free",
+    ],
   },
 ];
 
@@ -336,6 +388,11 @@ const MODEL_DISPLAY_NAMES: Record<string, string> = {
   "nemotron-3-ultra-free": "Nemotron 3 Ultra Free",
   "big-pickle": "Big Pickle Free",
   "openrouter/free": "Free Models Router",
+  "deepseek/deepseek-v4-flash": "DeepSeek V4 Flash",
+  "deepseek/deepseek-v4-pro": "DeepSeek V4 Pro",
+  "moonshotai/Kimi-K3": "Kimi K3",
+  "thinkingmachines/inkling-small": "Inkling Small",
+  "poolside/laguna-s-2.1-free": "Laguna S 2.1 Free",
 };
 
 /** Allowed OpenRouter model — Free Models Router only. */
@@ -350,7 +407,13 @@ export const CURSOR_SDK_PROVIDER_IDS = new Set(["cursor"]);
 export const REASONING_EFFORT_PROVIDER_IDS = new Set(["cursor", "xai"]);
 
 /** Provider catalogs that are deliberately pinned (no live /models flood). */
-export const STATIC_MODEL_PROVIDER_IDS = new Set(["cursor", "xai", "glm", "openrouter"]);
+export const STATIC_MODEL_PROVIDER_IDS = new Set([
+  "cursor",
+  "xai",
+  "glm",
+  "openrouter",
+  "commandcode",
+]);
 
 export function isCursorSdkProvider(providerId: string): boolean {
   return CURSOR_SDK_PROVIDER_IDS.has(providerId);

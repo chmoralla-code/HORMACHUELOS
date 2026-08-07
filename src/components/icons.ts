@@ -53,6 +53,8 @@ export const logos = {
   claude: `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M17.3041 3.541h-3.6718l6.696 16.918H24Zm-10.6082 0L0 20.459h3.7442l1.3693-3.5527h7.0052l1.3693 3.5528h3.7442L10.5363 3.5409Zm-.3712 10.2232 2.2914-5.9456 2.2914 5.9456Z"/></svg>`,
   gemini: `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 1.8c.7 5.5 4.7 9.5 10.2 10.2-5.5.7-9.5 4.7-10.2 10.2C11.3 16.7 7.3 12.7 1.8 12 7.3 11.3 11.3 7.3 12 1.8Z"/></svg>`,
   pollinations: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v4M12 17.5v4M2.5 12h4M17.5 12h4M5.3 5.3l2.8 2.8M15.9 15.9l2.8 2.8M18.7 5.3l-2.8 2.8M8.1 15.9l-2.8 2.8"/></svg>`,
+  // Command Code — terminal prompt mark
+  commandcode: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m6 8 4 4-4 4"/><path d="M12 16h6"/><rect x="2.5" y="3" width="19" height="18" rx="3"/></svg>`,
 };
 
 export function icon(name: keyof typeof icons, size = 14): string {

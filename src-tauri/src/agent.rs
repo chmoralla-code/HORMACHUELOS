@@ -40,6 +40,18 @@ fn emit_cancelled(app: &AppHandle, session_id: &str, iteration: u32) {
 // software task never stops merely because it has been running for a while.
 const MAX_CONSECUTIVE_STALLED_RECOVERIES: u8 = 4;
 
+/// A continuation reply is only a stall when it is empty or wordless. A model
+/// mid-thought that streams a real progress sentence is still making progress,
+/// so it must not advance the safety counter that ends a run.
+fn reply_looks_stalled(resp: &LlmResponse) -> bool {
+    let has_text = resp
+        .text
+        .as_deref()
+        .map(|text| !text.trim().is_empty())
+        .unwrap_or(false);
+    !has_text
+}
+
 fn next_stalled_recovery_count(previous: u8, made_concrete_progress: bool) -> u8 {
     if made_concrete_progress {
         0
@@ -603,8 +615,15 @@ pub async fn run_loop(
     let root = Path::new(&project_root);
     let cancel = run.cancel.clone();
     let known_integration_secrets = Arc::new(crate::integrations::loaded_tokens());
-    let prompt =
+    let mut prompt =
         integration_chat::redact_sensitive_text(&prompt, known_integration_secrets.as_ref());
+    // Surface attached-image markers to the model so it knows to call
+    // view_image on the path even if the marker line is buried in the prompt.
+    if prompt.contains("[Attached image:") {
+        let mut note = String::from("\n\n[The user attached image(s) — the [Attached image: <path>] markers above give the exact file paths. Call view_image on each attached path to see the image(s).]");
+        note.push_str(&prompt);
+        prompt = note;
+    }
     let requires_project_completion = task_likely_requires_project_completion(&prompt);
 
     let mut history = history;
@@ -968,6 +987,7 @@ CAPABILITIES:\n\
 - ask_user: multiple-choice questions for real decisions (stack, style, scope). Use allow_other when freeform answers help.\n\
 - export_client_pack: zip the project for client handoff (excludes node_modules/.git/target/dist) and write CLIENT_HANDOFF.md.\n\
 - web_search / browse_page: research the public web when local files are not enough.\n\
+- view_image: view/describe an image file (PNG/JPG/WEBP/GIF/BMP). When the user pastes or drops an image (look for a line like [Attached image: <path>]), call view_image on that path so you can see it — even if you are a text-only model.\n\
 - computer_* tools: protected Windows desktop control when Computer Use is enabled. Observe before each action. For realtime games, use one bounded computer_game_sequence instead of a model turn per key.\n\n\
 BASE RULES (mode rules above win on conflict):\n\
 1. READ THE USER'S INTENT FIRST. Questions and chat get text answers. Build/create/modify requests may use tools per mode.\n\
@@ -983,7 +1003,7 @@ BASE RULES (mode rules above win on conflict):\n\
 11. For deploy/git hosting: use connected integrations first. If missing, call connect_account (in-chat secure form + browser) — do not run interactive CLI login via run_command and do not request credentials in the chat message box.\n\
 12. Format final prose as clean Markdown: use a short Result heading followed by clear sections and bullets; use Markdown tables only for comparisons. Every table must include a header row and separator row; never use unaligned plain-text columns. Never print raw JSON, function-call syntax, tool arguments, or a literal `done` payload for the user. When work is complete, call the done tool instead of repeating its title, files, and features as loose prose.\n\
 {memory_rules}\n\
-TOOL REFERENCE: read_file, write_file, edit_file, list_dir, glob, grep, run_command, git_init, git_add_all, git_commit, git_status, list_drives, sys_info, env_vars, list_processes, kill_process, open_url, open_path, download_file, move_file, copy_file, delete_file, make_dir, file_info, connect_account, integration_status, web_search, browse_page, export_client_pack, computer_list_windows, computer_observe, computer_focus_window, computer_click, computer_type_text, computer_press_key, computer_scroll, computer_drag, computer_game_sequence, ask_user, done.",
+TOOL REFERENCE: read_file, write_file, edit_file, list_dir, glob, grep, run_command, git_init, git_add_all, git_commit, git_status, list_drives, sys_info, env_vars, list_processes, kill_process, open_url, open_path, download_file, move_file, copy_file, delete_file, make_dir, file_info, view_image, connect_account, integration_status, web_search, browse_page, export_client_pack, computer_list_windows, computer_observe, computer_focus_window, computer_click, computer_type_text, computer_press_key, computer_scroll, computer_drag, computer_game_sequence, ask_user, done.",
         root = root.display(),
         provider_display = provider_display,
         model_display = model_display,
@@ -1357,7 +1377,7 @@ Use them as continuous memory for everything that follows.",
 
             if let Some(reason) = continuation_reason {
                 consecutive_stalled_recoveries =
-                    next_stalled_recovery_count(consecutive_stalled_recoveries, false);
+                    next_stalled_recovery_count(consecutive_stalled_recoveries, !reply_looks_stalled(&resp));
                 if consecutive_stalled_recoveries >= MAX_CONSECUTIVE_STALLED_RECOVERIES {
                     smart_agent.pause(
                         &app,
@@ -1954,6 +1974,7 @@ fn display_provider_name(provider_id: &str) -> String {
         "anthropic" => "Anthropic".into(),
         "gemini" => "Gemini".into(),
         "pollinations" => "Pollinations".into(),
+        "commandcode" => "HORMACHUELOS NEW MODELS".into(),
         other if !other.is_empty() => {
             let mut chars = other.chars();
             match chars.next() {
@@ -2029,11 +2050,12 @@ mod tests {
         cursor_computer_use_instructions, cursor_effort_for_request,
         cursor_permission_instructions, display_model_name, display_provider_name,
         identity_instructions, next_stalled_recovery_count, normalized_permission_mode,
-        public_tool_arguments, public_tool_preview_delta, resolve_tool_preview_name,
-        starts_as_explanatory_request, stop_reason_requires_continuation,
+        public_tool_arguments, public_tool_preview_delta, reply_looks_stalled,
+        resolve_tool_preview_name, starts_as_explanatory_request, stop_reason_requires_continuation,
         task_likely_requires_project_completion, tool_confirm_summary, truncate_utf8,
         uses_cursor_sdk, MAX_CONSECUTIVE_STALLED_RECOVERIES,
     };
+    use crate::llm::LlmResponse;
     use serde_json::json;
 
     const TYPED_SENTINEL: &str = "typed-secret-SENTINEL-agent-4b83";
@@ -2210,6 +2232,46 @@ mod tests {
             stalls = next_stalled_recovery_count(stalls, true);
             assert_eq!(stalls, 0);
         }
+    }
+
+    #[test]
+    fn text_only_replies_do_not_count_as_stalls() {
+        // A model mid-thought that streams a real progress sentence must not
+        // advance the safety counter, even when it has not called a tool yet.
+        let with_text = LlmResponse {
+            text: Some("Let me inspect the workspace first.".into()),
+            tool_calls: Vec::new(),
+            reasoning_content: None,
+            stop_reason: "stop".into(),
+            usage_tokens: 10,
+        };
+        assert!(!reply_looks_stalled(&with_text));
+
+        // Empty or wordless replies are genuine stalls and must count.
+        let empty = LlmResponse {
+            text: None,
+            tool_calls: Vec::new(),
+            reasoning_content: None,
+            stop_reason: "stop".into(),
+            usage_tokens: 10,
+        };
+        assert!(reply_looks_stalled(&empty));
+        let whitespace = LlmResponse {
+            text: Some("   \n\t  ".into()),
+            tool_calls: Vec::new(),
+            reasoning_content: None,
+            stop_reason: "stop".into(),
+            usage_tokens: 10,
+        };
+        assert!(reply_looks_stalled(&whitespace));
+
+        // After a text checkpoint the watchdog stays at zero; only true
+        // wordless stalls accumulate toward the safety cap.
+        let mut stalls = 0;
+        for _ in 0..(MAX_CONSECUTIVE_STALLED_RECOVERIES * 2) {
+            stalls = next_stalled_recovery_count(stalls, !reply_looks_stalled(&with_text));
+        }
+        assert_eq!(stalls, 0);
     }
 
     #[test]

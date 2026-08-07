@@ -956,12 +956,34 @@ function toggleLeftDrawer() {
 }
 
 function toggleRightDrawer() {
+  // The right sandwich collapses/uncollapses the whole right side: when the
+  // build preview is open, closing the right side also closes the preview.
+  // Reopening restores whichever right panel was visible before collapsing.
   const open = !isDrawerOpen(RIGHT_DRAWER_KEY, true);
   setDrawerOpen(RIGHT_DRAWER_KEY, open);
+  if (!open && sitePreview?.isOpen) {
+    rightSideWasPreview = true;
+    sitePreview.close();
+  } else if (open && !sitePreview?.isOpen && rightSideWasPreview) {
+    // Reopen the preview that was closed together with the right side.
+    if (currentProjectPath) {
+      void openBuildPreview({ title: "Build preview", autoPickEntry: false });
+    }
+  }
+  rightSideWasPreview = false;
   applyDrawers();
   syncDrawerButtons();
   renderWorkspaceMenu();
 }
+
+/** True when any right-side panel (inspector or preview) is visible. */
+function rightSideVisible(): boolean {
+  if (sitePreview?.isOpen) return true;
+  return isDrawerOpen(RIGHT_DRAWER_KEY, true);
+}
+
+/** Set when collapsing the right side while the preview was open. */
+let rightSideWasPreview = false;
 
 function syncDrawerButtons() {
   const leftOpen = isDrawerOpen(LEFT_DRAWER_KEY, true);
@@ -971,6 +993,20 @@ function syncDrawerButtons() {
     leftBtn.setAttribute("aria-pressed", String(leftOpen));
     leftBtn.setAttribute("title", leftOpen ? "Hide left panel" : "Show left panel");
     leftBtn.setAttribute("aria-label", leftOpen ? "Hide left panel" : "Show left panel");
+  }
+  const rightVisible = rightSideVisible();
+  const rightBtn = document.getElementById("drawer-right-btn");
+  if (rightBtn) {
+    rightBtn.classList.toggle("active", rightVisible);
+    rightBtn.setAttribute("aria-pressed", String(rightVisible));
+    rightBtn.setAttribute(
+      "title",
+      rightVisible ? "Hide right panels" : "Show right panels",
+    );
+    rightBtn.setAttribute(
+      "aria-label",
+      rightVisible ? "Hide right panels" : "Show right panels",
+    );
   }
 }
 
@@ -1002,7 +1038,6 @@ function renderWorkspaceMenu() {
 
   const hasProject = !!currentProjectPath;
   const previewOpen = !!sitePreview?.isOpen;
-  const rightOpen = isDrawerOpen(RIGHT_DRAWER_KEY, true);
   menu.appendChild(el("div", { class: "workspace-menu-title" }, ["Workspace"]));
 
   const appendAction = (
@@ -1054,7 +1089,7 @@ function renderWorkspaceMenu() {
   menu.appendChild(el("div", { class: "workspace-menu-divider", role: "separator" }));
   appendAction(
     "inspector",
-    rightOpen ? "Hide project panel" : "Show project panel",
+    rightSideVisible() ? "Hide right panels" : "Show right panels",
     "panelRight",
     () => toggleRightDrawer(),
   );
@@ -1126,6 +1161,11 @@ function bindDrawerButtons() {
   if (leftBtn && !(leftBtn as any).__bound) {
     leftBtn.addEventListener("click", () => toggleLeftDrawer());
     (leftBtn as any).__bound = true;
+  }
+  const rightBtn = document.getElementById("drawer-right-btn");
+  if (rightBtn && !(rightBtn as any).__bound) {
+    rightBtn.addEventListener("click", () => toggleRightDrawer());
+    (rightBtn as any).__bound = true;
   }
   bindWorkspaceMenuButton();
   applyDrawers();

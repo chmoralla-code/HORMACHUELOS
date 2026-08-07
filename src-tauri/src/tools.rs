@@ -48,6 +48,7 @@ fn is_readonly_tool(name: &str) -> bool {
             | "env_vars"
             | "list_processes"
             | "file_info"
+            | "view_image"
             | "ask_user"
             | "done"
             | "connect_account"
@@ -100,7 +101,7 @@ fn arg_path<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
 fn tool_targets_outside_project(name: &str, args: &Value, root: &Path) -> bool {
     match name {
         "read_file" | "write_file" | "edit_file" | "make_dir" | "delete_file" | "file_info"
-        | "open_path" | "list_dir" => {
+        | "open_path" | "list_dir" | "view_image" => {
             if let Some(p) = arg_path(args, "path") {
                 return path_escapes_project(root, p);
             }
@@ -453,6 +454,28 @@ fn resolve_project_read_path(root: &Path, relative: &str) -> Result<PathBuf> {
         anyhow::bail!("Project item resolves outside the active project.");
     }
     Ok(canonical)
+}
+
+/// Resolve an image path for `view_image`. Project-relative paths use the
+/// normal project boundary; absolute paths inside the app's paste temp dir
+/// (clipboard/drag-drop attachments) are also allowed since they are
+/// user-provided and never executed.
+fn resolve_image_read_path(root: &Path, raw: &str) -> Result<PathBuf> {
+    let p = Path::new(raw);
+    if p.is_absolute() {
+        let paste_dir = std::env::temp_dir().join("hormachuelos-paste");
+        let canonical = p.canonicalize().with_context(|| {
+            format!("Could not resolve image path: {}", p.display())
+        })?;
+        let Ok(paste_canon) = paste_dir.canonicalize() else {
+            anyhow::bail!("Image path is not inside the app paste directory.");
+        };
+        if canonical.starts_with(&paste_canon) {
+            return Ok(canonical);
+        }
+        anyhow::bail!("Image path resolves outside the project and the paste directory.");
+    }
+    resolve_project_read_path(root, raw)
 }
 
 pub fn path_escapes_project(root: &Path, rel: &str) -> bool {
@@ -830,6 +853,18 @@ pub fn schemas(computer_use_enabled: bool) -> Vec<Value> {
                 "parameters": {
                     "type": "object",
                     "properties": { "path": { "type": "string" } },
+                    "required": ["path"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "view_image",
+                "description": "View and describe an image file (PNG/JPG/WEBP/GIF/BMP) at an absolute or project-relative path. Use when the user attached an image (paste or drop) or when you need to see an image's contents. Returns a text description of the image.",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "path": { "type": "string", "description": "Absolute or project-relative path to the image file" } },
                     "required": ["path"]
                 }
             }
@@ -1628,6 +1663,179 @@ fn download_public_file(url: &str, destination: &Path) -> Result<(u64, reqwest::
     result.map(|written| (written, final_url))
 }
 
+/// Read an image file and ask a vision-capable model to describe it.
+///
+/// Uses the shared Command Code route (`xai/grok-4.5`) through the hosted
+/// proxy when a paid plan is active; falls back to a locally saved Command
+/// Code key via the native `/alpha/generate` gateway. The returned text is fed
+/// back to the main agent model so even text-only models can "see" images.
+fn view_image_file(root: &Path, raw_path: &str) -> Result<String> {
+    let full = resolve_image_read_path(root, raw_path)?;
+    let ext = full
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp") {
+        anyhow::bail!("view_image supports PNG, JPG, WEBP, GIF, and BMP files (got .{ext}).");
+    }
+    let mime = match ext.as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        _ => "image/png",
+    };
+    let bytes = std::fs::read(&full)
+        .with_context(|| format!("Could not read image: {}", full.display()))?;
+    if bytes.is_empty() {
+        anyhow::bail!("Image file is empty.");
+    }
+    if bytes.len() > 25 * 1024 * 1024 {
+        anyhow::bail!("Image is too large (max 25 MB).");
+    }
+    use base64::Engine as _;
+    let data_url = format!(
+        "data:{mime};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(&bytes)
+    );
+
+    let prompt = "Describe this image in detail — what it shows, any visible text, layout, colors, and anything relevant for a coding agent editing a website or app.";
+
+    // 1) Hosted proxy path (paid plan, shared server key).
+    let settings = crate::config::Settings::load().unwrap_or_default();
+    let hosted_base = crate::license::hosted_chat_base_url();
+    let license = crate::license::LicenseStatus::load().unwrap_or_default();
+    let local_key = crate::config::load_provider_api_key("commandcode")
+        .ok()
+        .filter(|k| !k.trim().is_empty());
+
+    if local_key.is_none() && crate::license::should_use_hosted(&license) {
+        let client = http_client(120)?;
+        let body = json!({
+            "model": "xai/grok-4.5",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": prompt },
+                    { "type": "image_url", "image_url": { "url": data_url } },
+                ],
+            }],
+            "max_tokens": 1024,
+        });
+        let response = client
+            .post(format!("{hosted_base}/api/v1/chat/completions"))
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", license.license_key))
+            .header("X-Horma-Provider", "commandcode")
+            .json(&body)
+            .send()
+            .with_context(|| "Vision request to the hosted proxy failed.")?;
+        if response.status().is_success() {
+            let text = response.text().unwrap_or_default();
+            if let Ok(parsed) = serde_json::from_str::<Value>(&text) {
+                let content = parsed
+                    .pointer("/choices/0/message/content")
+                    .and_then(Value::as_str)
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+                if let Some(description) = content {
+                    return Ok(description);
+                }
+            }
+            anyhow::bail!("The hosted vision model returned no description.");
+        }
+        anyhow::bail!("The hosted vision request failed (HTTP {}).", response.status());
+    }
+
+    // 2) Direct Command Code gateway (local BYOK key).
+    let key = local_key.ok_or_else(|| {
+        anyhow::anyhow!(
+            "No Command Code key is available for image viewing. Save a key in Settings or activate a hosted plan."
+        )
+    })?;
+    let base = settings
+        .base_url
+        .clone()
+        .filter(|u| u.contains("api.commandcode.ai"))
+        .unwrap_or_else(|| crate::config::COMMANDCODE_API_BASE_URL.to_string());
+    let client = http_client(120)?;
+    let body = json!({
+        "config": {
+            "workingDir": "/",
+            "date": chrono::Utc::now().format("%Y-%m-%d").to_string(),
+            "environment": std::env::consts::OS,
+            "structure": [],
+            "isGitRepo": false,
+            "currentBranch": "",
+            "mainBranch": "",
+            "gitStatus": "",
+            "recentCommits": [],
+        },
+        "memory": "",
+        "params": {
+            "model": "xai/grok-4.5",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": prompt },
+                    { "type": "image", "image": data_url, "mimeType": mime },
+                ],
+            }],
+            "tools": [],
+            "system": "",
+            "max_tokens": 1024,
+            "stream": false,
+        },
+    });
+    let response = client
+        .post(format!("{}/alpha/generate", base.trim_end_matches('/')))
+        .header("Content-Type", "application/json")
+        .header("User-Agent", "cli")
+        .header("x-command-code-version", "1.14.1")
+        .header("x-cli-environment", "production")
+        .header("x-taste-learning", "false")
+        .header("x-co-flag", "false")
+        .header("x-session-id", uuid::Uuid::new_v4().to_string())
+        .header("Authorization", format!("Bearer {key}"))
+        .json(&body)
+        .send()
+        .with_context(|| "Vision request to the Command Code gateway failed.")?;
+    if !response.status().is_success() {
+        anyhow::bail!(
+            "The Command Code vision request failed (HTTP {}).",
+            response.status()
+        );
+    }
+    let text = response.text().unwrap_or_default();
+    // NDJSON events: accumulate text-delta blocks.
+    let mut description = String::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Ok(event) = serde_json::from_str::<Value>(line) {
+            if event.get("type").and_then(Value::as_str) == Some("text-delta") {
+                if let Some(delta) = event.get("text").and_then(Value::as_str) {
+                    description.push_str(delta);
+                }
+            }
+            if event.get("type").and_then(Value::as_str) == Some("error") {
+                let message = event
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown vision error");
+                anyhow::bail!("Command Code vision error: {message}");
+            }
+        }
+    }
+    let description = description.trim().to_string();
+    if description.is_empty() {
+        anyhow::bail!("The vision model returned no description.");
+    }
+    Ok(description)
+}
+
 pub fn execute(
     name: &str,
     args: &Value,
@@ -2034,6 +2242,13 @@ pub fn execute(
                 "modified": meta.modified().ok().map(|t| t.elapsed().ok().map(|d| d.as_secs()).unwrap_or(0)).unwrap_or(0),
             });
             Ok(serde_json::to_string_pretty(&info)?)
+        }
+        "view_image" => {
+            let p = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("missing path"))?;
+            view_image_file(root, p)
         }
         "done" => {
             let summary = args
@@ -2689,6 +2904,26 @@ mod security_tests {
         )
         .unwrap();
         assert!(globbed.contains("inside.txt"));
+    }
+
+    #[test]
+    fn view_image_resolves_project_and_paste_paths_only() {
+        let tree = TempTree::new();
+        // Project-relative image path resolves inside the project.
+        let canonical_root = tree.root.canonicalize().unwrap();
+        let relative = resolve_image_read_path(&tree.root, "inside.txt").unwrap();
+        assert!(relative.starts_with(&canonical_root));
+        // Absolute path inside the app paste temp dir is allowed.
+        let paste_dir = std::env::temp_dir().join("hormachuelos-paste");
+        std::fs::create_dir_all(&paste_dir).unwrap();
+        let pasted = paste_dir.join("paste-test.png");
+        std::fs::write(&pasted, b"fake-png").unwrap();
+        let resolved = resolve_image_read_path(&tree.root, &pasted.to_string_lossy()).unwrap();
+        assert!(resolved.starts_with(&paste_dir.canonicalize().unwrap()));
+        // An arbitrary absolute path outside the project is rejected.
+        let outside_img = tree.outside.join("shot.png");
+        std::fs::write(&outside_img, b"x").unwrap();
+        assert!(resolve_image_read_path(&tree.root, &outside_img.to_string_lossy()).is_err());
     }
 
     #[test]

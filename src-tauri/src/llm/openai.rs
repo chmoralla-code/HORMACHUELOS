@@ -130,7 +130,9 @@ fn provider_http_error(status: reqwest::StatusCode, body: &str) -> anyhow::Error
     anyhow!("{}: {} (HTTP {})", code, message, status.as_u16())
 }
 
-fn request_error(error: &reqwest::Error) -> anyhow::Error {
+/// Shared across every provider client so a stalled connection surfaces as a
+/// resumable provider error instead of an endless black hole.
+pub fn request_error(error: &reqwest::Error) -> anyhow::Error {
     if error.is_timeout() {
         anyhow!("provider_timeout: The provider did not respond before the timeout.")
     } else if error.is_connect() {
@@ -138,6 +140,17 @@ fn request_error(error: &reqwest::Error) -> anyhow::Error {
     } else {
         anyhow!("network_error: The provider request could not be completed.")
     }
+}
+
+/// Standard client for cloud providers: bounded connect/read timeouts so a
+/// stalled upstream can never freeze an agent run forever. Read timeout only
+/// fires while the socket is fully idle — active streaming keeps the run alive.
+pub fn build_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .read_timeout(Duration::from_secs(120))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
 }
 
 /// Split `<think>…</think>` (or `<thinking>…</thinking>`) out of model content.
@@ -578,15 +591,7 @@ impl OpenAi {
             _ => "https://api.openai.com/v1",
         };
         Self {
-            client: reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(10))
-                // No overall request timeout: streaming a large file/response can
-                // take well over a minute. Use a per-chunk idle timeout instead so
-                // only a genuinely stalled connection errors, not a slow-but-active
-                // stream (was causing `provider_timeout` mid file-write).
-                .read_timeout(Duration::from_secs(120))
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
+            client: build_client(),
             api_key: api_key.to_string(),
             base_url: base_url
                 .unwrap_or(default_base)
