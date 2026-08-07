@@ -58,6 +58,11 @@ const PROVIDERS = {
   },
 };
 
+const COMMANDCODE_BASE_URL = "https://api.commandcode.ai";
+export const HORMACHUELOS_V4_ALIAS = "hormachuelos-v4";
+export const HORMACHUELOS_V4_DISPLAY_NAME = "Hormachuelos v4 (VISION)";
+export const HORMACHUELOS_V4_UPSTREAM_MODEL = "deepseek/deepseek-v4-flash";
+
 const HORMACHUELOS_LEGACY_ROUTES = [
   {
     alias: "hormachuelos-v1",
@@ -93,6 +98,52 @@ const HORMACHUELOS_LEGACY_ROUTES = [
     env: ["HORMACHUELOS_V3_API_KEY", "DEEPSEEK_API_KEY"],
   },
 ];
+
+/** True when a hosted route must use the Command Code /alpha/generate proxy. */
+export function isCommandCodeUpstream(baseUrl) {
+  try {
+    const host = new URL(String(baseUrl || "")).hostname.toLowerCase();
+    return host === "api.commandcode.ai" || host.endsWith(".commandcode.ai");
+  } catch {
+    return /commandcode\.ai/i.test(String(baseUrl || ""));
+  }
+}
+
+/**
+ * Borrow the existing HORMACHUELOS NEW MODELS (Command Code) credential for
+ * Hormachuelos v4 without duplicating the key onto another provider profile.
+ */
+async function resolveCommandCodeCredential() {
+  try {
+    const managed = await activeHostedModelRoutes(COMMANDCODE_PROVIDER);
+    const route = managed.find((candidate) => String(candidate.apiKey || "").trim());
+    if (route) {
+      return {
+        apiKey: route.apiKey,
+        baseUrl: String(route.baseUrl || COMMANDCODE_BASE_URL).replace(/\/$/, "") || COMMANDCODE_BASE_URL,
+      };
+    }
+  } catch {
+    // Fall through to the optional environment key used in local tests.
+  }
+  const apiKey = firstEnvironmentValue(["COMMANDCODE_API_KEY"]);
+  if (!apiKey) return null;
+  return { apiKey, baseUrl: COMMANDCODE_BASE_URL };
+}
+
+export async function resolveHormachuelosV4Route() {
+  const credential = await resolveCommandCodeCredential();
+  if (!credential) return null;
+  return {
+    alias: HORMACHUELOS_V4_ALIAS,
+    displayName: HORMACHUELOS_V4_DISPLAY_NAME,
+    upstreamModel: HORMACHUELOS_V4_UPSTREAM_MODEL,
+    baseUrl: credential.baseUrl,
+    apiKey: credential.apiKey,
+    headers: {},
+    fallbackRoutes: [],
+  };
+}
 
 function firstEnvironmentValue(names) {
   for (const name of names) {
@@ -230,7 +281,9 @@ export async function resolveUpstream(providerId) {
   const legacy = environmentUpstream(id);
   try {
     const managedRoutes = await activeHostedModelRoutes(id);
-    if (!managedRoutes.length) return legacy;
+    if (!managedRoutes.length) {
+      return await withHormachuelosV4Route(id, legacy);
+    }
     // Do not make an older v1 app disappear merely because a newer managed
     // alias was added. A configured managed row wins; the legacy v1 route
     // fills only aliases that do not yet have an admin-managed key.
@@ -270,6 +323,10 @@ export async function resolveUpstream(providerId) {
         }
       }
     }
+    if (id === HORMACHUELOS_FREE_PROVIDER && !routesByAlias.has(HORMACHUELOS_V4_ALIAS)) {
+      const v4 = await resolveHormachuelosV4Route();
+      if (v4) routesByAlias.set(HORMACHUELOS_V4_ALIAS, v4);
+    }
     const routes = [...routesByAlias.values()];
     if (routes.length) {
       return managedUpstream(id, routes);
@@ -279,7 +336,28 @@ export async function resolveUpstream(providerId) {
     // environment-backed v1 route working rather than breaking old clients.
     console.warn(`Hosted model configuration unavailable; using legacy route: ${String(error?.message || error)}`);
   }
-  return legacy;
+  return await withHormachuelosV4Route(id, legacy);
+}
+
+async function withHormachuelosV4Route(providerId, upstream) {
+  if (providerId !== HORMACHUELOS_FREE_PROVIDER) return upstream;
+  if (upstream?.modelRoutes?.some((route) => route.alias === HORMACHUELOS_V4_ALIAS)) {
+    return upstream;
+  }
+  const v4 = await resolveHormachuelosV4Route();
+  if (!v4) return upstream;
+  if (upstream?.error) {
+    return managedUpstream(HORMACHUELOS_FREE_PROVIDER, [v4]);
+  }
+  const modelRoutes = [...(upstream.modelRoutes || []), v4];
+  return {
+    ...upstream,
+    modelAliases: {
+      ...(upstream.modelAliases || {}),
+      [HORMACHUELOS_V4_ALIAS]: HORMACHUELOS_V4_UPSTREAM_MODEL,
+    },
+    modelRoutes,
+  };
 }
 
 /** Resolve a public model alias without exposing a shared credential to arbitrary model ids. */

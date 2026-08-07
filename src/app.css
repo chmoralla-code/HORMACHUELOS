@@ -2895,6 +2895,26 @@
 .composer-attach-remove:hover {
   background: rgba(220, 60, 60, 0.9);
 }
+.msg-attach-rail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 8px;
+}
+.msg-attach-chip {
+  width: 72px;
+  height: 72px;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.28);
+}
+.msg-attach-thumb {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
 .composer-input {
   width: 100%;
   background: transparent;

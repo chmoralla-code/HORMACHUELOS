@@ -87,7 +87,7 @@ export const PROVIDERS: ProviderDef[] = [
     keyRequired: false,
     // The signed-in desktop refreshes this catalog from the hosted service.
     // These are safe offline fallbacks, not credentials.
-    models: ["hormachuelos-v1", "hormachuelos-v2", "hormachuelos-v3"],
+    models: ["hormachuelos-v1", "hormachuelos-v2", "hormachuelos-v3", "hormachuelos-v4"],
   },
   {
     id: "ollama",
@@ -168,6 +168,10 @@ export const PROVIDERS: ProviderDef[] = [
     // through the hosted proxy. A local BYOK key is optional.
     keyRequired: false,
     hostedManaged: true,
+    // DeepSeek V4 Flash moved to HORMACHUELOS FREE as Hormachuelos v4 (VISION).
+    // Keep the provider definition for admin/BYOK compatibility, but hide it
+    // from the desktop picker.
+    hidden: true,
     // The gateway accepts the same model ids as `cmd --list-models`.
     models: [
       "gpt-5.6-luna",
@@ -352,6 +356,7 @@ const MODEL_DISPLAY_NAMES: Record<string, string> = {
   "hormachuelos-v1": "Hormachuelos v1",
   "hormachuelos-v2": "Hormachuelos v2",
   "hormachuelos-v3": "Hormachuelos v3",
+  "hormachuelos-v4": "Hormachuelos v4 (VISION)",
   "deepseek-v4-flash": "DeepSeek V4 Flash",
   "deepseek-v4-pro": "DeepSeek V4 Pro",
   "grok-4.5": "GPT 5.6 Sol",

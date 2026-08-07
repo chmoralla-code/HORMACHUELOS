@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.34";
-const BUILTIN_MSI_SHA256 = "d8648facf9bcc96112645e461d395f12af848cc0de1aeb4fa15f9925f78e8dac";
-const BUILTIN_EXE_SHA256 = "1133bd634cb05bd122883062823ed63d8b02302c246ca9fafed5f65f00cfcdaa";
-const BUILTIN_RELEASE_NOTES = "HORMACHUELOS NEW MODELS now works on paid plans through the shared server key — no API key needed on each client.\n\n- Clients on Starter/Pro and above can use all 33 Command Code-powered models (DeepSeek V4, Kimi, GLM, Qwen, MiniMax, Grok 4.5, and more) automatically through the Hormachuelos proxy\n- The server-side Command Code key is stored encrypted on the website and shared across all paid clients\n- Fixed \"No API key for commandcode\" errors on fresh installs — paid plan holders no longer need to paste a key\n- Direct BYOK still works for users who want their own Command Code key\n- Reliability: timeouts and retries for Anthropic, Gemini, and GLM providers\n- The agent loop no longer treats text-only progress replies as stalls";
+const BUILTIN_RELEASE_VERSION = "0.1.35";
+const BUILTIN_MSI_SHA256 = "b8abf625df7faf09d0b8d0b317933c5d3713b786068fc531302a14087b687e71";
+const BUILTIN_EXE_SHA256 = "4d2e0395ed983b759016898f5583c62434ccd5e76d8701f34c3415f719e517b6";
+const BUILTIN_RELEASE_NOTES = "• DeepSeek V4 Flash moves to HORMACHUELOS FREE as Hormachuelos v4 (VISION), still using the Command Code API key\n• Hide HORMACHUELOS NEW MODELS from the provider picker\n• Repair malformed streamed tool arguments so DeepSeek turns no longer abort\n• Composer shows image thumbnails without long [Attached image: …] paths";
 
 /**
  * A deployment-bundled release keeps the download/update path available even

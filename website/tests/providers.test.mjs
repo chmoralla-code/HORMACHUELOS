@@ -4,6 +4,7 @@ import test from "node:test";
 import { billableTokens } from "../api/_lib/plans.js";
 import {
   hostedProvidersStatus,
+  isCommandCodeUpstream,
   resolveHostedModel,
   resolveUpstream,
 } from "../api/_lib/providers.js";
@@ -70,9 +71,11 @@ test("HORMACHUELOS FREE never falls back to another provider", async () => {
   const priorV2 = process.env.HORMACHUELOS_V2_API_KEY;
   const priorOpenCodeGo = process.env.OPENCODE_GO_API_KEY;
   const priorOpenRouter = process.env.OPENROUTER_API_KEY;
+  const priorCommandCode = process.env.COMMANDCODE_API_KEY;
   delete process.env.NEURALWATT_API_KEY;
   delete process.env.HORMACHUELOS_V2_API_KEY;
   delete process.env.OPENCODE_GO_API_KEY;
+  delete process.env.COMMANDCODE_API_KEY;
   process.env.OPENROUTER_API_KEY = "test-only-openrouter-key";
   try {
     const upstream = await resolveUpstream("hormachuelos_free");
@@ -87,6 +90,8 @@ test("HORMACHUELOS FREE never falls back to another provider", async () => {
     else process.env.OPENCODE_GO_API_KEY = priorOpenCodeGo;
     if (priorOpenRouter == null) delete process.env.OPENROUTER_API_KEY;
     else process.env.OPENROUTER_API_KEY = priorOpenRouter;
+    if (priorCommandCode == null) delete process.env.COMMANDCODE_API_KEY;
+    else process.env.COMMANDCODE_API_KEY = priorCommandCode;
     restoreManaged();
   }
 });
@@ -167,4 +172,29 @@ test("managed HORMACHUELOS aliases route each model with its own server-only key
   assert.equal(route.base, "https://opencode.ai/zen/go/v1");
   assert.equal(route.apiKey, "test-only-managed-key");
   assert.match(resolveHostedModel(upstream, "deepseek-v4-flash").error, /not currently available/i);
+});
+
+test("Hormachuelos v4 reuses the Command Code API key under FREE", async () => {
+  const restoreManaged = disableManagedConfigsForTest();
+  const priorNeuralWatt = process.env.NEURALWATT_API_KEY;
+  const priorCommandCode = process.env.COMMANDCODE_API_KEY;
+  process.env.NEURALWATT_API_KEY = "test-only-neuralwatt-key";
+  process.env.COMMANDCODE_API_KEY = "test-only-commandcode-key";
+  try {
+    assert.equal(isCommandCodeUpstream("https://api.commandcode.ai"), true);
+    assert.equal(isCommandCodeUpstream("https://api.deepseek.com"), false);
+
+    const upstream = await resolveUpstream("hormachuelos_free");
+    const model = resolveHostedModel(upstream, "hormachuelos-v4");
+    assert.equal(model.requestedModel, "hormachuelos-v4");
+    assert.equal(model.upstreamModel, "deepseek/deepseek-v4-flash");
+    assert.equal(model.base, "https://api.commandcode.ai");
+    assert.equal(model.apiKey, process.env.COMMANDCODE_API_KEY);
+  } finally {
+    if (priorNeuralWatt == null) delete process.env.NEURALWATT_API_KEY;
+    else process.env.NEURALWATT_API_KEY = priorNeuralWatt;
+    if (priorCommandCode == null) delete process.env.COMMANDCODE_API_KEY;
+    else process.env.COMMANDCODE_API_KEY = priorCommandCode;
+    restoreManaged();
+  }
 });

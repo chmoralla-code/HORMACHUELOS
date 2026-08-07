@@ -10,8 +10,8 @@ import {
   updateLicense,
 } from "../_lib/supabase.js";
 import { billableTokens } from "../_lib/plans.js";
-import { resolveHostedModel, resolveUpstream } from "../_lib/providers.js";
-import { publicHostedProviderCatalog } from "../_lib/hosted-model-configs.js";
+import { resolveHostedModel, resolveUpstream, isCommandCodeUpstream, resolveHormachuelosV4Route, HORMACHUELOS_V4_ALIAS, HORMACHUELOS_V4_DISPLAY_NAME } from "../_lib/providers.js";
+import { COMMANDCODE_PROVIDER, publicHostedProviderCatalog } from "../_lib/hosted-model-configs.js";
 import {
   buildCommandCodeRequest,
   commandCodeGenerateUrl,
@@ -178,11 +178,37 @@ async function handleCatalog(req, res) {
   }
 
   const catalog = await publicHostedProviderCatalog();
-  const available = catalog.filter((provider) =>
-    provider.id === HORMACHUELOS_FREE_PROVIDER
-      ? Boolean(accountEntitlement) || paidAccess
-      : paidAccess,
-  );
+  const available = [];
+  for (const provider of catalog) {
+    if (provider.id === COMMANDCODE_PROVIDER) continue;
+    if (provider.id === HORMACHUELOS_FREE_PROVIDER) {
+      if (!accountEntitlement && !paidAccess) continue;
+      const models = Array.isArray(provider.models) ? [...provider.models] : [];
+      if (!models.some((model) => model.id === HORMACHUELOS_V4_ALIAS)) {
+        const v4 = await resolveHormachuelosV4Route();
+        if (v4) {
+          models.push({ id: HORMACHUELOS_V4_ALIAS, label: HORMACHUELOS_V4_DISPLAY_NAME });
+        }
+      }
+      available.push({ ...provider, models });
+      continue;
+    }
+    if (paidAccess) available.push(provider);
+  }
+  // Offline / empty managed catalog: still advertise FREE V4 when Command Code is configured.
+  if (
+    !available.some((provider) => provider.id === HORMACHUELOS_FREE_PROVIDER) &&
+    (accountEntitlement || paidAccess)
+  ) {
+    const v4 = await resolveHormachuelosV4Route();
+    if (v4) {
+      available.unshift({
+        id: HORMACHUELOS_FREE_PROVIDER,
+        label: "HORMACHUELOS FREE",
+        models: [{ id: HORMACHUELOS_V4_ALIAS, label: HORMACHUELOS_V4_DISPLAY_NAME }],
+      });
+    }
+  }
   return json(res, 200, { object: "list", data: available }, req);
 }
 
@@ -326,7 +352,6 @@ async function handleChat(req, res) {
   if (modelResolution.error) return json(res, 400, { error: modelResolution.error }, req);
   const model = modelResolution.requestedModel;
   const stream = Boolean(body.stream);
-  const isCommandCode = providerHint === "commandcode";
   const forwardBody = { ...body, model: modelResolution.upstreamModel, stream };
   delete forwardBody.provider;
   delete forwardBody.horma_provider;
@@ -339,9 +364,10 @@ async function handleChat(req, res) {
   async function requestUpstream(route) {
     // Command Code is not OpenAI-compatible: translate the OpenAI-style body
     // into the /alpha/generate envelope and send the gateway's required
-    // headers. `isCommandCodeRoute` tells the streaming relay to translate the
-    // NDJSON stream back into OpenAI SSE.
-    if (isCommandCode) {
+    // headers. Detect by upstream host so FREE aliases (Hormachuelos v4) can
+    // reuse the existing Command Code credential without a second provider.
+    const useCommandCode = isCommandCodeUpstream(route.baseUrl) || providerHint === "commandcode";
+    if (useCommandCode) {
       const ccBody = buildCommandCodeRequest({
         model: route.upstreamModel,
         messages: forwardBody.messages,

@@ -826,7 +826,9 @@ export class ModelBar {
       const path = await api.openImagePicker();
       if (!path) return;
       const imported = await api.importImagePath(path);
-      this.insertComposer(`[Attached image: ${imported}]\n`);
+      window.dispatchEvent(
+        new CustomEvent("horma:composer-attach-image", { detail: { path: imported } }),
+      );
       this.setStatus("Image attached");
     } catch (e) {
       console.error(e);

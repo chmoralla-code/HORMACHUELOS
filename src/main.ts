@@ -1869,6 +1869,10 @@ async function init() {
     const text = e.detail?.text;
     if (typeof text === "string" && text) chat.insertComposerText(text);
   }) as EventListener);
+  window.addEventListener("horma:composer-attach-image", ((e: CustomEvent<{ path?: string }>) => {
+    const path = e.detail?.path;
+    if (typeof path === "string" && path.trim()) chat.addComposerAttachment(path.trim());
+  }) as EventListener);
   window.addEventListener("horma:open-settings", ((e: CustomEvent<{ integrationId?: string }>) => {
     openSettings(e.detail?.integrationId);
   }) as EventListener);

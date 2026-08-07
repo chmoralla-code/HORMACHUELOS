@@ -1999,6 +1999,8 @@ fn display_model_name(model_id: &str) -> String {
     match raw.to_ascii_lowercase().as_str() {
         "hormachuelos-v1" => "Hormachuelos v1".into(),
         "hormachuelos-v2" => "Hormachuelos v2".into(),
+        "hormachuelos-v3" => "Hormachuelos v3".into(),
+        "hormachuelos-v4" => "Hormachuelos v4 (VISION)".into(),
         _ => raw.to_string(),
     }
 }
@@ -2176,6 +2178,10 @@ mod tests {
         assert_eq!(display_provider_name("glm"), "GLM");
         assert_eq!(display_model_name("hormachuelos-v1"), "Hormachuelos v1");
         assert_eq!(display_model_name("hormachuelos-v2"), "Hormachuelos v2");
+        assert_eq!(
+            display_model_name("hormachuelos-v4"),
+            "Hormachuelos v4 (VISION)"
+        );
         assert_eq!(
             display_provider_name("hormachuelos_free"),
             "HORMACHUELOS FREE"

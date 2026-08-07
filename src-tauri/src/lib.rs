@@ -389,7 +389,12 @@ async fn list_provider_models(
 ) -> Result<Vec<String>, String> {
     config::validate_provider_id(&provider).map_err(|e| e.to_string())?;
     if provider.eq_ignore_ascii_case("hormachuelos_free") {
-        let builtin_aliases = ["hormachuelos-v1", "hormachuelos-v2"];
+        let builtin_aliases = [
+            "hormachuelos-v1",
+            "hormachuelos-v2",
+            "hormachuelos-v3",
+            "hormachuelos-v4",
+        ];
         let session = match config::load_website_session() {
             Ok(session) => session,
             // Keep a usable offline fallback before the browser-link flow

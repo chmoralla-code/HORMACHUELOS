@@ -247,6 +247,14 @@ impl Settings {
             }
             s.base_url = Some("https://hormachuelos.vercel.app/api/v1".into());
         }
+        // HORMACHUELOS NEW MODELS is hidden from the picker. DeepSeek V4 Flash
+        // now lives on FREE as Hormachuelos v4 (VISION), still backed by the
+        // shared Command Code key on the hosted proxy.
+        if s.provider == "commandcode" {
+            s.provider = "hormachuelos_free".into();
+            s.model = "hormachuelos-v4".into();
+            s.base_url = Some("https://hormachuelos.vercel.app/api/v1".into());
+        }
         if is_custom_hosted_provider_alias(&s.provider) {
             // Custom provider aliases are controlled by the website admin and
             // always run through the protected hosted proxy. Never persist an
@@ -697,6 +705,11 @@ mod tests {
             ..settings.clone()
         };
         assert!(v2.validate().is_ok());
+        let v4 = Settings {
+            model: "hormachuelos-v4".into(),
+            ..settings.clone()
+        };
+        assert!(v4.validate().is_ok());
         assert!(is_hormachuelos_model_alias("hormachuelos-custom_1"));
 
         let wrong_model = Settings {

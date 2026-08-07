@@ -237,9 +237,16 @@ fn parse_response(text: &str) -> Result<LlmResponse> {
                 .to_string();
             let arguments = function
                 .get("arguments")
-                .and_then(|arguments| arguments.as_str())
-                .and_then(|arguments| serde_json::from_str(arguments).ok())
-                .unwrap_or(Value::Null);
+                .map(|arguments| match arguments {
+                    Value::String(raw) => parse_tool_call_arguments(raw)
+                        .unwrap_or_else(|_| Value::Object(Default::default())),
+                    value if value.is_object() || value.is_array() => value.clone(),
+                    _ => Value::Object(Default::default()),
+                })
+                .unwrap_or_else(|| Value::Object(Default::default()));
+            if name.is_empty() {
+                continue;
+            }
             tool_calls.push(ToolCall {
                 id,
                 name,
@@ -365,13 +372,20 @@ impl StreamAccumulator {
                 if let Some(name) = function.get("name").and_then(Value::as_str) {
                     target.name.push_str(name);
                 }
-                let arguments_delta = function
-                    .get("arguments")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                if !arguments_delta.is_empty() {
-                    target.arguments.push_str(arguments_delta);
-                    target.preview_arguments.push_str(arguments_delta);
+                // Providers disagree on the wire shape: OpenAI uses a JSON
+                // *string* of arguments; some DeepSeek / proxy builds emit a
+                // raw object/array chunk. Accept both.
+                match function.get("arguments") {
+                    Some(Value::String(arguments_delta)) if !arguments_delta.is_empty() => {
+                        target.arguments.push_str(arguments_delta);
+                        target.preview_arguments.push_str(arguments_delta);
+                    }
+                    Some(value) if value.is_object() || value.is_array() => {
+                        let encoded = value.to_string();
+                        target.arguments.push_str(&encoded);
+                        target.preview_arguments.push_str(&encoded);
+                    }
+                    _ => {}
                 }
                 let name_changed = !target.name.is_empty() && target.name != target.previewed_name;
                 if name_changed {
@@ -430,16 +444,20 @@ impl StreamAccumulator {
             });
         }
         let mut tool_calls = Vec::with_capacity(self.tool_calls.len());
+        let mut skipped_malformed = 0usize;
         for (index, call) in self.tool_calls.into_iter().enumerate() {
             if call.name.is_empty() {
                 continue;
             }
-            let arguments = if call.arguments.trim().is_empty() {
-                Value::Object(Default::default())
-            } else {
-                serde_json::from_str(&call.arguments).map_err(|_| {
-                    anyhow!("invalid_response: The provider streamed malformed tool arguments.")
-                })?
+            let arguments = match parse_tool_call_arguments(&call.arguments) {
+                Ok(value) => value,
+                Err(_) => {
+                    // DeepSeek Flash (and some proxies) occasionally stream
+                    // broken JSON for tool args. Skip the bad call instead of
+                    // aborting the whole turn — the agent loop can continue.
+                    skipped_malformed += 1;
+                    continue;
+                }
             };
             tool_calls.push(ToolCall {
                 id: if call.id.is_empty() {
@@ -452,18 +470,232 @@ impl StreamAccumulator {
             });
         }
 
+        let stop_reason = if tool_calls.is_empty()
+            && skipped_malformed > 0
+            && self.stop_reason.eq_ignore_ascii_case("tool_calls")
+        {
+            // Ask the agent loop to retry rather than ending on a dead tool turn.
+            "stream_interrupted".to_string()
+        } else if self.stop_reason.is_empty() {
+            "stop".to_string()
+        } else {
+            self.stop_reason
+        };
+
         Ok(LlmResponse {
             text: (!self.text.is_empty()).then_some(self.text),
             tool_calls,
             reasoning_content: (!self.reasoning.is_empty()).then_some(self.reasoning),
-            stop_reason: if self.stop_reason.is_empty() {
-                "stop".to_string()
-            } else {
-                self.stop_reason
-            },
+            stop_reason,
             usage_tokens: self.usage_tokens,
         })
     }
+}
+
+/// Parse / lightly repair streamed tool-call argument JSON.
+///
+/// DeepSeek and a few OpenAI-compatible proxies sometimes emit trailing commas,
+/// fenced markdown, or double-encoded JSON strings. Prefer a usable object over
+/// failing the entire agent turn.
+fn parse_tool_call_arguments(raw: &str) -> Result<Value> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed == "null" {
+        return Ok(Value::Object(Default::default()));
+    }
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        return Ok(unwrap_json_string_object(value));
+    }
+
+    let mut candidate = trimmed.to_string();
+    if let Some(stripped) = strip_markdown_fence(&candidate) {
+        candidate = stripped;
+        if let Ok(value) = serde_json::from_str::<Value>(&candidate) {
+            return Ok(unwrap_json_string_object(value));
+        }
+    }
+
+    if let Some(extracted) = extract_balanced_json(&candidate) {
+        candidate = extracted;
+        if let Ok(value) = serde_json::from_str::<Value>(&candidate) {
+            return Ok(unwrap_json_string_object(value));
+        }
+    }
+
+    let repaired = repair_trailing_commas(&candidate);
+    if repaired != candidate {
+        if let Ok(value) = serde_json::from_str::<Value>(&repaired) {
+            return Ok(unwrap_json_string_object(value));
+        }
+        if let Some(extracted) = extract_balanced_json(&repaired) {
+            if let Ok(value) = serde_json::from_str::<Value>(&extracted) {
+                return Ok(unwrap_json_string_object(value));
+            }
+        }
+    }
+
+    // Last resort: escape bare control characters inside the payload. Some
+    // models put real newlines inside JSON string values when writing files.
+    let escaped = escape_raw_control_chars_in_json_strings(&repaired);
+    if let Ok(value) = serde_json::from_str::<Value>(&escaped) {
+        return Ok(unwrap_json_string_object(value));
+    }
+
+    Err(anyhow!(
+        "invalid_response: The provider streamed malformed tool arguments."
+    ))
+}
+
+fn unwrap_json_string_object(value: Value) -> Value {
+    match value {
+        Value::String(inner) => {
+            let trimmed = inner.trim();
+            if trimmed.starts_with('{') || trimmed.starts_with('[') {
+                serde_json::from_str(trimmed).unwrap_or(Value::String(inner))
+            } else if trimmed.is_empty() {
+                Value::Object(Default::default())
+            } else {
+                Value::String(inner)
+            }
+        }
+        Value::Null => Value::Object(Default::default()),
+        other => other,
+    }
+}
+
+fn strip_markdown_fence(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if !trimmed.starts_with("```") {
+        return None;
+    }
+    let mut lines = trimmed.lines();
+    let _ = lines.next()?;
+    let mut body = Vec::new();
+    for line in lines {
+        if line.trim().starts_with("```") {
+            break;
+        }
+        body.push(line);
+    }
+    let out = body.join("\n").trim().to_string();
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+fn extract_balanced_json(raw: &str) -> Option<String> {
+    let bytes = raw.as_bytes();
+    let start = bytes.iter().position(|b| *b == b'{' || *b == b'[')?;
+    let open = bytes[start];
+    let close = if open == b'{' { b'}' } else { b']' };
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escape = false;
+    for (idx, ch) in bytes.iter().enumerate().skip(start) {
+        if in_string {
+            if escape {
+                escape = false;
+            } else if *ch == b'\\' {
+                escape = true;
+            } else if *ch == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match *ch {
+            b'"' => in_string = true,
+            c if c == open => depth += 1,
+            c if c == close => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(raw[start..=idx].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn repair_trailing_commas(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let chars: Vec<char> = raw.chars().collect();
+    let mut i = 0;
+    let mut in_string = false;
+    let mut escape = false;
+    while i < chars.len() {
+        let ch = chars[i];
+        if in_string {
+            out.push(ch);
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        if ch == '"' {
+            in_string = true;
+            out.push(ch);
+            i += 1;
+            continue;
+        }
+        if ch == ',' {
+            let mut j = i + 1;
+            while j < chars.len() && chars[j].is_whitespace() {
+                j += 1;
+            }
+            if j < chars.len() && (chars[j] == '}' || chars[j] == ']') {
+                i += 1;
+                continue;
+            }
+        }
+        out.push(ch);
+        i += 1;
+    }
+    out
+}
+
+fn escape_raw_control_chars_in_json_strings(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len() + 16);
+    let mut in_string = false;
+    let mut escape = false;
+    for ch in raw.chars() {
+        if in_string {
+            if escape {
+                out.push(ch);
+                escape = false;
+                continue;
+            }
+            match ch {
+                '\\' => {
+                    out.push(ch);
+                    escape = true;
+                }
+                '"' => {
+                    out.push(ch);
+                    in_string = false;
+                }
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                c if (c as u32) < 0x20 => {
+                    out.push_str(&format!("\\u{:04x}", c as u32));
+                }
+                _ => out.push(ch),
+            }
+            continue;
+        }
+        if ch == '"' {
+            in_string = true;
+        }
+        out.push(ch);
+    }
+    out
 }
 
 fn apply_sse_line(
@@ -1000,5 +1232,80 @@ mod tests {
 
         let models = parse_model_ids(fixture, true, true).expect("fixture should parse");
         assert_eq!(models, vec!["tool/model:free"]);
+    }
+
+    #[test]
+    fn repairs_deepseek_style_malformed_tool_arguments() {
+        let trailing = parse_tool_call_arguments(r#"{"path":"index.html","content":"<h1>Hi</h1>",}"#)
+            .expect("trailing comma should repair");
+        assert_eq!(trailing["path"], "index.html");
+
+        let fenced = parse_tool_call_arguments("```json\n{\"path\":\".\"}\n```")
+            .expect("fenced json should parse");
+        assert_eq!(fenced["path"], ".");
+
+        let with_newline = parse_tool_call_arguments("{\"path\":\"a.js\",\"content\":\"line1\nline2\"}")
+            .expect("raw newline in string should escape");
+        assert_eq!(with_newline["content"], "line1\nline2");
+
+        let wrapped = parse_tool_call_arguments("Sure. {\"path\":\"src/app.js\"} thanks")
+            .expect("balanced extract should work");
+        assert_eq!(wrapped["path"], "src/app.js");
+    }
+
+    #[test]
+    fn malformed_streamed_tool_args_do_not_abort_the_turn() {
+        let mut accumulator = StreamAccumulator::default();
+        accumulator.apply(
+            &json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call_bad",
+                            "function": {
+                                "name": "write_file",
+                                "arguments": "{\"path\":\"x.html\",\"content\":\"oops\","
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            }),
+            None,
+            None,
+            None,
+        );
+        let response = accumulator.into_response().expect("should not hard-fail");
+        assert!(response.tool_calls.is_empty());
+        assert_eq!(response.stop_reason, "stream_interrupted");
+    }
+
+    #[test]
+    fn accepts_object_shaped_streamed_tool_arguments() {
+        let mut accumulator = StreamAccumulator::default();
+        accumulator.apply(
+            &json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call_obj",
+                            "function": {
+                                "name": "list_dir",
+                                "arguments": { "path": "." }
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            }),
+            None,
+            None,
+            None,
+        );
+        let response = accumulator.into_response().expect("object args ok");
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].arguments, json!({ "path": "." }));
     }
 }

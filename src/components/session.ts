@@ -536,7 +536,11 @@ export function newSessionId(): string {
 
 /** Derive a short title from the first user message. */
 export function sessionTitle(prompt: string): string {
-  const trimmed = prompt.trim().replace(/\s+/g, " ");
+  const cleaned = prompt
+    .replace(/\[Attached image:\s*.+?\]/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const trimmed = cleaned || "Image chat";
   return trimmed.length > 48 ? trimmed.slice(0, 48) + "…" : trimmed;
 }
 

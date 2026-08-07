@@ -76,6 +76,10 @@ export class Chat {
   private providerLabel = "provider";
   private projectMenu: HTMLElement | null = null;
   private projectOutsideClose: ((e: MouseEvent) => void) | null = null;
+  /** Image paths attached for the next send (hidden from the composer text). */
+  private composerAttachments: string[] = [];
+  /** Object URLs for attach-rail thumbs — revoked on clear/remove. */
+  private composerAttachUrls = new Map<string, string>();
   /** True when usage windows / plan period are exhausted — no new prompts. */
   usageExhausted = false;
   /** Shown when composer is blocked by plan period limits. */
@@ -666,7 +670,6 @@ export class Chat {
   private async attachImageFromDiskPath(path: string) {
     try {
       const imported = await api.importImagePath(path);
-      this.insertComposerText(`[Attached image: ${imported}]\n`);
       const name = path.split(/[/\\]/).pop() || "image.png";
       const mime = /\.jpe?g$/i.test(name)
         ? "image/jpeg"
@@ -680,9 +683,9 @@ export class Chat {
         const res = await fetch(convertFileSrc(imported));
         const blob = await res.blob();
         const file = new File([blob], name, { type: mime });
-        this.addComposerAttachPreview(imported, file);
+        this.addComposerAttachment(imported, file);
       } catch {
-        /* path marker is enough for the agent */
+        this.addComposerAttachment(imported);
       }
     } catch (err) {
       console.error(err);
@@ -703,8 +706,7 @@ export class Chat {
       try {
         const path = await this.persistImageFile(file);
         if (!path) continue;
-        this.insertComposerText(`[Attached image: ${path}]\n`);
-        this.addComposerAttachPreview(path, file);
+        this.addComposerAttachment(path, file);
         ok += 1;
       } catch (err) {
         console.error(err);
@@ -734,16 +736,79 @@ export class Chat {
     return api.savePastedImage(dataBase64, file.type || "image/png");
   }
 
-  private addComposerAttachPreview(path: string, file: File) {
+  /** Attach an image by path without putting the marker into the textarea. */
+  addComposerAttachment(path: string, file?: File) {
+    const trimmed = path.trim();
+    if (!trimmed) return;
+    if (!this.composerAttachments.includes(trimmed)) {
+      this.composerAttachments.push(trimmed);
+    }
+    this.addComposerAttachPreview(trimmed, file);
+    this.input?.focus();
+  }
+
+  private composerPromptWithAttachments(text: string): string {
+    const markers = this.composerAttachments
+      .map((path) => `[Attached image: ${path}]`)
+      .join("\n");
+    if (!markers) return text;
+    return text ? `${markers}\n${text}` : markers;
+  }
+
+  private clearComposerAttachments() {
+    for (const url of this.composerAttachUrls.values()) {
+      URL.revokeObjectURL(url);
+    }
+    this.composerAttachUrls.clear();
+    this.composerAttachments = [];
     const rail = this.composer?.querySelector("#composer-attach-rail") as HTMLElement | null;
     if (!rail) return;
+    rail.querySelectorAll(".composer-attach-chip").forEach((chip) => chip.remove());
+    rail.hidden = true;
+  }
+
+  private removeComposerAttachment(path: string) {
+    this.composerAttachments = this.composerAttachments.filter((p) => p !== path);
+    const url = this.composerAttachUrls.get(path);
+    if (url) {
+      URL.revokeObjectURL(url);
+      this.composerAttachUrls.delete(path);
+    }
+    const rail = this.composer?.querySelector("#composer-attach-rail") as HTMLElement | null;
+    if (!rail) return;
+    rail.querySelectorAll(".composer-attach-chip").forEach((chip) => {
+      if ((chip as HTMLElement).dataset.path === path) chip.remove();
+    });
+    if (!rail.querySelector(".composer-attach-chip")) rail.hidden = true;
+  }
+
+  private addComposerAttachPreview(path: string, file?: File) {
+    const rail = this.composer?.querySelector("#composer-attach-rail") as HTMLElement | null;
+    if (!rail) return;
+    // Replace existing chip for the same path.
+    rail.querySelectorAll(".composer-attach-chip").forEach((chip) => {
+      if ((chip as HTMLElement).dataset.path === path) chip.remove();
+    });
     rail.hidden = false;
-    const chip = el("div", { class: "composer-attach-chip", title: path });
-    const url = URL.createObjectURL(file);
+    const chip = el("div", {
+      class: "composer-attach-chip",
+      title: "Attached image",
+      "data-path": path,
+    });
     const img = document.createElement("img");
-    img.src = url;
     img.alt = "Attached image";
     img.className = "composer-attach-thumb";
+    if (file) {
+      const url = URL.createObjectURL(file);
+      this.composerAttachUrls.set(path, url);
+      img.src = url;
+    } else {
+      void import("@tauri-apps/api/core").then(({ convertFileSrc }) => {
+        img.src = convertFileSrc(path);
+      }).catch(() => {
+        /* thumb optional */
+      });
+    }
     const remove = el("button", {
       class: "composer-attach-remove",
       type: "button",
@@ -752,15 +817,7 @@ export class Chat {
       html: icon("close", 12),
     }) as HTMLButtonElement;
     remove.addEventListener("click", () => {
-      URL.revokeObjectURL(url);
-      const marker = `[Attached image: ${path}]`;
-      if (this.input) {
-        this.input.value = this.input.value
-          .split("\n")
-          .filter((line) => line.trim() !== marker)
-          .join("\n");
-        this.autosize();
-      }
+      this.removeComposerAttachment(path);
       chip.remove();
       if (!rail.querySelector(".composer-attach-chip")) rail.hidden = true;
     });
@@ -939,7 +996,9 @@ export class Chat {
   }
 
   private submit() {
-    const text = this.input.value.trim();
+    // Allow image-only sends (caption optional).
+    const typed = this.input.value.trim();
+    const text = this.composerPromptWithAttachments(typed);
     if (!text) return;
     if (!this.projectReady) {
       this.onNeedProject();
@@ -950,15 +1009,14 @@ export class Chat {
       this.onSend(text);
       return;
     }
-    this.input.value = "";
-    this.autosize();
-    // While stopping, do not queue — put text back so cancel stays a full stop
+    // While stopping, do not queue — keep composer contents so cancel stays a full stop
     if (this.stopping || this.userCancelled) {
-      this.input.value = text;
-      this.autosize();
       this.input.placeholder = "Stopping… wait for cancel, then send";
       return;
     }
+    this.input.value = "";
+    this.clearComposerAttachments();
+    this.autosize();
     // While AI is working, queue the message as pending (semi-transparent)
     if (this.running || this.drainingPending) {
       this.enqueuePending(text);
@@ -991,7 +1049,11 @@ export class Chat {
       title: text,
     });
     chip.appendChild(el("span", { class: "pending-chip-badge" }, ["Pending"]));
-    const body = el("span", { class: "pending-chip-text" }, [text]);
+    const preview = text
+      .replace(/\[Attached image:\s*.+?\]/gi, "")
+      .replace(/\s+/g, " ")
+      .trim() || "Attached image";
+    const body = el("span", { class: "pending-chip-text" }, [preview]);
     chip.appendChild(body);
     const remove = el("button", {
       class: "pending-chip-x",
@@ -1370,11 +1432,49 @@ export class Chat {
   appendUser(text: string, at?: number) {
     const msg = div("msg user");
     msg.appendChild(el("div", { class: "msg-role" }, ["You"]));
-    msg.appendChild(el("div", { class: "msg-body" }, [text]));
+    const body = el("div", { class: "msg-body" });
+    this.renderUserMessageBody(body, text);
+    msg.appendChild(body);
     msg.appendChild(this.messageMeta(() => text, at ?? this.now()));
     this.node.appendChild(msg);
     // Always jump to the message the user just sent
     this.scrollToBottom(true);
+  }
+
+  /** Show image attachments as chips; hide the raw temp-path markers. */
+  private renderUserMessageBody(host: HTMLElement, text: string) {
+    const markerRe = /\[Attached image:\s*(.+?)\]/gi;
+    const paths: string[] = [];
+    let cleaned = text.replace(markerRe, (_full, path: string) => {
+      const p = String(path || "").trim();
+      if (p && !paths.includes(p)) paths.push(p);
+      return "";
+    }).replace(/\n{3,}/g, "\n\n").trim();
+
+    if (paths.length) {
+      const rail = el("div", { class: "msg-attach-rail", "aria-label": "Attached images" });
+      for (const path of paths) {
+        const chip = el("div", { class: "msg-attach-chip", title: "Attached image" });
+        const img = document.createElement("img");
+        img.alt = "Attached image";
+        img.className = "msg-attach-thumb";
+        void import("@tauri-apps/api/core")
+          .then(({ convertFileSrc }) => {
+            img.src = convertFileSrc(path);
+          })
+          .catch(() => {
+            chip.textContent = "Image";
+          });
+        chip.appendChild(img);
+        rail.appendChild(chip);
+      }
+      host.appendChild(rail);
+    }
+    if (cleaned) {
+      host.appendChild(document.createTextNode(cleaned));
+    } else if (!paths.length) {
+      host.textContent = text;
+    }
   }
 
   /** Neutral system/status line (cancel, limits, etc.). */
