@@ -142,6 +142,24 @@ pub fn request_error(error: &reqwest::Error) -> anyhow::Error {
     }
 }
 
+/// Transient transport / upstream blips that should keep the agent run alive
+/// and wait for connectivity instead of ending the turn.
+pub fn is_transient_provider_error(error: &anyhow::Error) -> bool {
+    let message = error.to_string();
+    let code = message
+        .split_once(':')
+        .map(|(code, _)| code.trim())
+        .unwrap_or(message.trim());
+    matches!(
+        code,
+        "network_error"
+            | "connection_failed"
+            | "provider_timeout"
+            | "provider_unavailable"
+            | "rate_limited"
+    )
+}
+
 /// Standard client for cloud providers: bounded connect/read timeouts so a
 /// stalled upstream can never freeze an agent run forever. Read timeout only
 /// fires while the socket is fully idle — active streaming keeps the run alive.
@@ -891,11 +909,17 @@ impl LlmProvider for OpenAi {
                     .header("HTTP-Referer", "https://hormachuelos.vercel.app")
                     .header("X-Title", "Hormachuelos");
             }
-            let response = request
-                .json(&body)
-                .send()
-                .await
-                .map_err(|error| request_error(&error))?;
+            let response = match request.json(&body).send().await {
+                Ok(response) => response,
+                Err(error) => {
+                    let err = request_error(&error);
+                    if attempt < 2 && is_transient_provider_error(&err) {
+                        tokio::time::sleep(Duration::from_millis(400 * (1 << attempt))).await;
+                        continue;
+                    }
+                    return Err(err);
+                }
+            };
             let status = response.status();
             if !status.is_success() {
                 let text = response.text().await.map_err(|_| {
@@ -1048,6 +1072,22 @@ mod tests {
 
         assert!(error.to_string().contains("authentication_failed"));
         assert!(!error.to_string().contains("sk-live-secret"));
+    }
+
+    #[test]
+    fn transient_network_errors_are_retryable() {
+        assert!(is_transient_provider_error(&anyhow!(
+            "network_error: The provider request could not be completed."
+        )));
+        assert!(is_transient_provider_error(&anyhow!(
+            "connection_failed: Could not connect to the provider."
+        )));
+        assert!(is_transient_provider_error(&anyhow!(
+            "provider_timeout: The provider did not respond before the timeout."
+        )));
+        assert!(!is_transient_provider_error(&anyhow!(
+            "authentication_failed: Invalid API key."
+        )));
     }
 
     #[test]

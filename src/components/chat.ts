@@ -105,7 +105,7 @@ export class Chat {
   private deferredAssistantChunks: string[] = [];
   /** Speed up thought reveal when the reply is waiting. */
   private thoughtRevealUrgent = false;
-  /** Whether the current thought body is expanded (toggled via chevron). Default collapsed. */
+  /** Whether the current thought body is expanded (toggled via chevron). Live thoughts start open. */
   private thinkingBodyOpen = false;
   /** Live “Running · tool…” row while tools execute (separate from Thought blocks). */
   private runningIndicator: HTMLElement | null = null;
@@ -1995,7 +1995,7 @@ export class Chat {
 
   /**
    * Paint revealed reasoning text with a live caret while typewriting.
-   * Body only visible when the dots control is expanded.
+   * Live thoughts stay expanded; sealed thoughts stay collapsed until the user opens them.
    */
   private paintThinkingBody() {
     if (!this.thinkingBody) return;
@@ -2187,7 +2187,10 @@ export class Chat {
 
     this.thinkingTarget = detail;
     this.thinking?.classList.toggle("has-detail", !!detail && this.thinkingHasReasoning);
-    // Stay collapsed by default — user expands to read reasoning
+    // Live model thoughts stay uncollapsed so the stream is readable in real time.
+    if (!this.replaying && isReasoning && this.thinking && !this.thinking.classList.contains("thinking-done")) {
+      this.setThinkingBodyOpen(true);
+    }
 
     if (instant || this.replaying || !detail || !isReasoning) {
       this.stopTypewriter();
@@ -2221,7 +2224,10 @@ export class Chat {
   appendThinkingText(text: string) {
     if (!text) return;
     if (!this.thinking) this.showThinking(0);
-    // Content updates while collapsed; expand stays user-controlled
+    // Keep the live thought body open for every model while tokens stream in.
+    if (!this.replaying && this.thinking && !this.thinking.classList.contains("thinking-done")) {
+      this.setThinkingBodyOpen(true);
+    }
     const chunk = text.replace(/\r\n/g, "\n");
     // Drop any prior placeholder; start clean reasoning stream
     if (!this.thinkingHasReasoning) {
@@ -2302,7 +2308,7 @@ export class Chat {
       body.appendChild(textSpan);
     }
 
-    // Start collapsed after seal (Cursor: expand to read thoughts)
+    // Collapse after the thought finishes — expand again to re-read.
     this.bindThinkingToggle(wrap);
     this.setThinkingBodyOpen(false, wrap);
 
@@ -2637,12 +2643,13 @@ export class Chat {
     this.clearRunningIndicator();
     // Reuse live panel when possible so detail doesn't flash away
     if (this.thinking && !this.thinking.classList.contains("thinking-done") && !this.replaying) {
-      // Keep existing real reasoning; only label stays visible until user expands
+      // Keep existing reasoning visible while the model is still thinking.
       if (this.thinkingHasReasoning && this.thinkingText) {
         this.setThinkingDetail(this.thinkingText, true, true);
       } else {
         this.paintThinkingBody();
       }
+      this.setThinkingBodyOpen(true);
       this.setThinkingLabel(this.liveThinkingLabel());
       this.scrollToBottom();
       return;
@@ -2655,17 +2662,19 @@ export class Chat {
     this.thinkingTarget = "";
     this.thinkingRevealed = 0;
     this.thinkingHasReasoning = false;
-    this.thinkingBodyOpen = false;
+    const liveOpen = !this.replaying;
+    this.thinkingBodyOpen = liveOpen;
     this.thinkingLabelPrefix = this.liveThinkingLabel();
 
-    // Collapsed by default — expand to read reasoning
-    const wrap = div("thinking-wrap collapsed");
+    // Live: start expanded so thoughts are readable while streaming.
+    // Replay/history: stay collapsed (seal collapses after load anyway).
+    const wrap = div(liveOpen ? "thinking-wrap expanded" : "thinking-wrap collapsed");
     const toggle = el("button", {
       class: "thinking-toggle-row",
       type: "button",
-      "aria-expanded": "false",
-      title: "Show what it's thinking",
-      "aria-label": "Show thinking",
+      "aria-expanded": liveOpen ? "true" : "false",
+      title: liveOpen ? "Hide what it's thinking" : "Show what it's thinking",
+      "aria-label": liveOpen ? "Hide thinking" : "Show thinking",
     }) as HTMLButtonElement;
     toggle.appendChild(el("span", { class: "thinking-simple-label" }, []));
     toggle.appendChild(el("span", { class: "thinking-chev", html: icon("chevronDown", 12) }));
@@ -2682,7 +2691,7 @@ export class Chat {
     this.decorateThinkingWrap(wrap);
     this.node.appendChild(wrap);
     this.bindThinkingToggle(wrap);
-    this.setThinkingBodyOpen(false, wrap);
+    this.setThinkingBodyOpen(liveOpen, wrap);
     wrap.classList.add("thinking-enter");
     wrap.style.opacity = "1";
     this.thinking = wrap;
@@ -3786,6 +3795,20 @@ export class Chat {
   private renderEvent(e: AgentEvent) {
     switch (e.kind) {
       case "thinking": this.showThinking(e.payload.iteration); break;
+      case "status": {
+        const message = (e.payload.message || "Reconnecting…").trim() || "Reconnecting…";
+        this.clearIdleActivityTimer();
+        // Force the live label even if a tool preview is visible — reconnect
+        // must stay obvious while the run waits for network.
+        if (this.thinking && !this.thinking.classList.contains("thinking-done") && this.thinking.isConnected) {
+          this.setThinkingLabel(message);
+        } else {
+          this.showThinking(0);
+          this.setThinkingLabel(message);
+        }
+        this.scrollToBottom();
+        break;
+      }
       case "reasoning":
         this.clearIdleActivityTimer();
         this.appendThinkingText(e.payload.text);

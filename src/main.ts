@@ -1566,6 +1566,17 @@ function handleAgentEvent(e: AgentEvent) {
     return;
   }
 
+  // Live reconnect / progress status — UI only, never persisted.
+  if (e.kind === "status") {
+    if (isActive) {
+      chat.handleEvent(e);
+      if (/reconnect/i.test(e.payload.message || "")) {
+        sidebar.setStatus("Reconnecting", true);
+      }
+    }
+    return;
+  }
+
   // Track approval prompts for every session (active or background)
   if (e.kind === "tool_confirm" && sid) {
     pendingConfirms.set(sid, {
@@ -1649,6 +1660,16 @@ function handleAgentEvent(e: AgentEvent) {
   if (!isSmartAgentEvent) {
     chat.handleEvent(e);
     workspacePanel.handleAgentEvent(e);
+  }
+  // Clear Reconnecting sidebar once the model is producing work again.
+  if (
+    e.kind === "thinking" ||
+    e.kind === "reasoning" ||
+    e.kind === "text" ||
+    e.kind === "tool_call" ||
+    e.kind === "tool_preview"
+  ) {
+    updateGlobalRunStatus();
   }
   if (e.kind === "tool_call") {
     trackRunTouchedFile(sid, e.payload.name, e.payload.arguments);

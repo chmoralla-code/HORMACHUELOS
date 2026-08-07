@@ -1309,19 +1309,51 @@ Use them as continuous memory for everything that follows.",
                 usage_tokens: 0,
             }
         } else {
-            tokio::select! {
-                biased;
-                _ = wait_until_cancelled(&cancel) => {
-                    emit_cancelled(&app, &session_id, iteration);
-                    return Ok(None);
+            // Stay alive across offline blips: show Reconnecting… and retry
+            // until the provider answers or the user presses Stop.
+            let mut reconnect_attempt: u32 = 0;
+            loop {
+                let result = tokio::select! {
+                    biased;
+                    _ = wait_until_cancelled(&cancel) => {
+                        emit_cancelled(&app, &session_id, iteration);
+                        return Ok(None);
+                    }
+                    result = provider.chat(
+                        &messages,
+                        &tool_schemas,
+                        Some(reasoning_sink.clone()),
+                        Some(content_sink.clone()),
+                        Some(tool_call_sink.clone()),
+                    ) => result,
+                };
+                match result {
+                    Ok(response) => break response,
+                    Err(err) if crate::llm::is_transient_provider_error(&err) => {
+                        reconnect_attempt = reconnect_attempt.saturating_add(1);
+                        let delay_ms = (1_000u64
+                            .saturating_mul(1u64 << reconnect_attempt.min(5)))
+                        .min(30_000);
+                        emit(
+                            &app,
+                            &session_id,
+                            "status",
+                            json!({
+                                "message": "Reconnecting…",
+                                "attempt": reconnect_attempt,
+                            }),
+                        );
+                        tokio::select! {
+                            biased;
+                            _ = wait_until_cancelled(&cancel) => {
+                                emit_cancelled(&app, &session_id, iteration);
+                                return Ok(None);
+                            }
+                            _ = tokio::time::sleep(Duration::from_millis(delay_ms)) => {}
+                        }
+                    }
+                    Err(err) => return Err(err),
                 }
-                result = provider.chat(
-                    &messages,
-                    &tool_schemas,
-                    Some(reasoning_sink),
-                    Some(content_sink),
-                    Some(tool_call_sink),
-                ) => result?,
             }
         };
         resp.text = resp.text.map(|text| {

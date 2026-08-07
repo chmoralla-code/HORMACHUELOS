@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.40";
-const BUILTIN_MSI_SHA256 = "60ac339af8cb024fb4796c179bf4e6ff068d2754905ee5d1bd28a630c3c5ca34";
-const BUILTIN_EXE_SHA256 = "8ef86fbe1aecff30df6c281dabe1fc958b52ae97a3cb87d6400b8c9f02f1dc86";
-const BUILTIN_RELEASE_NOTES = "• Hormachuelos FREE uses the new whale provider logo\n• Vision works for DeepSeek-only allowlisted accounts via the shared vision helper";
+const BUILTIN_RELEASE_VERSION = "0.1.42";
+const BUILTIN_MSI_SHA256 = "2eae7a5961008c082b020abd4bd26b8ed7aa8baa78e0ac41ea6743bb63b95f4a";
+const BUILTIN_EXE_SHA256 = "d0d65c324976314c7904246231a9e6fdab5490bb0825506026852818f980f53b";
+const BUILTIN_RELEASE_NOTES = "Reconnecting keeps runs alive offline. Live thoughts stay expanded while the model is thinking, then collapse when done — all models.";
 
 /**
  * A deployment-bundled release keeps the download/update path available even

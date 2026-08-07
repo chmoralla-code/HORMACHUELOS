@@ -282,6 +282,7 @@ export type AgentEventPayload =
   | { kind: "task_plan"; payload: { title: string; summary: string; steps: { id: string; label: string; state: string }[]; active_step: number; status: string; detail?: string } }
   | { kind: "task_progress"; payload: { step: number; phase: string; status: string; detail: string; completed_before?: number; complete_all?: boolean } }
   | { kind: "thinking"; payload: { iteration: number } }
+  | { kind: "status"; payload: { message: string; attempt?: number; detail?: string } }
   | { kind: "reasoning"; payload: { text: string; iteration?: number } }
   | { kind: "text"; payload: { text: string } }
   | { kind: "tool_preview"; payload: { id: string; name: string; arguments_delta?: string } }

@@ -123,7 +123,7 @@ pub mod gemini;
 pub mod glm;
 pub mod openai;
 
-pub use openai::{build_client, request_error};
+pub use openai::{build_client, is_transient_provider_error, request_error};
 
 pub fn provider_needs_key(provider: &str) -> bool {
     if crate::config::is_custom_hosted_provider_alias(provider) {
