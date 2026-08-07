@@ -48,6 +48,15 @@ struct HostedProviderCatalogEntry {
 #[derive(serde::Deserialize)]
 struct HostedProviderCatalogResponse {
     data: Vec<HostedProviderCatalogEntry>,
+    #[serde(default)]
+    restricted: bool,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HostedProviderCatalogResult {
+    data: Vec<HostedProviderCatalogEntry>,
+    restricted: bool,
 }
 
 #[tauri::command]
@@ -469,7 +478,7 @@ async fn list_provider_models(
 }
 
 #[tauri::command]
-async fn list_hosted_provider_catalog() -> Result<Vec<HostedProviderCatalogEntry>, String> {
+async fn list_hosted_provider_catalog() -> Result<HostedProviderCatalogResult, String> {
     let session = config::load_website_session().unwrap_or_default();
     let license = license::LicenseStatus::load().unwrap_or_default();
     let license_key = if license.hosted && license.active && !license.license_key.trim().is_empty()
@@ -479,7 +488,10 @@ async fn list_hosted_provider_catalog() -> Result<Vec<HostedProviderCatalogEntry
         String::new()
     };
     if session.trim().is_empty() && license_key.trim().is_empty() {
-        return Ok(Vec::new());
+        return Ok(HostedProviderCatalogResult {
+            data: Vec::new(),
+            restricted: false,
+        });
     }
 
     let client = reqwest::Client::builder()
@@ -555,7 +567,10 @@ async fn list_hosted_provider_catalog() -> Result<Vec<HostedProviderCatalogEntry
         }
     }
     catalog.sort_by(|left, right| left.label.cmp(&right.label));
-    Ok(catalog)
+    Ok(HostedProviderCatalogResult {
+        data: catalog,
+        restricted: payload.restricted,
+    })
 }
 
 #[tauri::command]

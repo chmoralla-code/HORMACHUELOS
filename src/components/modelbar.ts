@@ -1,5 +1,5 @@
 import { api, type Settings } from "../ipc";
-import { PROVIDERS, effortOptionsForProvider, displayModelName, getProviderMeta, getSettingsSafe, hasStaticModelCatalog, isUltraEffort, mergeProviderModelCatalog, normalizeEffortForProvider, refreshHostedProviderCatalog, uiProviderId, usesReasoningEffort, visibleProviders } from "./settings";
+import { PROVIDERS, effortOptionsForProvider, displayModelName, getProviderMeta, getSettingsSafe, hasStaticModelCatalog, isHostedCatalogRestricted, isUltraEffort, mergeProviderModelCatalog, normalizeEffortForProvider, refreshHostedProviderCatalog, uiProviderId, usesReasoningEffort, visibleProviders } from "./settings";
 import { clear, el, escapeHtml } from "./util";
 import { icon, icons } from "./icons";
 
@@ -245,6 +245,13 @@ export class ModelBar {
       for (const providerId of this.hostedCatalogProviderIds) {
         if (!nextProviderIds.has(providerId)) delete this.discoveredModels[providerId];
       }
+      // Drop any previously discovered BYOK catalogs when this account is under
+      // an admin allowlist — otherwise prohibited providers stay selectable.
+      if (isHostedCatalogRestricted()) {
+        for (const providerId of Object.keys(this.discoveredModels)) {
+          if (!nextProviderIds.has(providerId)) delete this.discoveredModels[providerId];
+        }
+      }
       for (const provider of catalog) {
         const models = mergeProviderModelCatalog(
           provider.id,
@@ -253,15 +260,42 @@ export class ModelBar {
         if (models.length) this.discoveredModels[provider.id] = models;
       }
       this.hostedCatalogProviderIds = nextProviderIds;
+      await this.enforceHostedAllowlist();
     } catch {
       // Keep the last known picker and built-in providers when the account is
       // offline, unsigned, or the hosted catalog is temporarily unavailable.
     }
   }
 
+  /** If admin restricted this account, force the picker onto an allowed model. */
+  private async enforceHostedAllowlist() {
+    if (!isHostedCatalogRestricted() || !this.settings) return;
+    const allowed = visibleProviders();
+    if (!allowed.length) return;
+    const currentOk = allowed.some((provider) => provider.id === this.settings!.provider);
+    if (!currentOk) {
+      const next = allowed[0]!;
+      this.settings.provider = next.id;
+      this.settings.model = next.defaultModel || next.models[0] || this.settings.model;
+      if (next.defaultBaseUrl) this.settings.base_url = next.defaultBaseUrl;
+      await api.saveSettings(this.settings).catch(() => {});
+      this.renderProviderRail();
+      this.onChange();
+      return;
+    }
+    const models = this.modelsForProvider(this.settings.provider);
+    if (models.length && !models.includes(this.settings.model)) {
+      this.settings.model = models[0]!;
+      await api.saveSettings(this.settings).catch(() => {});
+      this.renderProviderRail();
+      this.onChange();
+    }
+  }
+
   /** Load full model list from the provider API (no manual pick of which models appear). */
   private async ensureModelsLoaded(providerId: string) {
     if (this.discoveredModels[providerId]?.length) return;
+    if (isHostedCatalogRestricted() && !this.hostedCatalogProviderIds.has(providerId)) return;
     const meta = getProviderMeta(providerId);
     if (!meta) return;
     if (hasStaticModelCatalog(providerId)) return;

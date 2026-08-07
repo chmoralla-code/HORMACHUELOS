@@ -2,7 +2,7 @@ import { api, onAgentEvent, onComputerUseFx, onComputerUseStatus, type AgentEven
 import { Sidebar } from "./components/sidebar";
 import { Chat } from "./components/chat";
 import { ConsolePanel } from "./components/console";
-import { displayModelName, displayProviderName, getProviderMeta, getSettingsSafe } from "./components/settings";
+import { displayModelName, displayProviderName, getProviderMeta, getSettingsSafe, isHostedCatalogRestricted, visibleProviders } from "./components/settings";
 import { ModelBar } from "./components/modelbar";
 import { ProjectPicker } from "./components/picker";
 import { WorkspacePanel } from "./components/workspace";
@@ -1393,6 +1393,16 @@ async function sendPrompt(prompt: string) {
   if (!(await refreshProviderReadiness())) {
     reportError("Connect the selected provider before sending a request.");
     return;
+  }
+  if (isHostedCatalogRestricted()) {
+    const allowed = visibleProviders();
+    const providerId = String(modelBar?.settings?.provider || "").trim();
+    const modelId = String(modelBar?.settings?.model || "").trim();
+    const provider = allowed.find((entry) => entry.id === providerId);
+    if (!provider || (provider.models.length > 0 && !provider.models.includes(modelId))) {
+      reportError("This AI provider or model is not enabled for your account.");
+      return;
+    }
   }
   if (!sameProjectPath(projectRoot, currentProjectPath)) {
     reportError("Project changed before the request started. Send it again from the active project.");

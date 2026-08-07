@@ -218,6 +218,12 @@ const BUILTIN_PROVIDERS: ProviderDef[] = PROVIDERS.map((provider) => ({
 }));
 const HOSTED_PROVIDER_CATALOG = new Map<string, HostedProviderCatalogEntry>();
 const HOSTED_MODEL_DISPLAY_NAMES = new Map<string, string>();
+/** When true, the server allowlist is exclusive — no builtin provider/model fallbacks. */
+let hostedCatalogRestricted = false;
+
+export function isHostedCatalogRestricted(): boolean {
+  return hostedCatalogRestricted;
+}
 
 function hostedModelNameKey(providerId: string, modelId: string): string {
   return `${providerId}\u0000${modelId}`;
@@ -275,13 +281,15 @@ function providerFromHostedCatalog(entry: HostedProviderCatalogEntry): ProviderD
     };
   }
   // HORMACHUELOS FREE deliberately keeps its installed V1/V2 fallback aliases
-  // visible while newer aliases come from the server. Other managed providers
-  // expose exactly the aliases approved by the administrator.
-  const approvedModels = id === "hormachuelos_free"
-    ? uniqueModels([...builtin.models, ...models])
-    : id === "openrouter"
-      ? ["openrouter/free"]
-      : models;
+  // visible while newer aliases come from the server — unless this account is
+  // under an admin allowlist, in which case the server list is exclusive.
+  const approvedModels = hostedCatalogRestricted
+    ? models
+    : id === "hormachuelos_free"
+      ? uniqueModels([...builtin.models, ...models])
+      : id === "openrouter"
+        ? ["openrouter/free"]
+        : models;
   return {
     ...builtin,
     label,
@@ -302,6 +310,20 @@ function rebuildProviderCatalog() {
     const provider = providerFromHostedCatalog(entry);
     if (provider) managed.set(provider.id, provider);
   }
+
+  // Admin allowlists are exclusive: only the providers returned by the hosted
+  // catalog may appear. Local BYOK / Ollama / Cursor are also locked out so a
+  // prohibited model cannot be selected outside the allowlist.
+  if (hostedCatalogRestricted && managed.size > 0) {
+    const providers = [...managed.values()].map((provider) => ({
+      ...provider,
+      hidden: false,
+      models: [...provider.models],
+    }));
+    PROVIDERS.splice(0, PROVIDERS.length, ...providers);
+    return;
+  }
+
   const providers = BUILTIN_PROVIDERS.map((provider) => managed.get(provider.id) || {
     ...provider,
     models: [...provider.models],
@@ -313,20 +335,28 @@ function rebuildProviderCatalog() {
 }
 
 /** Store a fresh, public-safe catalog after a successful hosted API request. */
-export function setHostedProviderCatalog(entries: readonly HostedProviderCatalogEntry[]) {
+export function setHostedProviderCatalog(
+  entries: readonly HostedProviderCatalogEntry[],
+  options?: { restricted?: boolean },
+) {
+  hostedCatalogRestricted = Boolean(options?.restricted);
   HOSTED_PROVIDER_CATALOG.clear();
   HOSTED_MODEL_DISPLAY_NAMES.clear();
   for (const entry of entries) {
     const provider = providerFromHostedCatalog(entry);
     if (!provider || HOSTED_PROVIDER_CATALOG.has(provider.id)) continue;
+    // When restricted, trust the server model list exactly. Otherwise keep the
+    // previous filter that drops unknown labels while preserving known aliases.
     const models = entry.models
       .map((model) => ({ id: String(model?.id || "").trim(), label: String(model?.label || "").trim() }))
       .filter((model) =>
-        provider.models.includes(model.id) &&
+        model.id.length > 0 &&
         model.label.length > 0 &&
         model.label.length <= 120 &&
-        !/[\u0000-\u001f\u007f]/.test(model.label),
+        !/[\u0000-\u001f\u007f]/.test(model.label) &&
+        (hostedCatalogRestricted || provider.models.includes(model.id)),
       );
+    if (!models.length) continue;
     HOSTED_PROVIDER_CATALOG.set(provider.id, {
       id: provider.id,
       label: provider.label,
@@ -341,9 +371,15 @@ export function setHostedProviderCatalog(entries: readonly HostedProviderCatalog
 
 /** Fetch current administrator-managed aliases without ever receiving API keys. */
 export async function refreshHostedProviderCatalog(): Promise<HostedProviderCatalogEntry[]> {
-  const entries = await api.listHostedProviderCatalog();
-  setHostedProviderCatalog(entries);
-  return entries;
+  const raw = await api.listHostedProviderCatalog();
+  const payload = Array.isArray(raw)
+    ? { data: raw, restricted: false }
+    : {
+        data: Array.isArray(raw?.data) ? raw.data : [],
+        restricted: Boolean(raw?.restricted),
+      };
+  setHostedProviderCatalog(payload.data, { restricted: payload.restricted });
+  return payload.data;
 }
 
 /** Providers shown in pickers. */
@@ -439,6 +475,10 @@ export function hasStaticModelCatalog(providerId: string): boolean {
  * desktop picker.
  */
 export function mergeProviderModelCatalog(providerId: string, models: readonly string[]): string[] {
+  const hosted = HOSTED_PROVIDER_CATALOG.get(providerId);
+  if (hostedCatalogRestricted && hosted?.models?.length) {
+    return uniqueModels(hosted.models.map((model) => model.id));
+  }
   const meta = getProviderMeta(providerId);
   const configured =
     providerId === "hormachuelos_free" ||

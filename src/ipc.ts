@@ -46,6 +46,11 @@ export type HostedProviderCatalogEntry = {
   models: HostedProviderCatalogModel[];
 };
 
+export type HostedProviderCatalogResult = {
+  data: HostedProviderCatalogEntry[];
+  restricted?: boolean;
+};
+
 export type ComputerUseStatus = {
   supported: boolean;
   paused: boolean;
@@ -154,7 +159,7 @@ export const api = {
     invoke("test_provider_connection", { provider, model, baseUrl }),
   listProviderModels: (provider: string, baseUrl: string | null): Promise<string[]> =>
     invoke("list_provider_models", { provider, baseUrl }),
-  listHostedProviderCatalog: (): Promise<HostedProviderCatalogEntry[]> =>
+  listHostedProviderCatalog: (): Promise<HostedProviderCatalogResult | HostedProviderCatalogEntry[]> =>
     invoke("list_hosted_provider_catalog"),
   createProjectDir: (path: string, templateId?: string): Promise<void> =>
     invoke("create_project_dir", { path, templateId: templateId ?? null }),

@@ -232,21 +232,33 @@ async function handleCatalog(req, res) {
 
   const access = await resolveAccountAccess(req, accountEntitlement || bearerLicense);
   const filtered = filterCatalogByAccountAccess(available, access);
-  return json(res, 200, { object: "list", data: filtered }, req);
+  return json(
+    res,
+    200,
+    {
+      object: "list",
+      data: filtered,
+      // Desktop must treat this catalog as exclusive when true (no builtin
+      // provider/model fallbacks that would ignore the admin allowlist).
+      restricted: Boolean(access?.restricted),
+    },
+    req,
+  );
 }
 
 async function handleModels(req, res) {
   if (req.method !== "GET") return json(res, 405, { error: "Method not allowed" }, req);
   const provider = String(req.headers["x-horma-provider"] || "openrouter").toLowerCase();
+  let license = null;
   if (provider === HORMACHUELOS_FREE_PROVIDER) {
-    let freeLicense = await authenticatedFreeEntitlement(req);
-    if (!freeLicense) {
+    license = await authenticatedFreeEntitlement(req);
+    if (!license) {
       const licenseKey = bearerToken(req);
       const paid = licenseKey ? await getLicenseByKey(licenseKey) : null;
       if (!isUsablePaidLicense(paid)) {
         return json(res, 401, { error: "Sign in to use HORMACHUELOS FREE." }, req);
       }
-      freeLicense = paid;
+      license = paid;
     }
     const upstream = await resolveUpstream(provider);
     if (upstream.error) {
@@ -255,14 +267,16 @@ async function handleModels(req, res) {
     const modelIds = upstream.modelRoutes?.length
       ? upstream.modelRoutes.map((route) => route.alias)
       : Object.keys(upstream.modelAliases || {});
+    const access = await resolveAccountAccess(req, license);
+    const allowed = modelIds.filter((id) => !accountAccessDeniedMessage(access, provider, id));
     return json(res, 200, {
       object: "list",
-      data: modelIds.map((id) => ({ id, object: "model", owned_by: "hormachuelos" })),
+      data: allowed.map((id) => ({ id, object: "model", owned_by: "hormachuelos" })),
     }, req);
   }
   const licenseKey = bearerToken(req);
   if (!licenseKey) return json(res, 401, { error: "Missing license key" }, req);
-  const license = await getLicenseByKey(licenseKey);
+  license = await getLicenseByKey(licenseKey);
   if (!license?.active) return json(res, 403, { error: "Invalid license" }, req);
 
   const upstream = await resolveUpstream(provider);
@@ -275,9 +289,14 @@ async function handleModels(req, res) {
     ? upstream.modelRoutes.map((route) => route.alias)
     : Object.keys(upstream.modelAliases || {});
   if (configuredModelIds.length) {
+    const access = await resolveAccountAccess(req, license);
+    if (access?.restricted && !(access.providers || []).includes(provider)) {
+      return json(res, 200, { object: "list", data: [] }, req);
+    }
+    const allowed = configuredModelIds.filter((id) => !accountAccessDeniedMessage(access, provider, id));
     return json(res, 200, {
       object: "list",
-      data: configuredModelIds.map((id) => ({ id, object: "model", owned_by: provider })),
+      data: allowed.map((id) => ({ id, object: "model", owned_by: provider })),
     }, req);
   }
 
