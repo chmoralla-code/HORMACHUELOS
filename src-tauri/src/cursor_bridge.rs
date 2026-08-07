@@ -517,6 +517,18 @@ fn handle_event(
             );
             *saw_error = Some(msg);
         }
+        "status" => {
+            let message = event
+                .message
+                .or(event.text)
+                .unwrap_or_else(|| "Working…".into());
+            emit(
+                app,
+                session_id,
+                "status",
+                json!({ "message": message }),
+            );
+        }
         _ => {}
     }
     false

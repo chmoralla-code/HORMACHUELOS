@@ -28,7 +28,8 @@ import {
 
 export const config = {
   api: { bodyParser: false },
-  maxDuration: 60,
+  // Long continue/session turns need more than the hobby default; Pro allows 300s.
+  maxDuration: 300,
 };
 
 const HORMACHUELOS_FREE_PROVIDER = "hormachuelos_free";

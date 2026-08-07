@@ -1314,8 +1314,8 @@ Use them as continuous memory for everything that follows.",
                 usage_tokens: 0,
             }
         } else {
-            // Stay alive across offline blips: show Reconnecting… and retry
-            // until the provider answers or the user presses Stop.
+            // Stay alive across brief offline blips. Cap retries for stream cuts /
+            // proxy timeouts so continuing a session never loops on Reconnecting….
             let mut reconnect_attempt: u32 = 0;
             loop {
                 let result = tokio::select! {
@@ -1334,17 +1334,31 @@ Use them as continuous memory for everything that follows.",
                 };
                 match result {
                     Ok(response) => break response,
-                    Err(err) if crate::llm::is_transient_provider_error(&err) => {
+                    Err(err) => {
+                        let Some(limit) = crate::llm::reconnect_attempt_limit(&err) else {
+                            return Err(err);
+                        };
                         reconnect_attempt = reconnect_attempt.saturating_add(1);
+                        // limit == 0 means keep waiting for real connectivity.
+                        if limit > 0 && reconnect_attempt > limit {
+                            return Err(err);
+                        }
                         let delay_ms = (1_000u64
                             .saturating_mul(1u64 << reconnect_attempt.min(5)))
                         .min(30_000);
+                        let status_message = if limit == 0 {
+                            "Reconnecting…"
+                        } else if reconnect_attempt >= limit {
+                            "Reconnecting… last try"
+                        } else {
+                            "Reconnecting…"
+                        };
                         emit(
                             &app,
                             &session_id,
                             "status",
                             json!({
-                                "message": "Reconnecting…",
+                                "message": status_message,
                                 "attempt": reconnect_attempt,
                             }),
                         );
@@ -1357,7 +1371,6 @@ Use them as continuous memory for everything that follows.",
                             _ = tokio::time::sleep(Duration::from_millis(delay_ms)) => {}
                         }
                     }
-                    Err(err) => return Err(err),
                 }
             }
         };

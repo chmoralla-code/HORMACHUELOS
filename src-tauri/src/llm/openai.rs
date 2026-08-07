@@ -145,19 +145,30 @@ pub fn request_error(error: &reqwest::Error) -> anyhow::Error {
 /// Transient transport / upstream blips that should keep the agent run alive
 /// and wait for connectivity instead of ending the turn.
 pub fn is_transient_provider_error(error: &anyhow::Error) -> bool {
+    reconnect_attempt_limit(error).is_some()
+}
+
+/// How many reconnect attempts to allow for this error.
+/// - `None` — not retryable (caller should fail immediately)
+/// - `Some(0)` — keep retrying until the user stops (true offline)
+/// - `Some(n)` where n > 0 — retry up to n times, then surface the error
+///
+/// Stream cuts / proxy timeouts must NOT loop forever: continuing a long
+/// session against a 60s hosted proxy would otherwise show "Reconnecting…"
+/// indefinitely after an update.
+pub fn reconnect_attempt_limit(error: &anyhow::Error) -> Option<u32> {
     let message = error.to_string();
     let code = message
         .split_once(':')
         .map(|(code, _)| code.trim())
         .unwrap_or(message.trim());
-    matches!(
-        code,
-        "network_error"
-            | "connection_failed"
-            | "provider_timeout"
-            | "provider_unavailable"
-            | "rate_limited"
-    )
+    match code {
+        // Machine is offline / DNS / TCP — wait for the network to return.
+        "connection_failed" => Some(0),
+        "rate_limited" => Some(6),
+        "provider_timeout" | "provider_unavailable" | "network_error" => Some(4),
+        _ => None,
+    }
 }
 
 /// Standard client for cloud providers: bounded connect/read timeouts so a
@@ -1076,14 +1087,30 @@ mod tests {
 
     #[test]
     fn transient_network_errors_are_retryable() {
+        assert_eq!(
+            reconnect_attempt_limit(&anyhow!(
+                "network_error: The provider request could not be completed."
+            )),
+            Some(4)
+        );
+        assert_eq!(
+            reconnect_attempt_limit(&anyhow!(
+                "connection_failed: Could not connect to the provider."
+            )),
+            Some(0)
+        );
+        assert_eq!(
+            reconnect_attempt_limit(&anyhow!(
+                "provider_timeout: The provider did not respond before the timeout."
+            )),
+            Some(4)
+        );
+        assert!(reconnect_attempt_limit(&anyhow!(
+            "authentication_failed: Invalid API key."
+        ))
+        .is_none());
         assert!(is_transient_provider_error(&anyhow!(
             "network_error: The provider request could not be completed."
-        )));
-        assert!(is_transient_provider_error(&anyhow!(
-            "connection_failed: Could not connect to the provider."
-        )));
-        assert!(is_transient_provider_error(&anyhow!(
-            "provider_timeout: The provider did not respond before the timeout."
         )));
         assert!(!is_transient_provider_error(&anyhow!(
             "authentication_failed: Invalid API key."

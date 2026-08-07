@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.43";
-const BUILTIN_MSI_SHA256 = "096d3b80dc987306585a7efefe0ab2c11b2ee29c947a405973880ad6876d7ed1";
-const BUILTIN_EXE_SHA256 = "9877b4eb1dcfbe07614f39560dea91a3d4d1d3fb48addb9335dd8bf481703122";
-const BUILTIN_RELEASE_NOTES = "Each chat session in a project keeps its own memory. New sessions no longer inherit conversation context from other sessions in the same folder.";
+const BUILTIN_RELEASE_VERSION = "0.1.44";
+const BUILTIN_MSI_SHA256 = "202f80a1c4f4c7786b6d0ad2d968eb1f5c295209af681a5e717c3ec51655976e";
+const BUILTIN_EXE_SHA256 = "3d3ace600ba742c06ce2b6fe41ce3d10e262ad06b4f97ea3f3274a2145859948";
+const BUILTIN_RELEASE_NOTES = "Fix endless Reconnecting when continuing a session after update. Cap retries, clear stale Cursor agent ids, and extend hosted proxy time for long continues.";
 
 /**
  * A deployment-bundled release keeps the download/update path available even

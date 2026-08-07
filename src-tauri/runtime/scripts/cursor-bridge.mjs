@@ -851,10 +851,17 @@ async function runMain(protocol) {
     try {
       agent = await Agent.resume(requestedAgentId, options);
       resumed = true;
-    } catch {
-      // A stale/corrupt SDK checkpoint must not destroy conversation continuity:
-      // create a clean agent and replay only the bounded transcript below.
+    } catch (resumeErr) {
+      // Pre-0.1.43 agents lived in the default Cursor store. After the
+      // per-session store migration, resume fails — start clean and replay
+      // only this chat's Hormachuelos transcript (never another session).
+      write({
+        type: "status",
+        message: "Starting a fresh agent for this session…",
+      });
       agent = await Agent.create(options);
+      resumed = false;
+      void resumeErr;
     }
   } else {
     agent = await Agent.create(options);

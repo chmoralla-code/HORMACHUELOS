@@ -2,7 +2,7 @@
   "cleanUrls": true,
   "functions": {
     "api/v1/[...path].js": {
-      "maxDuration": 60
+      "maxDuration": 300
     },
     "api/payments/[...path].js": {
       "maxDuration": 60

@@ -1505,9 +1505,24 @@ async function sendPrompt(prompt: string) {
         sessionRegistry.set(owning.id, owning);
         saveSession(owning);
       }
+    } else if (nextAgentId === null || nextAgentId === "") {
+      // Run finished without a Cursor agent — fine for non-Cursor models.
     }
   } catch (e: any) {
     const msg = String(e ?? "");
+    // Stale Cursor agent ids from before per-session stores break continue.
+    // Drop them so the next send creates a clean agent for this chat only.
+    if (
+      /agent not found|failed to resume|checkpoint|cursor bridge|sdk/i.test(msg) ||
+      /network_error|connection_failed|provider_timeout|provider_unavailable/i.test(msg)
+    ) {
+      const owning = sessionForId(sessionId);
+      if (owning?.cursorAgentId) {
+        owning.cursorAgentId = undefined;
+        sessionRegistry.set(owning.id, owning);
+        saveSession(owning);
+      }
+    }
     // The hosted API returns this only when its own wallet check says empty.
     // Refresh immediately so the drawer cannot keep showing an old, high
     // percentage after a request made from another device has consumed usage.
