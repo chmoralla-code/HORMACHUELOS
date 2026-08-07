@@ -13,6 +13,7 @@ const FALLBACK_STEPS = [
   ["inspect", "Inspect"],
   ["implement", "Build"],
   ["validate", "Check"],
+  ["debug", "Debug"],
   ["deliver", "Done"],
 ] as const;
 
@@ -23,6 +24,7 @@ function shortStepLabel(id: string, label: string): string {
     inspect: "Inspect",
     implement: "Build",
     validate: "Check",
+    debug: "Debug",
     deliver: "Done",
   };
   if (byId[id]) return byId[id];

@@ -93,6 +93,7 @@ async function installHormachuelosLongRunMock(page) {
           { id: "inspect", label: "Inspect the workspace", state: "pending" },
           { id: "implement", label: "Implement the requested work", state: "pending" },
           { id: "validate", label: "Validate the result", state: "pending" },
+          { id: "debug", label: "Debug failures", state: "pending" },
           { id: "deliver", label: "Deliver the result", state: "pending" },
         ],
       });
@@ -105,23 +106,34 @@ async function installHormachuelosLongRunMock(page) {
       const totalWorkRounds = 15;
       for (let round = 0; round < totalWorkRounds; round += 1) {
         event("thinking", { iteration: round });
-        const step = round < 2 ? 1 : round < totalWorkRounds - 2 ? 2 : 3;
+        const step = round < 2 ? 1 : round < totalWorkRounds - 3 ? 2 : round < totalWorkRounds - 1 ? 3 : 4;
         event("task_progress", {
           step,
-          phase: ["scope", "inspect", "implement", "validate", "deliver"][step],
+          phase: ["scope", "inspect", "implement", "validate", "debug", "deliver"][step],
           status: "active",
           completed_before: step,
-          detail: step === 3 ? "Running a focused validation check..." : "Applying the requested changes...",
+          detail: step === 4
+            ? "Debugging failures and inspecting runtime evidence..."
+            : step === 3
+              ? "Running a focused validation check..."
+              : "Applying the requested changes...",
         });
         const id = `long-task-${round}`;
         event("tool_call", {
           id,
-          name: round < 2 ? "read_file" : round < totalWorkRounds - 2 ? "write_file" : "run_command",
-          arguments: round < 2 ? { path: "src/main.ts" } : round < totalWorkRounds - 2
+          name: round < 2 ? "read_file" : round < totalWorkRounds - 3 ? "write_file" : round < totalWorkRounds - 1 ? "run_command" : "grep",
+          arguments: round < 2 ? { path: "src/main.ts" } : round < totalWorkRounds - 3
             ? { path: `src/feature-${round}.ts`, content: "// simulated" }
-            : { command: "npm run check" },
+            : round < totalWorkRounds - 1
+              ? { command: "npm run check" }
+              : { pattern: "Error", path: "src" },
         });
-        event("tool_result", { id, name: round < 2 ? "read_file" : round < totalWorkRounds - 2 ? "write_file" : "run_command", ok: true, content: "ok" });
+        event("tool_result", {
+          id,
+          name: round < 2 ? "read_file" : round < totalWorkRounds - 3 ? "write_file" : round < totalWorkRounds - 1 ? "run_command" : "grep",
+          ok: true,
+          content: "ok",
+        });
         if (round < totalWorkRounds - 1) {
           event("reasoning", {
             iteration: round,
@@ -132,7 +144,7 @@ async function installHormachuelosLongRunMock(page) {
       }
 
       event("task_progress", {
-        step: 4,
+        step: 5,
         phase: "deliver",
         status: "completed",
         complete_all: true,

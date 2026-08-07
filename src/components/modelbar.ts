@@ -161,6 +161,67 @@ export class ModelBar {
     if (typeof this.settings !== "undefined") this.renderProviderRail();
   }
 
+  /** Current provider/model/effort shown to the user (locked run wins while busy). */
+  currentProfile(): { provider: string; model: string; effort: string } | null {
+    if (!this.settings) return null;
+    const locked = this.activeRunProfile;
+    return {
+      provider: locked?.provider || this.settings.provider,
+      model: locked?.model || this.settings.model,
+      effort: locked?.effort || this.settings.model_effort || "medium",
+    };
+  }
+
+  /**
+   * Restore another session's remembered model into the shared composer and
+   * settings file so the next agent_run uses that conversation's selection.
+   */
+  async applySessionProfile(profile: {
+    provider: string;
+    model: string;
+    effort?: string;
+  }): Promise<boolean> {
+    if (!this.settings) return false;
+    if (this.modelSelectionLocked()) return false;
+    const provider = String(profile.provider || "").trim();
+    const model = String(profile.model || "").trim();
+    if (!provider || !model) return false;
+    const effort = profile.effort
+      ? normalizeEffortForProvider(provider, profile.effort)
+      : normalizeEffortForProvider(provider, this.settings.model_effort);
+    const meta = getProviderMeta(provider);
+    const same =
+      this.settings.provider === provider &&
+      this.settings.model === model &&
+      this.settings.model_effort === effort;
+    if (same) {
+      this.renderProviderRail();
+      return true;
+    }
+    const selectionGeneration = ++this.providerSelectionGeneration;
+    this.settings.provider = provider;
+    this.settings.model = model;
+    this.settings.model_effort = effort;
+    if (meta?.defaultBaseUrl) {
+      this.settings.base_url = meta.defaultBaseUrl;
+    }
+    try {
+      await api.saveSettings(this.settings);
+      if (selectionGeneration !== this.providerSelectionGeneration) return false;
+      this.settings = await api.getSettings();
+      this.normalizeMode();
+      this.syncCapabilityDefault();
+      this.renderProviderRail();
+      void this.ensureModelsLoaded(this.settings.provider);
+      this.onChange();
+      return true;
+    } catch (e) {
+      console.error(e);
+      this.setStatus("Could not restore this session's model", true);
+      return false;
+    }
+  }
+
   private modelSelectionLocked(): boolean {
     return this.activeRunProfile !== null;
   }

@@ -70,6 +70,13 @@ export interface Session {
   preview?: SessionPreviewState;
   /** Per-session Smart Agent plan and its latest progress. */
   smartAgent?: SmartAgentTaskState;
+  /**
+   * Model chosen for this conversation. The composer is shared UI, but each
+   * session remembers its own provider/model so switching sessions restores it.
+   */
+  preferredProvider?: string;
+  preferredModel?: string;
+  preferredEffort?: string;
 }
 
 /** Keep a background session's saved reply as tidy as the live chat renderer. */
@@ -281,7 +288,14 @@ function sanitizeSessionPreview(value: unknown): SessionPreviewState | undefined
 
 const SMART_AGENT_MAX_STEPS = 8;
 const SMART_AGENT_MAX_TEXT = 300;
-const SMART_AGENT_STEP_IDS = new Set(["scope", "inspect", "implement", "validate", "deliver"]);
+const SMART_AGENT_STEP_IDS = new Set([
+  "scope",
+  "inspect",
+  "implement",
+  "validate",
+  "debug",
+  "deliver",
+]);
 
 function clipSmartAgentText(value: unknown, fallback = ""): string {
   if (typeof value !== "string") return fallback;
@@ -412,13 +426,26 @@ export function loadSessions(projectId: string): Session[] {
 function safeSessionForStorage(session: Session): Session {
   const preview = sanitizeSessionPreview(session.preview);
   const smartAgent = sanitizeSmartAgentTaskState(session.smartAgent);
+  const preferredProvider = sanitizeSessionModelId(session.preferredProvider, 64);
+  const preferredModel = sanitizeSessionModelId(session.preferredModel, 200);
+  const preferredEffort = sanitizeSessionModelId(session.preferredEffort, 32);
   return {
     ...session,
     title: redactChatCredentials(session.title),
     messages: session.messages.map(redactSessionMessage),
     preview,
     smartAgent,
+    preferredProvider,
+    preferredModel,
+    preferredEffort,
   };
+}
+
+function sanitizeSessionModelId(value: unknown, max: number): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  if (!text || text.length > max || /[\u0000-\u001f\u007f]/.test(text)) return undefined;
+  return text;
 }
 
 /** Write one or more sessions with a single parse/stringify/localStorage cycle. */

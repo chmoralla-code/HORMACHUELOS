@@ -86,7 +86,7 @@ export default async function handler(req, res) {
         const body = await readJson(req);
         const id = body.id || body.userId;
         if (!id) return json(res, 400, { error: "Missing user id" }, req);
-        const user = await updateAdminUser(id, {
+        const patch = {
           name: body.name,
           plan: body.plan,
           period: body.period,
@@ -95,7 +95,14 @@ export default async function handler(req, res) {
           tokensUsed: body.tokensUsed,
           expiresAt: body.expiresAt,
           licenseActive: body.licenseActive,
-        });
+        };
+        if ("allowedProviders" in body || "allowed_providers" in body) {
+          patch.allowedProviders = body.allowedProviders ?? body.allowed_providers;
+        }
+        if ("allowedModels" in body || "allowed_models" in body) {
+          patch.allowedModels = body.allowedModels ?? body.allowed_models;
+        }
+        const user = await updateAdminUser(id, patch);
         return json(res, 200, { ok: true, user }, req);
       }
     }

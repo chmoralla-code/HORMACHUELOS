@@ -845,6 +845,10 @@ button, input, select, textarea {
   min-width: 960px;
 }
 
+.admin-users-table {
+  min-width: 1100px;
+}
+
 .admin-table th,
 .admin-table td {
   padding: 12px 10px;
@@ -879,6 +883,93 @@ button, input, select, textarea {
   flex-direction: column;
   gap: 4px;
   min-width: 180px;
+}
+
+.admin-access-panel td {
+  background: rgba(0, 0, 0, 0.16);
+}
+
+.admin-access-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 2px 8px;
+}
+
+.admin-access-hint {
+  margin: 0;
+}
+
+.admin-access-body {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.9fr) minmax(260px, 1.4fr);
+  gap: 14px;
+}
+
+.admin-access-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.admin-access-col > strong {
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.admin-access-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 240px;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-0);
+}
+
+.admin-access-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 0.86rem;
+  line-height: 1.35;
+}
+
+.admin-access-check input {
+  margin-top: 2px;
+}
+
+.admin-access-model-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.admin-access-model-group:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.admin-access-model-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-weight: 650;
+}
+
+.admin-access-model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding-left: 4px;
 }
 
 .admin-active {
@@ -1916,7 +2007,8 @@ button, input, select, textarea {
   .admin-provider-grid,
   .admin-model-grid,
   .admin-model-row .admin-model-grid,
-  .admin-add-model .admin-model-grid {
+  .admin-add-model .admin-model-grid,
+  .admin-access-body {
     grid-template-columns: 1fr;
   }
 

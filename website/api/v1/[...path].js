@@ -4,6 +4,7 @@ import {
   getLicenseByKey,
   getLicenseByEmail,
   getHormachuelosFreeLicenseByEmail,
+  getAccountByEmail,
   insertLicense,
   insertUsageEvent,
   supabaseConfigured,
@@ -19,6 +20,11 @@ import {
   relayCommandCodeStream,
 } from "../_lib/commandcode-proxy.js";
 import { accountFromRequest } from "../_lib/auth.js";
+import {
+  accountAccessDeniedMessage,
+  accountAccessFromRow,
+  filterCatalogByAccountAccess,
+} from "../_lib/user-access.js";
 
 export const config = {
   api: { bodyParser: false },
@@ -158,6 +164,20 @@ async function authenticatedFreeEntitlement(req) {
   return freeEntitlementFor(account);
 }
 
+/** Resolve optional per-account provider/model allowlists for this request. */
+async function resolveAccountAccess(req, license) {
+  const sessionAccount = await accountFromRequest(req);
+  if (sessionAccount) return accountAccessFromRow(sessionAccount);
+  const email = String(license?.email || "").trim().toLowerCase();
+  if (!email) return accountAccessFromRow(null);
+  try {
+    const account = await getAccountByEmail(email);
+    return accountAccessFromRow(account);
+  } catch {
+    return accountAccessFromRow(null);
+  }
+}
+
 /**
  * Return the provider/model aliases that this desktop installation may use.
  * This is intentionally a catalog only: it never contains upstream model ids,
@@ -209,7 +229,10 @@ async function handleCatalog(req, res) {
       });
     }
   }
-  return json(res, 200, { object: "list", data: available }, req);
+
+  const access = await resolveAccountAccess(req, accountEntitlement || bearerLicense);
+  const filtered = filterCatalogByAccountAccess(available, access);
+  return json(res, 200, { object: "list", data: filtered }, req);
 }
 
 async function handleModels(req, res) {
@@ -357,6 +380,9 @@ async function handleChat(req, res) {
   }
 
   const requestedModel = body.model || (isHormachuelosFree ? HORMACHUELOS_FREE_MODEL : "deepseek/deepseek-chat");
+  const access = await resolveAccountAccess(req, license);
+  const accessDenied = accountAccessDeniedMessage(access, providerHint, requestedModel);
+  if (accessDenied) return json(res, 403, { error: accessDenied, code: "provider_restricted" }, req);
   const modelResolution = resolveHostedModel(upstream, requestedModel);
   if (modelResolution.error) return json(res, 400, { error: modelResolution.error }, req);
   const model = modelResolution.requestedModel;

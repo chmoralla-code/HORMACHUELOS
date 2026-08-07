@@ -17,17 +17,17 @@ const ASSET_BASE =
 
 /** Desktop installer files (uploaded to Supabase after `npm run desktop:build`). */
 const DESKTOP_DOWNLOADS = {
-  version: "0.1.37",
+  version: "0.1.38",
   windows: {
     msi: {
       label: "Windows installer (MSI)",
-      href: "/downloads/Hormachuelos_0.1.37_x64_en-US.msi",
-      file: "Hormachuelos_0.1.37_x64_en-US.msi",
+      href: "/downloads/Hormachuelos_0.1.38_x64_en-US.msi",
+      file: "Hormachuelos_0.1.38_x64_en-US.msi",
     },
     setup: {
       label: "Windows setup (EXE)",
-      href: "/downloads/Hormachuelos_0.1.37_x64-setup.exe",
-      file: "Hormachuelos_0.1.37_x64-setup.exe",
+      href: "/downloads/Hormachuelos_0.1.38_x64-setup.exe",
+      file: "Hormachuelos_0.1.38_x64-setup.exe",
     },
   },
 };
@@ -1403,15 +1403,38 @@ function renderAdmin() {
   async function paintUsers() {
     root.innerHTML = `<p class="muted">Loading users…</p>`;
     try {
-      const data = await apiAdmin("/api/admin/users");
+      const [data, providerData] = await Promise.all([
+        apiAdmin("/api/admin/users"),
+        apiAdmin("/api/admin/providers"),
+      ]);
       const users = data.users || [];
+      const providers = (Array.isArray(providerData.providers) ? providerData.providers : [])
+        .filter((provider) => provider.active !== false && provider.providerId !== "commandcode");
+      const configs = (Array.isArray(providerData.configs) ? providerData.configs : [])
+        .filter((model) => model.active !== false && model.providerId !== "commandcode");
+      const modelsByProvider = new Map();
+      for (const model of configs) {
+        const providerId = String(model.providerId || "").trim().toLowerCase();
+        if (!providerId) continue;
+        const items = modelsByProvider.get(providerId) || [];
+        items.push(model);
+        modelsByProvider.set(providerId, items);
+      }
+
       if (!users.length) {
         root.innerHTML = `<div class="card"><p class="muted" style="margin:0">No registered users yet.</p></div>`;
         return;
       }
+
+      const accessSummary = (user) => {
+        if (!user.restricted) return "Plan default";
+        const count = Array.isArray(user.allowedProviders) ? user.allowedProviders.length : 0;
+        return count ? `${count} provider${count === 1 ? "" : "s"}` : "None allowed";
+      };
+
       root.innerHTML = `
         <div class="admin-table-wrap">
-          <table class="admin-table">
+          <table class="admin-table admin-users-table">
             <thead>
               <tr>
                 <th>User</th>
@@ -1421,6 +1444,7 @@ function renderAdmin() {
                 <th>Tokens used</th>
                 <th>Expires</th>
                 <th>License</th>
+                <th>AI access</th>
                 <th></th>
               </tr>
             </thead>
@@ -1430,7 +1454,9 @@ function renderAdmin() {
                   const plan = u.plan || "free";
                   const planOptions = ["free", "starter", "pro", "proplus", "max5", "max10", "max20"];
                   if (plan && !planOptions.includes(plan)) planOptions.unshift(plan);
-                  return `<tr data-id="${escapeHtml(u.id)}">
+                  const allowedProviders = Array.isArray(u.allowedProviders) ? u.allowedProviders : [];
+                  const allowedModels = u.allowedModels && typeof u.allowedModels === "object" ? u.allowedModels : {};
+                  return `<tr class="admin-user-row" data-id="${escapeHtml(u.id)}" data-restricted="${u.restricted ? "1" : "0"}" data-allowed-providers="${escapeHtml(JSON.stringify(allowedProviders))}" data-allowed-models="${escapeHtml(JSON.stringify(allowedModels))}">
                     <td>
                       <div class="admin-user">
                         <strong>${escapeHtml(u.name || "—")}</strong>
@@ -1458,36 +1484,216 @@ function renderAdmin() {
                         Active
                       </label>
                     </td>
+                    <td>
+                      <button type="button" class="btn btn-sm admin-access-toggle">${escapeHtml(accessSummary(u))}</button>
+                    </td>
                     <td><button type="button" class="btn btn-sm btn-primary admin-save">Save</button></td>
+                  </tr>
+                  <tr class="admin-access-panel" data-id="${escapeHtml(u.id)}" hidden>
+                    <td colspan="9">
+                      <div class="admin-access-editor">
+                        <label class="admin-active">
+                          <input type="checkbox" class="admin-restrict" ${u.restricted ? "checked" : ""} />
+                          Restrict which AI providers and models this user can use
+                        </label>
+                        <p class="muted small admin-access-hint">Paused providers and paused/prohibited model aliases are hidden here. Uncheck restriction to restore the normal plan-based catalog.</p>
+                        <div class="admin-access-body" ${u.restricted ? "" : "hidden"}>
+                          <div class="admin-access-col">
+                            <strong>Providers</strong>
+                            <div class="admin-access-checks admin-access-providers">
+                              ${providers
+                                .map((provider) => {
+                                  const id = escapeHtml(provider.providerId);
+                                  const checked = allowedProviders.includes(provider.providerId) ? "checked" : "";
+                                  return `<label class="admin-access-check"><input type="checkbox" class="admin-provider-check" value="${id}" ${checked} /> ${escapeHtml(provider.displayName || provider.providerId)}</label>`;
+                                })
+                                .join("") || `<span class="muted small">No active providers configured.</span>`}
+                            </div>
+                          </div>
+                          <div class="admin-access-col">
+                            <strong>Models <span class="muted">(from selected providers only)</span></strong>
+                            <div class="admin-access-checks admin-access-models"></div>
+                          </div>
+                        </div>
+                      </div>
+                    </td>
                   </tr>`;
                 })
                 .join("")}
             </tbody>
           </table>
         </div>
-        <p class="muted small" style="margin-top:12px">${users.length} user${users.length === 1 ? "" : "s"} · edits apply to website account + hosted license usage.</p>`;
+        <p class="muted small" style="margin-top:12px">${users.length} user${users.length === 1 ? "" : "s"} · edits apply to website account + hosted license usage · AI access controls the hosted catalog and chat proxy.</p>`;
 
-      root.querySelectorAll("tr[data-id]").forEach((tr) => {
+      const renderModelsForRow = (userRow, panel) => {
+        const modelsHost = panel.querySelector(".admin-access-models");
+        if (!modelsHost) return;
+        const restrictOn = panel.querySelector(".admin-restrict")?.checked;
+        const selectedProviders = [...panel.querySelectorAll(".admin-provider-check:checked")].map(
+          (input) => input.value,
+        );
+        let allowedModels = {};
+        try {
+          allowedModels = JSON.parse(userRow.getAttribute("data-allowed-models") || "{}") || {};
+        } catch {
+          allowedModels = {};
+        }
+        if (!restrictOn) {
+          modelsHost.innerHTML = `<span class="muted small">Restriction off — plan default catalog applies.</span>`;
+          return;
+        }
+        if (!selectedProviders.length) {
+          modelsHost.innerHTML = `<span class="muted small">Select at least one provider to choose models.</span>`;
+          return;
+        }
+        const parts = [];
+        for (const providerId of selectedProviders) {
+          const provider = providers.find((item) => item.providerId === providerId);
+          const models = modelsByProvider.get(providerId) || [];
+          const selected = Array.isArray(allowedModels[providerId]) ? allowedModels[providerId] : [];
+          const allSelected = !selected.length || selected.includes("*");
+          parts.push(`<div class="admin-access-model-group" data-provider="${escapeHtml(providerId)}">
+            <div class="admin-access-model-group-head">
+              <span>${escapeHtml(provider?.displayName || providerId)}</span>
+              <label class="admin-access-check"><input type="checkbox" class="admin-model-all" data-provider="${escapeHtml(providerId)}" ${allSelected ? "checked" : ""} /> All active models</label>
+            </div>
+            <div class="admin-access-model-list" ${allSelected ? "hidden" : ""}>
+              ${
+                models.length
+                  ? models
+                      .map((model) => {
+                        const checked = !allSelected && selected.includes(model.alias) ? "checked" : "";
+                        return `<label class="admin-access-check"><input type="checkbox" class="admin-model-check" data-provider="${escapeHtml(providerId)}" value="${escapeHtml(model.alias)}" ${checked} /> ${escapeHtml(model.displayName || model.alias)} <span class="mono muted small">${escapeHtml(model.alias)}</span></label>`;
+                      })
+                      .join("")
+                  : `<span class="muted small">No active models for this provider.</span>`
+              }
+            </div>
+          </div>`);
+        }
+        modelsHost.innerHTML = parts.join("");
+      };
+
+      const syncAccessAttr = (userRow, panel) => {
+        const restricted = Boolean(panel.querySelector(".admin-restrict")?.checked);
+        userRow.setAttribute("data-restricted", restricted ? "1" : "0");
+        if (!restricted) {
+          userRow.setAttribute("data-allowed-providers", "[]");
+          userRow.setAttribute("data-allowed-models", "{}");
+          return;
+        }
+        const providersSelected = [...panel.querySelectorAll(".admin-provider-check:checked")].map(
+          (input) => input.value,
+        );
+        const models = {};
+        for (const providerId of providersSelected) {
+          const all = panel.querySelector(`.admin-model-all[data-provider="${CSS.escape(providerId)}"]`);
+          if (!all || all.checked) {
+            models[providerId] = ["*"];
+            continue;
+          }
+          const aliases = [...panel.querySelectorAll(`.admin-model-check[data-provider="${CSS.escape(providerId)}"]:checked`)].map(
+            (input) => input.value,
+          );
+          models[providerId] = aliases;
+        }
+        userRow.setAttribute("data-allowed-providers", JSON.stringify(providersSelected));
+        userRow.setAttribute("data-allowed-models", JSON.stringify(models));
+      };
+
+      root.querySelectorAll("tr.admin-user-row[data-id]").forEach((tr) => {
+        const id = tr.getAttribute("data-id");
+        const panel = root.querySelector(`tr.admin-access-panel[data-id="${CSS.escape(id)}"]`);
+        if (!panel) return;
+
+        const refreshAccessButton = () => {
+          const btn = tr.querySelector(".admin-access-toggle");
+          if (!btn) return;
+          const restricted = tr.getAttribute("data-restricted") === "1";
+          if (!restricted) {
+            btn.textContent = "Plan default";
+            return;
+          }
+          let providersSelected = [];
+          try {
+            providersSelected = JSON.parse(tr.getAttribute("data-allowed-providers") || "[]") || [];
+          } catch {
+            providersSelected = [];
+          }
+          const count = providersSelected.length;
+          btn.textContent = count ? `${count} provider${count === 1 ? "" : "s"}` : "None allowed";
+        };
+
+        tr.querySelector(".admin-access-toggle")?.addEventListener("click", () => {
+          panel.hidden = !panel.hidden;
+          if (!panel.hidden) renderModelsForRow(tr, panel);
+        });
+
+        panel.querySelector(".admin-restrict")?.addEventListener("change", (event) => {
+          const body = panel.querySelector(".admin-access-body");
+          if (body) body.hidden = !event.target.checked;
+          syncAccessAttr(tr, panel);
+          renderModelsForRow(tr, panel);
+          refreshAccessButton();
+        });
+
+        panel.querySelector(".admin-access-providers")?.addEventListener("change", (event) => {
+          if (!event.target.classList.contains("admin-provider-check")) return;
+          syncAccessAttr(tr, panel);
+          renderModelsForRow(tr, panel);
+          refreshAccessButton();
+        });
+
+        panel.querySelector(".admin-access-models")?.addEventListener("change", (event) => {
+          const target = event.target;
+          if (target.classList.contains("admin-model-all")) {
+            const group = target.closest(".admin-access-model-group");
+            const list = group?.querySelector(".admin-access-model-list");
+            if (list) list.hidden = target.checked;
+            if (target.checked) {
+              group?.querySelectorAll(".admin-model-check").forEach((input) => {
+                input.checked = false;
+              });
+            }
+          }
+          syncAccessAttr(tr, panel);
+          refreshAccessButton();
+        });
+
+        renderModelsForRow(tr, panel);
+        syncAccessAttr(tr, panel);
+
         tr.querySelector(".admin-save")?.addEventListener("click", async () => {
           const btn = tr.querySelector(".admin-save");
           btn.disabled = true;
           btn.textContent = "Saving…";
           try {
+            syncAccessAttr(tr, panel);
             const plan = tr.querySelector(".admin-plan").value;
+            const restricted = tr.getAttribute("data-restricted") === "1";
+            let allowedProviders = null;
+            let allowedModels = null;
+            if (restricted) {
+              allowedProviders = JSON.parse(tr.getAttribute("data-allowed-providers") || "[]");
+              allowedModels = JSON.parse(tr.getAttribute("data-allowed-models") || "{}");
+            }
             await apiAdmin("/api/admin/users", {
               method: "PATCH",
               body: {
-                id: tr.getAttribute("data-id"),
+                id,
                 plan,
                 credits: Number(tr.querySelector(".admin-credits").value) || 0,
                 tokenBudget: Number(tr.querySelector(".admin-budget").value) || 0,
                 tokensUsed: Number(tr.querySelector(".admin-used").value) || 0,
                 expiresAt: tr.querySelector(".admin-expires").value || undefined,
                 licenseActive: tr.querySelector(".admin-lic-active").checked,
+                allowedProviders,
+                allowedModels,
               },
             });
             toast("User updated");
             btn.textContent = "Saved";
+            refreshAccessButton();
             setTimeout(() => {
               btn.disabled = false;
               btn.textContent = "Save";

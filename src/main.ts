@@ -345,9 +345,9 @@ function updateGlobalRunStatus() {
 }
 
 /**
- * The model selector is global UI, but a run belongs to one session. While the
- * selected session is busy, display and lock the model that actually started
- * that run. Other idle sessions remain free to choose their own next model.
+ * The model selector is shared UI, but each session remembers its own
+ * provider/model. While the selected session is busy, lock to the model that
+ * started that run. Idle sessions restore their preferred model on switch.
  */
 function syncActiveSessionModelLock() {
   if (typeof modelBar === "undefined" || typeof chat === "undefined") return;
@@ -366,6 +366,79 @@ function syncActiveSessionModelLock() {
       effort: modelBar.settings.model_effort,
     });
   }
+}
+
+/** Save the composer's current model onto the active idle session. */
+let sessionModelRestoreGeneration = 0;
+let sessionModelRestoring = false;
+
+function persistActiveSessionModelPreference() {
+  if (typeof modelBar === "undefined") return;
+  const session = sessionForId(activeSessionId);
+  if (!session) return;
+  // A busy session already recorded its run profile; don't overwrite with a
+  // different session's restored settings while that run is still locked.
+  if (runningSessions.has(session.id) && runModelProfiles.has(session.id)) return;
+  // Skip while a session switch is still restoring the composer — the UI may
+  // still show the previous conversation's model for a tick.
+  if (sessionModelRestoring) return;
+  const profile = modelBar.currentProfile();
+  if (!profile) return;
+  const changed =
+    session.preferredProvider !== profile.provider ||
+    session.preferredModel !== profile.model ||
+    session.preferredEffort !== profile.effort;
+  session.preferredProvider = profile.provider;
+  session.preferredModel = profile.model;
+  session.preferredEffort = profile.effort;
+  sessionRegistry.set(session.id, session);
+  if (changed) saveSession(session);
+}
+
+/** Restore the active session's remembered model into the shared composer. */
+async function restoreActiveSessionModelPreference() {
+  if (typeof modelBar === "undefined") return;
+  const session = sessionForId(activeSessionId);
+  if (!session) {
+    syncActiveSessionModelLock();
+    return;
+  }
+  if (runningSessions.has(session.id) && runModelProfiles.has(session.id)) {
+    syncActiveSessionModelLock();
+    return;
+  }
+  const expectedSessionId = session.id;
+  const generation = ++sessionModelRestoreGeneration;
+  sessionModelRestoring = true;
+  try {
+    const provider = String(session.preferredProvider || "").trim();
+    const model = String(session.preferredModel || "").trim();
+    if (provider && model) {
+      await modelBar.applySessionProfile({
+        provider,
+        model,
+        effort: session.preferredEffort,
+      });
+    } else {
+      // First visit / older session: seed preference from the current composer.
+      const profile = modelBar.currentProfile();
+      if (profile) {
+        session.preferredProvider = profile.provider;
+        session.preferredModel = profile.model;
+        session.preferredEffort = profile.effort;
+        sessionRegistry.set(session.id, session);
+        saveSession(session);
+      }
+    }
+  } finally {
+    if (generation === sessionModelRestoreGeneration) {
+      sessionModelRestoring = false;
+    }
+  }
+  if (generation !== sessionModelRestoreGeneration || activeSessionId !== expectedSessionId) {
+    return;
+  }
+  syncActiveSessionModelLock();
 }
 
 function sessionForId(id: string | null | undefined): Session | undefined {
@@ -661,6 +734,8 @@ function createNewSession() {
   }
   // Other sessions may keep running in the background
   persistCurrentSession();
+  persistActiveSessionModelPreference();
+  const profile = typeof modelBar !== "undefined" ? modelBar.currentProfile() : null;
   const s: Session = {
     id: newSessionId(),
     title: "New session",
@@ -668,6 +743,9 @@ function createNewSession() {
     messages: [],
     createdAt: Date.now(),
     sessionTokens: 0,
+    preferredProvider: profile?.provider,
+    preferredModel: profile?.model,
+    preferredEffort: profile?.effort,
   };
   sessions.unshift(s);
   sessionRegistry.set(s.id, s);
@@ -684,6 +762,7 @@ function createNewSession() {
   refreshSidebar();
   syncUsageBar();
   updateGlobalRunStatus();
+  void restoreActiveSessionModelPreference();
 }
 
 function switchSession(id: string) {
@@ -692,6 +771,7 @@ function switchSession(id: string) {
   if (!s) return;
   // Keep background runs alive — just switch the visible transcript
   persistCurrentSession();
+  persistActiveSessionModelPreference();
   activeSessionId = id;
   syncSmartAgentPanel();
   restoreActiveSessionPreview();
@@ -702,7 +782,8 @@ function switchSession(id: string) {
     chat.loadSession(s.messages);
   }
   chat.setRunning(runningSessions.has(id));
-  syncActiveSessionModelLock();
+  // Restore this conversation's model (or lock to its in-flight run profile).
+  void restoreActiveSessionModelPreference();
   // Restore a tool-approval prompt if this run is waiting in the background
   const conf = pendingConfirms.get(id);
   if (conf) {
@@ -867,7 +948,8 @@ function loadProjectSessions() {
   // Project switching is allowed during a run. Reflect only the selected
   // session's activity instead of leaving the previous project in the UI.
   chat.setRunning(!!activeSessionId && runningSessions.has(activeSessionId), { processQueue: false });
-  syncActiveSessionModelLock();
+  // Restore this project's active session model (or lock if that run is busy).
+  void restoreActiveSessionModelPreference();
   // Shared budget across every session in this project
   syncUsageBar();
   syncSmartAgentPanel();
@@ -1362,11 +1444,20 @@ async function sendPrompt(prompt: string) {
   // Maximize memory: send prior turns in this session (user, AI, tools, decisions)
   const history = buildLlmHistory(chat.getMessages(), prompt);
   if (modelBar.settings) {
-    runModelProfiles.set(sessionId, {
+    const profile = {
       provider: modelBar.settings.provider,
       model: modelBar.settings.model,
       effort: modelBar.settings.model_effort,
-    });
+    };
+    runModelProfiles.set(sessionId, profile);
+    const owning = sessionForId(sessionId);
+    if (owning) {
+      owning.preferredProvider = profile.provider;
+      owning.preferredModel = profile.model;
+      owning.preferredEffort = profile.effort;
+      sessionRegistry.set(owning.id, owning);
+      saveSession(owning);
+    }
   }
   runningSessions.add(sessionId);
   syncActiveSessionModelLock();
@@ -1420,7 +1511,11 @@ async function sendPrompt(prompt: string) {
     // cancelled/done events race a follow-up send ("session already running").
     runningSessions.delete(sessionId);
     runModelProfiles.delete(sessionId);
-    syncActiveSessionModelLock();
+    if (activeSessionId === sessionId) {
+      void restoreActiveSessionModelPreference();
+    } else {
+      syncActiveSessionModelLock();
+    }
     const allowQueue = !isUsageExhausted();
     if (!allowQueue) {
       chat.clearPendingQueue();
@@ -1832,6 +1927,7 @@ async function init() {
   modelBar = new ModelBar(() => {
     refreshHeader().catch(() => {});
     void refreshProviderReadiness();
+    persistActiveSessionModelPreference();
     syncActiveSessionModelLock();
   });
   await modelBar.load().catch((e) => console.error("modelbar load failed", e));
@@ -1849,6 +1945,8 @@ async function init() {
       effort: modelBar.settings.model_effort,
     });
   }
+  persistActiveSessionModelPreference();
+  await restoreActiveSessionModelPreference();
   syncActiveSessionModelLock();
   window.addEventListener("horma:ultra-effort", () => {
     chat.applyUltraChrome();

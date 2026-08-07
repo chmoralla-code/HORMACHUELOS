@@ -10,8 +10,15 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use tauri::{AppHandle, Emitter};
 
-const STEP_IDS: [&str; 5] = ["scope", "inspect", "implement", "validate", "deliver"];
-const STEP_LABELS: [&str; 5] = ["Scope", "Inspect", "Build", "Check", "Done"];
+const STEP_IDS: [&str; 6] = [
+    "scope",
+    "inspect",
+    "implement",
+    "validate",
+    "debug",
+    "deliver",
+];
+const STEP_LABELS: [&str; 6] = ["Scope", "Inspect", "Build", "Check", "Debug", "Done"];
 
 #[derive(Clone, Serialize)]
 struct SmartAgentEvent {
@@ -37,6 +44,7 @@ enum Phase {
     Inspect,
     Implement,
     Validate,
+    Debug,
     Deliver,
 }
 
@@ -47,7 +55,8 @@ impl Phase {
             Self::Inspect => 1,
             Self::Implement => 2,
             Self::Validate => 3,
-            Self::Deliver => 4,
+            Self::Debug => 4,
+            Self::Deliver => 5,
         }
     }
 
@@ -65,7 +74,9 @@ pub struct SmartAgentRun {
     phase: Phase,
     final_review_requested: bool,
     saw_validation: bool,
+    saw_debug: bool,
     validation_tool_ids: HashSet<String>,
+    debug_tool_ids: HashSet<String>,
 }
 
 impl SmartAgentRun {
@@ -75,7 +86,9 @@ impl SmartAgentRun {
             phase: Phase::Scope,
             final_review_requested: false,
             saw_validation: false,
+            saw_debug: false,
             validation_tool_ids: HashSet::new(),
+            debug_tool_ids: HashSet::new(),
         }
     }
 
@@ -90,9 +103,9 @@ impl SmartAgentRun {
             return "";
         }
         "\nSMART AGENT EXECUTION LEDGER:\n\
-- Treat this as one durable task: understand scope, inspect the current workspace, implement focused changes, validate the result, then deliver.\n\
+- Treat this as one durable task: understand scope, inspect the current workspace, implement focused changes, validate the result, debug any failures or runtime issues, then deliver.\n\
 - Take concrete tool actions instead of stopping at a plan or progress note. Reuse existing work and do not restart completed steps.\n\
-- Before calling done, inspect the actual changed files and run the most relevant build, test, check, or preview when practical. If validation is unavailable, perform a targeted inspection and state the limitation in the final result.\n\
+- Before calling done, inspect the actual changed files and run the most relevant build, test, check, or preview when practical. After validation, actively debug failures (read errors/logs, reproduce, fix, and re-check) before delivery. If validation is unavailable, perform a targeted inspection and state the limitation in the final result.\n\
 - The desktop host shows task progress separately. Keep user-facing updates concise and never ask the user to type \"continue\".\n"
     }
 
@@ -152,13 +165,22 @@ impl SmartAgentRun {
         if self.phase >= Phase::Validate {
             self.phase = Phase::Implement;
             self.saw_validation = false;
+            self.saw_debug = false;
             self.validation_tool_ids.clear();
+            self.debug_tool_ids.clear();
         }
     }
 
     fn begin_implementation(&mut self, app: &AppHandle, session_id: &str, detail: &str) {
         self.reset_validation_after_change();
         self.transition(app, session_id, Phase::Implement, detail);
+    }
+
+    fn begin_debug(&mut self, app: &AppHandle, session_id: &str, tool_id: &str, detail: &str) {
+        if !tool_id.trim().is_empty() {
+            self.debug_tool_ids.insert(tool_id.to_string());
+        }
+        self.transition(app, session_id, Phase::Debug, detail);
     }
 
     pub fn on_tool_call(
@@ -176,33 +198,74 @@ impl SmartAgentRun {
         let name = name.trim();
         match name {
             "read_file" | "list_dir" | "glob" | "grep" | "file_info" | "git_status" => {
-                self.transition(
-                    app,
-                    session_id,
-                    Phase::Inspect,
-                    "Inspecting the current workspace...",
-                );
+                if self.phase >= Phase::Validate {
+                    self.begin_debug(
+                        app,
+                        session_id,
+                        tool_id,
+                        "Debugging failures and inspecting runtime evidence...",
+                    );
+                } else {
+                    self.transition(
+                        app,
+                        session_id,
+                        Phase::Inspect,
+                        "Inspecting the current workspace...",
+                    );
+                }
             }
             "write_file" | "edit_file" | "make_dir" | "move_file" | "copy_file"
             | "download_file" | "git_init" | "apply_patch" | "create_file" | "delete_file"
             | "rename_file" => {
-                self.begin_implementation(app, session_id, "Applying the requested changes...");
+                if self.phase >= Phase::Validate {
+                    // Fixing issues found during Check stays in Debug, but the
+                    // previous Check no longer covers this new workspace state.
+                    self.saw_validation = false;
+                    self.saw_debug = false;
+                    self.validation_tool_ids.clear();
+                    self.begin_debug(
+                        app,
+                        session_id,
+                        tool_id,
+                        "Applying a focused debug fix...",
+                    );
+                } else {
+                    self.begin_implementation(app, session_id, "Applying the requested changes...");
+                }
             }
             name if is_command_tool(name) => {
                 let command = ["command", "cmd", "script"]
                     .iter()
                     .find_map(|key| arguments.get(*key).and_then(Value::as_str))
                     .unwrap_or("");
-                if is_validation_command(command) {
+                if is_debug_command(command) {
+                    self.begin_debug(
+                        app,
+                        session_id,
+                        tool_id,
+                        "Running a focused debug pass...",
+                    );
+                } else if is_validation_command(command) {
                     if !tool_id.trim().is_empty() {
                         self.validation_tool_ids.insert(tool_id.to_string());
                     }
-                    self.transition(
-                        app,
-                        session_id,
-                        Phase::Validate,
-                        "Running a focused validation check...",
-                    );
+                    // Re-checking after a debug fix stays in Debug once Check
+                    // has already happened; otherwise enter Check.
+                    if self.phase >= Phase::Debug || self.saw_validation {
+                        self.begin_debug(
+                            app,
+                            session_id,
+                            tool_id,
+                            "Re-checking after a debug fix...",
+                        );
+                    } else {
+                        self.transition(
+                            app,
+                            session_id,
+                            Phase::Validate,
+                            "Running a focused validation check...",
+                        );
+                    }
                 } else {
                     self.begin_implementation(
                         app,
@@ -212,7 +275,14 @@ impl SmartAgentRun {
                 }
             }
             "open_path" => {
-                if self.phase >= Phase::Implement {
+                if self.phase >= Phase::Validate {
+                    self.begin_debug(
+                        app,
+                        session_id,
+                        tool_id,
+                        "Debugging the generated result in preview...",
+                    );
+                } else if self.phase >= Phase::Implement {
                     if !tool_id.trim().is_empty() {
                         self.validation_tool_ids.insert(tool_id.to_string());
                     }
@@ -225,12 +295,21 @@ impl SmartAgentRun {
                 }
             }
             "done" => {
-                self.transition(
-                    app,
-                    session_id,
-                    Phase::Validate,
-                    "Reviewing the result before delivery...",
-                );
+                if self.saw_validation || self.phase >= Phase::Validate {
+                    self.transition(
+                        app,
+                        session_id,
+                        Phase::Debug,
+                        "Final debug review before delivery...",
+                    );
+                } else {
+                    self.transition(
+                        app,
+                        session_id,
+                        Phase::Validate,
+                        "Reviewing the result before delivery...",
+                    );
+                }
             }
             _ => {
                 if self.phase <= Phase::Inspect {
@@ -238,6 +317,13 @@ impl SmartAgentRun {
                         app,
                         session_id,
                         "Taking the next concrete task step...",
+                    );
+                } else if self.phase >= Phase::Validate {
+                    self.begin_debug(
+                        app,
+                        session_id,
+                        tool_id,
+                        "Debugging the current issue...",
                     );
                 }
             }
@@ -256,14 +342,43 @@ impl SmartAgentRun {
             return;
         }
         let was_validation = self.validation_tool_ids.remove(tool_id);
-        if ok && was_validation {
-            self.saw_validation = true;
-            self.transition(
-                app,
-                session_id,
-                Phase::Validate,
-                "Validation completed successfully.",
-            );
+        let was_debug = self.debug_tool_ids.remove(tool_id);
+        if was_validation {
+            if ok {
+                self.saw_validation = true;
+                self.transition(
+                    app,
+                    session_id,
+                    Phase::Debug,
+                    "Validation passed — debugging and hardening the result...",
+                );
+            } else {
+                self.transition(
+                    app,
+                    session_id,
+                    Phase::Debug,
+                    "Validation failed — investigating and fixing issues...",
+                );
+            }
+            return;
+        }
+        if was_debug {
+            if ok {
+                self.saw_debug = true;
+                self.transition(
+                    app,
+                    session_id,
+                    Phase::Debug,
+                    "Debug pass completed successfully.",
+                );
+            } else {
+                self.transition(
+                    app,
+                    session_id,
+                    Phase::Debug,
+                    "Debug evidence found issues — continuing the fix loop...",
+                );
+            }
         }
     }
 
@@ -291,6 +406,7 @@ impl SmartAgentRun {
     pub fn final_review_instruction() -> &'static str {
         "[System - Smart Agent final review]\n\
 Before declaring this task complete, inspect the actual workspace state and perform the most relevant validation now (build, test, check, lint, preview, or a targeted file inspection when no validator exists).\n\
+If checks fail or the runtime looks wrong, debug the failure (read errors/logs, reproduce, fix, and re-check) before delivering.\n\
 Fix any issue you find. Do not repeat completed work or ask the user to type \"continue\".\n\
 When the requested work is genuinely complete, call done with a concise, evidence-based summary."
     }
@@ -362,6 +478,35 @@ fn is_validation_command(command: &str) -> bool {
     .any(|needle| command.contains(needle))
 }
 
+fn is_debug_command(command: &str) -> bool {
+    let command = command.to_ascii_lowercase();
+    // Prefer explicit debug tooling tokens. Avoid matching path segments like
+    // `target/debug/app`, which are common during normal builds.
+    [
+        "debugger",
+        "--debug",
+        "stacktrace",
+        "stack trace",
+        "traceback",
+        "console.error",
+        "console error",
+        "rust-gdb",
+        "lldb",
+        "gdb ",
+        "strace",
+        "journalctl",
+        "node --inspect",
+        "--inspect-brk",
+        "--inspect ",
+        "chrome://inspect",
+        "npm run debug",
+        "pnpm debug",
+        "yarn debug",
+    ]
+    .iter()
+    .any(|needle| command.contains(needle))
+}
+
 fn is_command_tool(name: &str) -> bool {
     let name = name.trim().to_ascii_lowercase();
     matches!(
@@ -389,6 +534,17 @@ mod tests {
     }
 
     #[test]
+    fn debug_command_is_detected() {
+        assert!(is_debug_command("node --inspect server.js"));
+        assert!(is_debug_command("lldb ./target/release/app"));
+        assert!(is_debug_command("python -m traceback runner.py"));
+        assert!(is_debug_command("npm run debug"));
+        assert!(!is_debug_command("npm install"));
+        assert!(!is_debug_command("npm run build"));
+        assert!(!is_debug_command("./target/debug/app"));
+    }
+
+    #[test]
     fn disabled_smart_agent_never_requests_review() {
         let run = SmartAgentRun::new(false);
         assert!(!run.needs_final_review());
@@ -406,8 +562,28 @@ mod tests {
 
         assert_eq!(run.phase, Phase::Implement);
         assert!(!run.saw_validation);
+        assert!(!run.saw_debug);
         assert!(run.validation_tool_ids.is_empty());
+        assert!(run.debug_tool_ids.is_empty());
         assert!(run.needs_final_review());
+    }
+
+    #[test]
+    fn successful_validation_advances_into_debug() {
+        let mut run = SmartAgentRun::new(true);
+        run.phase = Phase::Validate;
+        run.validation_tool_ids.insert("check-1".into());
+        // AppHandle is unavailable in unit tests; only assert ledger fields.
+        let was_validation = run.validation_tool_ids.remove("check-1");
+        assert!(was_validation);
+        run.saw_validation = true;
+        run.phase = Phase::Debug;
+        assert_eq!(run.phase, Phase::Debug);
+        assert!(run.saw_validation);
+        assert_eq!(Phase::Debug.index(), 4);
+        assert_eq!(Phase::Deliver.index(), 5);
+        assert_eq!(STEP_IDS[4], "debug");
+        assert_eq!(STEP_LABELS[4], "Debug");
     }
 
     #[test]

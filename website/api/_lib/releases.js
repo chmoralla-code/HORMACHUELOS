@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.37";
-const BUILTIN_MSI_SHA256 = "9e36270c6fd9e52ef8649a680cd02a9b9882998a7a86cc0c8113866bbc8bdd92";
-const BUILTIN_EXE_SHA256 = "50cb98ac2b56b21326d5ed09863c480e6ef2af12e89773b32ddbe78b1fc0d7f5";
-const BUILTIN_RELEASE_NOTES = "• Design mode sends a screenshot of the clicked preview element to the AI\n• Compact Smart Agent strip with short steps: Scope, Inspect, Build, Check, Done\n• Settings hidden from the app UI";
+const BUILTIN_RELEASE_VERSION = "0.1.38";
+const BUILTIN_MSI_SHA256 = "2f4ddae7eda6454fef7e57258ae9710399d9d9e499b3c93c14966e94d22b1278";
+const BUILTIN_EXE_SHA256 = "0bc54ab0ae4a7eaed40fb508a6db281c7fd23d4f8d47b03de4ff0aeb76b2a218";
+const BUILTIN_RELEASE_NOTES = "• Per-session model memory when switching chats\n• Smart Agent Debug step after Check\n• Admin: restrict each user's AI providers and models";
 
 /**
  * A deployment-bundled release keeps the download/update path available even

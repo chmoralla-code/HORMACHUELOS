@@ -8,6 +8,11 @@ import {
   updateAccount,
   updateLicense,
 } from "./supabase.js";
+import {
+  accountAccessDbPatch,
+  accountAccessFromRow,
+  publicAccountAccess,
+} from "./user-access.js";
 
 const SESSION_HOURS = 12;
 
@@ -78,6 +83,7 @@ function mapUser(account, license) {
     : license?.plan
       ? normalizePlan(license.plan)
       : null;
+  const access = publicAccountAccess(accountAccessFromRow(account));
   return {
     id: account.id,
     email: account.email,
@@ -93,6 +99,9 @@ function mapUser(account, license) {
     expiresAt: license?.expires_at ? String(license.expires_at).slice(0, 10) : "",
     createdAt: account.created_at,
     updatedAt: account.updated_at,
+    restricted: access.restricted,
+    allowedProviders: access.allowedProviders,
+    allowedModels: access.allowedModels,
   };
 }
 
@@ -144,6 +153,7 @@ export async function updateAdminUser(id, patch) {
   if (patch.plan !== undefined) accountPatch.plan = nextPlan;
   if (patch.period !== undefined) accountPatch.period = patch.period || null;
   if (patch.credits !== undefined) accountPatch.credits = Math.max(0, Number(patch.credits) || 0);
+  Object.assign(accountPatch, accountAccessDbPatch(patch));
 
   let license =
     (account.license_key && (await getLicenseByKey(account.license_key))) || null;
