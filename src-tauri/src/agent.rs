@@ -1,14 +1,15 @@
 use crate::config::Settings;
 use crate::integration_chat;
 use crate::llm::{
-    build_provider, provider_needs_key, ChatMessage, ContentSink, LlmResponse, ReasoningSink,
-    ToolCall, ToolCallSink,
+    provider_needs_key, ChatMessage, ContentSink, LlmResponse, ReasoningSink, ToolCall,
+    ToolCallSink,
 };
 use crate::state::SessionRun;
 use crate::tools::{self, ToolRunContext};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -32,6 +33,365 @@ fn emit_cancelled(app: &AppHandle, session_id: &str, iteration: u32) {
         "cancelled",
         json!({ "iteration": iteration }),
     );
+}
+
+// The normal tool loop intentionally remains unbounded. This guard applies
+// only to *consecutive* provider replies that took no concrete tool action.
+// A productive tool turn resets it, so a large website, APK, benchmark, or
+// software task never stops merely because it has been running for a while.
+const MAX_CONSECUTIVE_STALLED_RECOVERIES: u8 = 4;
+
+/// A continuation reply is only a stall when it is empty or wordless. A model
+/// mid-thought that streams a real progress sentence is still making progress,
+/// so it must not advance the safety counter that ends a run.
+fn reply_looks_stalled(resp: &LlmResponse) -> bool {
+    let has_text = resp
+        .text
+        .as_deref()
+        .map(|text| !text.trim().is_empty())
+        .unwrap_or(false);
+    !has_text
+}
+
+fn next_stalled_recovery_count(previous: u8, made_concrete_progress: bool) -> u8 {
+    if made_concrete_progress {
+        0
+    } else {
+        previous.saturating_add(1)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutomaticContinuationReason {
+    OutputLimit,
+    CompletionCheck,
+    /// Model narrated an imminent tool action ("Let me find…") but called none.
+    AnnouncedAction,
+    /// Hosted/upstream 502 (or similar) after the run already made progress.
+    ProviderBlip,
+}
+
+impl AutomaticContinuationReason {
+    fn status_text(self) -> &'static str {
+        match self {
+            Self::OutputLimit => {
+                "The model reached its response limit. Continuing automatically from the next unfinished step..."
+            }
+            Self::CompletionCheck => {
+                "Checking the in-progress task and continuing automatically if work remains..."
+            }
+            Self::AnnouncedAction => {
+                "The model described the next step but did not run a tool. Continuing automatically..."
+            }
+            Self::ProviderBlip => {
+                "The provider briefly failed. Continuing automatically from the next unfinished step..."
+            }
+        }
+    }
+
+    fn instruction(self) -> &'static str {
+        match self {
+            Self::OutputLimit => {
+                "[System - Automatic continuation]\n\
+Your previous response was cut off by the provider's output limit. Continue the SAME task now. \n\
+Keep the existing workspace and conversation state. Do not repeat completed work or ask the user to type \"continue\". \n\
+Inspect the most recent work, take the next concrete tool action, and keep going until the requested work is implemented and verified. \n\
+Call done only when the task is genuinely complete."
+            }
+            Self::CompletionCheck => {
+                "[System - Automatic continuation]\n\
+This is an active build, fix, release, or project task, but the previous response ended without a completion signal. \n\
+Continue the SAME task now. Inspect the workspace and prior tool results; if anything remains, perform the next concrete action and verify it. \n\
+Do not stop at a progress update and do not ask the user to type \"continue\". \n\
+If and only if everything requested is actually complete, call done with the final summary."
+            }
+            Self::AnnouncedAction => {
+                "[System - Automatic continuation]\n\
+You just told the user you would take an action (for example finding credentials, reading a file, running a command, or signing in), but you did not call any tool. \n\
+Do NOT only narrate the next step again. Call the appropriate tool(s) NOW to actually perform that action. \n\
+If you need information from the codebase or the computer, use tools immediately. Then continue until the user's request is handled."
+            }
+            Self::ProviderBlip => {
+                "[System - Automatic continuation]\n\
+The upstream provider returned a temporary error (for example HTTP 502). The workspace and prior tool results are preserved. \n\
+Continue the SAME task now. Do not restart from scratch or ask the user to type \"continue\". \n\
+Inspect the latest files/commands if needed, take the next concrete tool action, and finish the requested work."
+            }
+        }
+    }
+}
+
+/// True when a provider blip should resume the agent loop instead of ending the run.
+fn can_recover_from_provider_blip(
+    err: &anyhow::Error,
+    iteration: u32,
+    messages: &[ChatMessage],
+) -> bool {
+    let Some(limit) = crate::llm::reconnect_attempt_limit(err) else {
+        return false;
+    };
+    // connection_failed uses unlimited reconnect already; only recover after
+    // capped transient errors (502 / timeout / network cut).
+    if limit == 0 {
+        return false;
+    }
+    let code = err
+        .to_string()
+        .split_once(':')
+        .map(|(code, _)| code.trim().to_string())
+        .unwrap_or_default();
+    if !matches!(
+        code.as_str(),
+        "provider_unavailable" | "provider_timeout" | "network_error" | "rate_limited"
+    ) {
+        return false;
+    }
+    if iteration > 0 {
+        return true;
+    }
+    messages.iter().any(|message| {
+        message.role == "tool"
+            || message
+                .tool_calls
+                .as_ref()
+                .map(|calls| !calls.is_empty())
+                .unwrap_or(false)
+    })
+}
+
+const MAX_PROVIDER_BLIP_RECOVERIES: u8 = 4;
+
+/// True when the assistant's prose promises an imminent tool action but the
+/// turn ended with zero tool calls — the classic "Let me find X." then stop.
+fn reply_announces_pending_action(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    // Short answers / questions to the user are legitimate endings.
+    if lower.ends_with('?') && trimmed.chars().count() < 320 {
+        return false;
+    }
+    let starters = [
+        "let me ",
+        "i'll ",
+        "i will ",
+        "i am going to ",
+        "i'm going to ",
+        "im going to ",
+        "going to ",
+        "next i'll ",
+        "now i'll ",
+        "now i will ",
+        "i'll check",
+        "i'll find",
+        "i'll look",
+        "i'll search",
+        "i'll open",
+        "i'll read",
+        "i'll run",
+        "i'll sign",
+        "i'll try",
+        "i'll inspect",
+        "i'll scan",
+        "i'll grab",
+        "looking for ",
+        "searching for ",
+        "searching the ",
+        "checking the ",
+        "checking for ",
+        "finding the ",
+        "finding ",
+        "hang on",
+        "one sec",
+        "one moment",
+        "give me a second",
+        "give me a moment",
+    ];
+    if starters
+        .iter()
+        .any(|p| lower.starts_with(p) || lower.contains(&format!("\n{p}")))
+    {
+        return true;
+    }
+    // Trailing intent without a tool call, e.g. "…to sign in." after "Let me find…"
+    let intent_tails = [
+        " from the codebase",
+        " in the codebase",
+        " to sign in",
+        " and sign in",
+        " and check",
+        " and open",
+        " and run",
+        " right now",
+        " momentarily",
+    ];
+    if starters.iter().any(|p| lower.contains(p)) && intent_tails.iter().any(|t| lower.contains(t))
+    {
+        return true;
+    }
+    false
+}
+
+/// Providers use different spellings for an answer that ended because the
+/// response budget was exhausted. Those are not successful task completions.
+fn stop_reason_requires_continuation(stop_reason: &str) -> bool {
+    let normalized = stop_reason
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['-', ' '], "_");
+    matches!(
+        normalized.as_str(),
+        "length"
+            | "max_tokens"
+            | "max_output_tokens"
+            | "max_completion_tokens"
+            | "max_tokens_reached"
+            | "max_output"
+            | "output_limit"
+            | "token_limit"
+            | "token_limit_reached"
+            | "truncated"
+            | "incomplete"
+            | "stream_interrupted"
+    ) || normalized.contains("max_token")
+        || normalized.contains("output_limit")
+        || normalized.contains("token_limit")
+}
+
+fn contains_task_term(text: &str, term: &str) -> bool {
+    if term.contains(' ') {
+        return text.contains(term);
+    }
+    text.split(|ch: char| !ch.is_ascii_alphanumeric())
+        .any(|word| word == term)
+}
+
+/// Questions about a workflow must still receive a normal answer rather than
+/// being treated as an instruction to execute that workflow.
+fn starts_as_explanatory_request(text: &str) -> bool {
+    [
+        "what is",
+        "what are",
+        "how do",
+        "how to",
+        "explain",
+        "tell me about",
+        "can you explain",
+    ]
+    .iter()
+    .any(|prefix| text.starts_with(prefix))
+}
+
+/// Treat only clear implementation-oriented requests as tasks that need an
+/// explicit completion handshake. Ordinary questions must still be allowed to
+/// end with a normal text response.
+fn task_likely_requires_project_completion(prompt: &str) -> bool {
+    let normalized = prompt.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return false;
+    }
+
+    if matches!(
+        normalized.as_str(),
+        "continue" | "keep going" | "go on" | "finish it"
+    ) {
+        return true;
+    }
+
+    if starts_as_explanatory_request(&normalized) {
+        return false;
+    }
+
+    let has_implementation_action = [
+        "build",
+        "create",
+        "make",
+        "implement",
+        "develop",
+        "scaffold",
+        "generate",
+        "fix",
+        "debug",
+        "repair",
+        "refactor",
+        "upgrade",
+        "update",
+        "release",
+        "publish",
+        "deploy",
+        "finish",
+        "continue",
+    ]
+    .iter()
+    .any(|word| contains_task_term(&normalized, word));
+    let has_execution_action = [
+        "run",
+        "execute",
+        "benchmark",
+        "backtest",
+        "simulate",
+        "test",
+    ]
+    .iter()
+    .any(|word| contains_task_term(&normalized, word));
+    let has_action = has_implementation_action || has_execution_action;
+    if !has_action {
+        return false;
+    }
+
+    let has_project_target = [
+        "website",
+        "web app",
+        "webapp",
+        "apk",
+        "android",
+        "ios",
+        "app",
+        "application",
+        "software",
+        "project",
+        "code",
+        "codebase",
+        "repository",
+        "repo",
+        "feature",
+        "file",
+        "frontend",
+        "backend",
+        "api",
+        "database",
+        "game",
+        "installer",
+    ]
+    .iter()
+    .any(|word| contains_task_term(&normalized, word));
+
+    // Tasks such as running a bot benchmark, a backtest, or a simulation are
+    // active workspace work even when they do not say "build" or "fix".
+    let has_execution_target = [
+        "benchmark",
+        "backtest",
+        "simulation",
+        "bot",
+        "strategy",
+        "trade",
+        "trading",
+        "script",
+        "test",
+        "tests",
+    ]
+    .iter()
+    .any(|word| contains_task_term(&normalized, word));
+
+    has_project_target
+        || [
+            "fix", "debug", "repair", "release", "publish", "deploy", "continue",
+        ]
+        .iter()
+        .any(|word| contains_task_term(&normalized, word))
+        || (has_execution_action && has_execution_target)
 }
 
 /// Prior session turn for agent memory (from the frontend transcript).
@@ -82,6 +442,168 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> (&str, bool) {
         end -= 1;
     }
     (&value[..end], true)
+}
+
+// The Cursor SDK already limits prior-session context to a compact recent
+// window. Native providers need the same protection: resending a 140k-char
+// transcript (including old command output) on every follow-up makes tool use
+// noticeably slower and can push smaller provider contexts over their limit.
+const NATIVE_HISTORY_MAX_TURNS: usize = 24;
+const NATIVE_HISTORY_MAX_BYTES: usize = 24_000;
+const NATIVE_HISTORY_MAX_TURN_BYTES: usize = 3_000;
+
+/// Convert saved transcript entries into compact plain conversation memory.
+/// Historical tool calls/results are deliberately represented as text instead
+/// of replaying OpenAI tool-call protocol: only calls made in the *current*
+/// run require matching tool-result messages, and this keeps trimmed histories
+/// valid for every OpenAI-compatible provider.
+fn compact_history_turn(turn: &HistoryTurn, max_bytes: usize) -> Option<ChatMessage> {
+    if max_bytes == 0 {
+        return None;
+    }
+    let role = turn.role.trim().to_ascii_lowercase();
+    let mut content = turn.content.trim().to_string();
+
+    match role.as_str() {
+        "assistant" => {
+            if let Some(calls) = turn.tool_calls.as_ref().filter(|calls| !calls.is_empty()) {
+                let calls = calls
+                    .iter()
+                    .take(6)
+                    .map(|call| {
+                        let args = serde_json::to_string(&call.arguments)
+                            .unwrap_or_else(|_| "{}".to_string());
+                        let (args, _) = truncate_utf8(&args, 320);
+                        format!("{}({args})", call.name)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if !content.is_empty() {
+                    content.push('\n');
+                }
+                content.push_str("[Earlier tool actions: ");
+                content.push_str(&calls);
+                content.push(']');
+            }
+            if content.is_empty() {
+                return None;
+            }
+        }
+        "tool" => {
+            let name = turn.name.as_deref().unwrap_or("tool");
+            content = if content.is_empty() {
+                format!("[Earlier tool result: {name}] (empty)")
+            } else {
+                format!("[Earlier tool result: {name}]\n{content}")
+            };
+        }
+        "user" | "system" => {
+            if content.is_empty() {
+                return None;
+            }
+        }
+        _ => {
+            if content.is_empty() {
+                return None;
+            }
+        }
+    }
+
+    let suffix = "\n…(earlier context truncated)";
+    let content = if max_bytes > suffix.len() {
+        let (content, truncated) = truncate_utf8(&content, max_bytes - suffix.len());
+        if truncated {
+            format!("{content}{suffix}")
+        } else {
+            content.to_string()
+        }
+    } else {
+        truncate_utf8(&content, max_bytes).0.to_string()
+    };
+    match role.as_str() {
+        "user" => Some(ChatMessage::user(&content)),
+        "system" => Some(ChatMessage::system(&content)),
+        _ => Some(ChatMessage::assistant(&content, None, None)),
+    }
+}
+
+fn compact_history_messages(history: &[HistoryTurn]) -> Vec<ChatMessage> {
+    let mut remaining = NATIVE_HISTORY_MAX_BYTES;
+    let mut newest_first = Vec::new();
+
+    for turn in history.iter().rev() {
+        if newest_first.len() >= NATIVE_HISTORY_MAX_TURNS || remaining <= 16 {
+            break;
+        }
+        let max_bytes = remaining
+            .saturating_sub(16)
+            .min(NATIVE_HISTORY_MAX_TURN_BYTES);
+        let Some(message) = compact_history_turn(turn, max_bytes) else {
+            continue;
+        };
+        let used = message
+            .content
+            .as_str()
+            .map(str::len)
+            .unwrap_or_default()
+            .saturating_add(16);
+        remaining = remaining.saturating_sub(used);
+        newest_first.push(message);
+        if remaining == 0 {
+            break;
+        }
+    }
+
+    newest_first.reverse();
+    newest_first
+}
+
+/// Execute one model-emitted inspection batch concurrently. The caller only
+/// invokes this for tools approved by `is_parallel_safe_readonly_tool`, so no
+/// action can alter another call's result or bypass a confirmation boundary.
+/// Results are later emitted and appended in the model's original order.
+async fn execute_parallel_readonly_batch(
+    tool_calls: &[ToolCall],
+    root: &Path,
+    timeout_secs: u64,
+    context: ToolRunContext,
+    cancel: &AtomicBool,
+) -> Option<HashMap<String, (bool, String)>> {
+    let mut jobs = tokio::task::JoinSet::new();
+    for call in tool_calls {
+        let id = call.id.clone();
+        let name = call.name.clone();
+        let args = call.arguments.clone();
+        let root = root.to_path_buf();
+        let context = context.clone();
+        jobs.spawn_blocking(move || {
+            let result = tools::execute(&name, &args, &root, timeout_secs, &context);
+            (id, result)
+        });
+    }
+
+    let mut results = HashMap::with_capacity(tool_calls.len());
+    while !jobs.is_empty() {
+        let joined = tokio::select! {
+            biased;
+            _ = wait_until_cancelled(cancel) => {
+                jobs.abort_all();
+                return None;
+            }
+            joined = jobs.join_next() => joined,
+        };
+        let Some(joined) = joined else {
+            break;
+        };
+        if let Ok((id, result)) = joined {
+            let (ok, content) = match result {
+                Ok(content) => (true, content),
+                Err(error) => (false, format!("Error: {error}")),
+            };
+            results.insert(id, (ok, content));
+        }
+    }
+    Some(results)
 }
 
 fn is_private_typing_tool(name: &str) -> bool {
@@ -391,8 +913,50 @@ pub async fn run_loop(
     let root = Path::new(&project_root);
     let cancel = run.cancel.clone();
     let known_integration_secrets = Arc::new(crate::integrations::loaded_tokens());
-    let prompt =
+    let mut prompt =
         integration_chat::redact_sensitive_text(&prompt, known_integration_secrets.as_ref());
+    // Text-only models (DeepSeek, Hormachuelos v1–v4, …) cannot see pixels.
+    // Describe attached images once up front so vision works for every
+    // non-vision model — including Hormachuelos v4 (VISION).
+    if prompt.contains("[Attached image:") {
+        let paths = crate::tools::attached_image_paths(&prompt);
+        emit(
+            &app,
+            &session_id,
+            "status",
+            json!({ "message": "Viewing attached image…" }),
+        );
+        let mut blocks = Vec::new();
+        for path in &paths {
+            match crate::tools::view_image_file(root, path) {
+                Ok(description) => {
+                    emit(
+                        &app,
+                        &session_id,
+                        "status",
+                        json!({ "message": "Viewed attached image" }),
+                    );
+                    blocks.push(format!("[Image already viewed: {path}]\n{description}"));
+                }
+                Err(err) => {
+                    blocks.push(format!(
+                        "[Could not auto-view image at {path}: {err}. You may retry with view_image.]"
+                    ));
+                }
+            }
+        }
+        let mut note = String::from(
+            "\n\n[The user attached image(s). Descriptions below were generated automatically with vision — answer from them. Only call view_image again if you need a closer look.]",
+        );
+        if !blocks.is_empty() {
+            note.push('\n');
+            note.push_str(&blocks.join("\n\n"));
+        }
+        note.push_str("\n\n");
+        note.push_str(&prompt);
+        prompt = note;
+    }
+    let requires_project_completion = task_likely_requires_project_completion(&prompt);
 
     let mut history = history;
     for turn in &mut history {
@@ -415,69 +979,146 @@ pub async fn run_loop(
     // Cursor model ids are served only by the local Cursor SDK. They are not
     // OpenAI-compatible ids and must never be forwarded to the hosted chat
     // proxy, even when the signed-in account has hosted credits.
+    //
+    // Exception: when no Cursor `crsr_…` key is saved but a Hormachuelos plan
+    // is active, fall through to hosted OpenAI-compatible models so friends
+    // installing the app are not blocked on a personal Cursor key.
+    let mut settings = settings;
     if uses_cursor_sdk(&settings.provider) {
-        let key = crate::config::load_cursor_sdk_api_key(&settings.provider).map_err(|e| {
-            anyhow::anyhow!(
-                "No API key for '{}': {}. Save a Cursor API key (crsr_…) in Settings.",
-                settings.provider,
-                e
-            )
-        })?;
-        let effort = cursor_effort_for_request(
-            &settings.model_effort,
-            &prompt,
-            settings.computer_use_enabled,
-        );
-        let model_display = display_model_name(&settings.model);
-        let provider_display = display_provider_name(&settings.provider);
-        let permission_mode = normalized_permission_mode(&settings.permission_mode);
-        let wrapped_prompt = format!(
-            "{identity}\n\n{policy}{computer_policy}\n\n\
+        match crate::config::load_cursor_sdk_api_key(&settings.provider) {
+            Ok(key) => {
+                let smart_agent_enabled =
+                    settings.smart_agent_enabled && requires_project_completion;
+                let effort = cursor_effort_for_request(
+                    &settings.model_effort,
+                    &prompt,
+                    settings.computer_use_enabled,
+                );
+                let model_display = display_model_name(&settings.model);
+                let provider_display = display_provider_name(&settings.provider);
+                let permission_mode = normalized_permission_mode(&settings.permission_mode);
+                let smart_agent_policy =
+                    crate::smart_agent::SmartAgentRun::system_instructions(smart_agent_enabled);
+                let completion_contract = if requires_project_completion {
+                    "\n\nAUTONOMOUS LONG-TASK CONTRACT:\n\
+- This is an implementation task. Keep using tools until the requested website, app, APK, software, or fix is actually complete and verified.\n\
+- Do not stop after a plan, a partial progress report, or an unfinished response. Do not tell the client to type \"continue\".\n\
+- When the task is truly complete, finish your final reply with this exact standalone marker: [[HORMACHUELOS_TASK_COMPLETE]].\n\
+- The desktop host removes that marker from the visible reply and automatically resumes the same agent if the marker is absent.\n"
+                } else {
+                    ""
+                };
+                let wrapped_prompt = format!(
+                    "{identity}\n\n{policy}{computer_policy}{completion_contract}{smart_agent_policy}\n\n\
 IN-APP PREVIEW:\n\
 - Hormachuelos has a built-in Preview panel on the right. Do NOT open websites/games in Chrome or the system browser.\n\
 - After creating or updating HTML (index.html, game pages, etc.), call open_path on that HTML file so the in-app Preview opens.\n\
 - Never use start/cmd/explorer/open_url just to show local HTML — use open_path instead.\n\n\
 Current user request:\n{prompt}",
-            identity = identity_instructions(&model_display, &provider_display),
-            policy = cursor_permission_instructions(&permission_mode),
-            computer_policy = cursor_computer_use_instructions(settings.computer_use_enabled),
-            prompt = prompt,
-        );
-        return crate::cursor_bridge::run_cursor_turn(
-            app,
-            &project_root,
-            &wrapped_prompt,
-            &key,
-            &settings.model,
-            &effort,
-            &permission_mode,
-            settings.computer_use_enabled,
-            &session_id,
-            run,
-            &history,
-            cursor_resume_agent_id,
-        )
-        .await;
+                    identity = identity_instructions(&model_display, &provider_display),
+                    policy = cursor_permission_instructions(&permission_mode),
+                    computer_policy = cursor_computer_use_instructions(settings.computer_use_enabled),
+                    completion_contract = completion_contract,
+                    smart_agent_policy = smart_agent_policy,
+                    prompt = prompt,
+                );
+                return crate::cursor_bridge::run_cursor_turn(
+                    app,
+                    &project_root,
+                    &wrapped_prompt,
+                    &key,
+                    &settings.model,
+                    &effort,
+                    &permission_mode,
+                    settings.computer_use_enabled,
+                    &session_id,
+                    run,
+                    &history,
+                    cursor_resume_agent_id,
+                    requires_project_completion,
+                    smart_agent_enabled,
+                )
+                .await;
+            }
+            Err(cursor_err) => {
+                let license = crate::license::LicenseStatus::load().unwrap_or_default();
+                if !crate::license::should_use_hosted(&license) {
+                    return Err(anyhow::anyhow!(
+                        "No API key for OpenAI: {cursor_err}. Save a Cursor API key (crsr_…) in Settings, or activate a Hormachuelos plan so OpenAI can use hosted models."
+                    ));
+                }
+                // Hosted fallback: OpenAI branding without a local Cursor key.
+                settings.provider = "hormachuelos_free".into();
+                settings.model = "hormachuelos-v3".into();
+                settings.base_url = Some(crate::license::hosted_chat_base_url());
+            }
+        }
     }
     let mut routed_auth_tool = integration_chat::auth_tool_for_prompt(&prompt);
     let auth_request_routed = routed_auth_tool.is_some();
     let license = crate::license::LicenseStatus::load().unwrap_or_default();
-    let use_hosted = crate::license::should_use_hosted_for_provider(&license, &settings.provider);
     let uses_hormachuelos_free = settings.provider.eq_ignore_ascii_case("hormachuelos_free");
+    let is_managed_alias = crate::config::is_custom_hosted_provider_alias(&settings.provider);
+    // A key deliberately saved by this client is BYOK and takes precedence
+    // over an available plan. That prevents direct-provider work from being
+    // billed against the shared hosted wallet merely because the account is
+    // also signed in to Hormachuelos.
+    let byok_key =
+        if !uses_hormachuelos_free && !is_managed_alias && provider_needs_key(&settings.provider) {
+            crate::config::load_provider_api_key(&settings.provider)
+                .ok()
+                .filter(|key| !key.trim().is_empty())
+        } else {
+            None
+        };
+    let use_hosted = byok_key.is_none()
+        && crate::license::should_use_hosted_for_provider(&license, &settings.provider);
+    // Signed-in website account session (device-link token). The hosted proxy
+    // resolves the account's plan server-side, so a paid plan works even when
+    // the local license cache has no HORMA- key (e.g. Starter/Pro bought via
+    // the website without a manual license activation).
+    let website_session = crate::config::load_website_session().unwrap_or_default();
+    let website_session = website_session.trim().to_string();
     let (key, base_url_override) = if uses_hormachuelos_free {
-        let session = crate::config::load_website_session().map_err(|_| {
-            anyhow::anyhow!(
-                "Sign in to Hormachuelos before using HORMACHUELOS FREE. Open the account menu and connect this desktop app."
+        if !website_session.is_empty() {
+            (
+                website_session.clone(),
+                Some(crate::license::hosted_chat_base_url()),
             )
-        })?;
-        (session, Some(crate::license::hosted_chat_base_url()))
+        } else if crate::license::should_use_hosted(&license) {
+            (
+                license.license_key.clone(),
+                Some(crate::license::hosted_chat_base_url()),
+            )
+        } else {
+            return Err(anyhow::anyhow!(
+                "Sign in to Hormachuelos before using HORMACHUELOS FREE. Open the account menu and connect this desktop app."
+            ));
+        }
     } else if use_hosted {
         (
             license.license_key.clone(),
             Some(crate::license::hosted_chat_base_url()),
         )
+    } else if (settings.provider.eq_ignore_ascii_case("commandcode") || is_managed_alias)
+        && !website_session.is_empty()
+    {
+        // Hosted-managed provider with a signed-in website account but no local
+        // HORMA- key: let the proxy resolve the account's plan from the
+        // session token.
+        (
+            website_session,
+            Some(crate::license::hosted_chat_base_url()),
+        )
+    } else if is_managed_alias {
+        return Err(anyhow::anyhow!(
+            "'{}' is managed by your Hormachuelos administrator. Sign in with an active hosted plan before using this provider alias.",
+            settings.provider
+        ));
+    } else if let Some(key) = byok_key {
+        (key, settings.base_url.clone())
     } else if provider_needs_key(&settings.provider) {
-        let key = crate::config::load_api_key(&settings.provider).map_err(|e| {
+        let key = crate::config::load_provider_api_key(&settings.provider).map_err(|e| {
             anyhow::anyhow!(
                 "No API key for '{}': {}. Set it in Settings, or activate a hosted plan from hormachuelos.vercel.app.",
                 settings.provider,
@@ -489,11 +1130,12 @@ Current user request:\n{prompt}",
         (String::new(), settings.base_url.clone())
     };
 
-    let provider = build_provider(
+    let provider = crate::llm::build_provider_with_effort(
         &settings.provider,
         &key,
         base_url_override.as_deref(),
         &settings.model,
+        Some(&settings.model_effort),
     )?;
     let tool_schemas =
         tools::schemas(settings.computer_use_enabled && crate::computer_use::status().supported);
@@ -613,16 +1255,21 @@ BEHAVIOR:\n\
     let has_history = history.iter().any(|t| !t.content.trim().is_empty());
     let memory_rules = if has_history {
         "\n\nSESSION MEMORY (critical):\n\
-- This is a continuing conversation. Prior user messages, your replies, tool results, and decisions are included above/below as history.\n\
-- Treat history as ground truth for what was already discussed, built, chosen, and tried.\n\
-- Connect the new request to earlier work: same files, stack, product goals, naming, and constraints.\n\
-- Do not re-ask for decisions the user already made unless they conflict with the new request.\n\
-- Do not rebuild from scratch if history shows work already done â€” extend, fix, or continue.\n\
-- If history mentions paths, tech, or errors, reuse that context; re-read files only when you need current contents.\n\
-- When the user says \"that\", \"it\", \"same as before\", \"continue\", or \"fix the bug\", resolve references from history.\n"
+- This is a continuing conversation in THIS chat session only.\n\
+- Prior user messages, your replies, tool results, and decisions below are ground truth for this session.\n\
+- Connect the new request to earlier work in this same chat: same files, stack, product goals, naming, and constraints.\n\
+- Do not re-ask for decisions the user already made in this chat unless they conflict with the new request.\n\
+- Do not rebuild from scratch if this session's history shows work already done — extend, fix, or continue.\n\
+- If this session's history mentions paths, tech, or errors, reuse that context; re-read files only when you need current contents.\n\
+- When the user says \"that\", \"it\", \"same as before\", \"continue\", or \"fix the bug\", resolve references from THIS session's history.\n\
+- Other Hormachuelos sessions that share this project folder are separate chats. Do not import their conversation memory.\n\
+- Files on disk may come from other sessions or earlier work — treat them as workspace artifacts, not as this chat's memory, unless the user points at them.\n"
     } else {
-        "\n\nSESSION MEMORY:\n\
-- This is the start of the session. Remember everything the user says going forward for later turns.\n"
+        "\n\nSESSION MEMORY / ISOLATION (critical):\n\
+- This is a brand-new chat session. It has no prior conversation memory.\n\
+- Other sessions in this same project folder are independent. Do not assume their goals, decisions, plans, or chat history.\n\
+- Files already on disk may have been created by other sessions or earlier work — treat them as workspace artifacts only. Inspect or reuse them only when the current user request needs them.\n\
+- Remember everything the user says from this point forward for later turns in THIS session only.\n"
     };
 
     let accounts = crate::integrations::prompt_summary();
@@ -659,6 +1306,9 @@ BEHAVIOR:\n\
         } else {
             ""
         };
+    let smart_agent_enabled = settings.smart_agent_enabled && requires_project_completion;
+    let smart_agent_policy =
+        crate::smart_agent::SmartAgentRun::system_instructions(smart_agent_enabled);
     let system = format!(
         "You are Hormachuelos, an autonomous agent embedded in a desktop app with access to the user's computer. \
 You can answer questions, explain concepts, build websites, games, and apps, manage files, run programs, and perform system tasks. \
@@ -673,6 +1323,7 @@ ACTIVE RUNTIME (report these values accurately when asked):\n\
 {project_context}\
 {accounts}\
 {computer_policy}\
+{smart_agent_policy}\
 CAPABILITIES:\n\
 - File tools accept ABSOLUTE paths (e.g. C:\\Users\\…) or paths relative to the project root.\n\
 - run_command runs PowerShell hidden — scaffold, install, build, test, system tasks, CLIs. Use `cwd` when needed.\n\
@@ -691,6 +1342,7 @@ CAPABILITIES:\n\
 - ask_user: multiple-choice questions for real decisions (stack, style, scope). Use allow_other when freeform answers help.\n\
 - export_client_pack: zip the project for client handoff (excludes node_modules/.git/target/dist) and write CLIENT_HANDOFF.md.\n\
 - web_search / browse_page: research the public web when local files are not enough.\n\
+- view_image: view/describe an image file (PNG/JPG/WEBP/GIF/BMP). Attached images are usually auto-described already; call view_image only when you need a closer look or a path was not auto-viewed.\n\
 - computer_* tools: protected Windows desktop control when Computer Use is enabled. Observe before each action. For realtime games, use one bounded computer_game_sequence instead of a model turn per key.\n\n\
 BASE RULES (mode rules above win on conflict):\n\
 1. READ THE USER'S INTENT FIRST. Questions and chat get text answers. Build/create/modify requests may use tools per mode.\n\
@@ -701,11 +1353,14 @@ BASE RULES (mode rules above win on conflict):\n\
 {execution_style}\
 7. When the task is COMPLETE, call `done` with a short plain summary: title, description, summary, key files, tech, features (up to 5). No hype. Pure conversation can end without done.\n\
 8. If a command fails, read the error, fix the cause, and retry — don't give up immediately.\n\
-9. Only do what the user asked (or what they approved in Plan mode). No unrelated changes.\n\
-10. For deploy/git hosting: use connected integrations first. If missing, call connect_account (in-chat secure form + browser) — do not run interactive CLI login via run_command and do not request credentials in the chat message box.\n\
-11. Format final prose as clean Markdown: use headings for sections, bullets for lists, and Markdown tables only for comparisons. Every table must include a header row and separator row; never use unaligned plain-text columns.\n\
+9. For an active build, fix, release, deployment, website, APK, app, or software task: keep taking concrete tool steps until all requested work is implemented and verified. Do NOT stop at a progress update, partial response, or an unfinished plan, and never ask the user to type \"continue\". If the provider reaches an output limit, the host will resume this same run automatically with its current workspace and tool history.\n\
+10. Only do what the user asked (or what they approved in Plan mode). No unrelated changes.\n\
+11. For deploy/git hosting: use connected integrations first. If missing, call connect_account (in-chat secure form + browser) — do not run interactive CLI login via run_command and do not request credentials in the chat message box.\n\
+12. Format final prose as clean Markdown: use a short Result heading followed by clear sections and bullets; use Markdown tables only for comparisons. Every table must include a header row and separator row; never use unaligned plain-text columns. Never print raw JSON, function-call syntax, tool arguments, or a literal `done` payload for the user. When work is complete, call the done tool instead of repeating its title, files, and features as loose prose.\n\
+13. Never stop after only announcing the next step (e.g. \"Let me find…\", \"I'll check…\", \"Looking for…\"). If you need to act, call a tool in the SAME turn. Narration without tools is incomplete.\n\
+14. Work efficiently: group independent local inspection calls (read_file, list_dir, glob, grep, git_status, file_info) in one tool response. The host may run that safe read-only batch together. Never assume results from one tool call while constructing another call in the same batch; keep writes, commands, browser actions, approvals, and computer actions ordered.\n\
 {memory_rules}\n\
-TOOL REFERENCE: read_file, write_file, edit_file, list_dir, glob, grep, run_command, git_init, git_add_all, git_commit, git_status, list_drives, sys_info, env_vars, list_processes, kill_process, open_url, open_path, download_file, move_file, copy_file, delete_file, make_dir, file_info, connect_account, integration_status, web_search, browse_page, export_client_pack, computer_list_windows, computer_observe, computer_focus_window, computer_click, computer_type_text, computer_press_key, computer_scroll, computer_drag, computer_game_sequence, ask_user, done.",
+TOOL REFERENCE: read_file, write_file, edit_file, list_dir, glob, grep, run_command, git_init, git_add_all, git_commit, git_status, list_drives, sys_info, env_vars, list_processes, kill_process, open_url, open_path, download_file, move_file, copy_file, delete_file, make_dir, file_info, view_image, connect_account, integration_status, web_search, browse_page, export_client_pack, computer_list_windows, computer_observe, computer_focus_window, computer_click, computer_type_text, computer_press_key, computer_scroll, computer_drag, computer_game_sequence, ask_user, done.",
         root = root.display(),
         provider_display = provider_display,
         model_display = model_display,
@@ -716,6 +1371,7 @@ TOOL REFERENCE: read_file, write_file, edit_file, list_dir, glob, grep, run_comm
         project_context = project_context,
         accounts = accounts,
         computer_policy = computer_policy,
+        smart_agent_policy = smart_agent_policy,
         execution_style = execution_style,
         memory_rules = memory_rules,
     );
@@ -763,68 +1419,16 @@ Do not implement unless I explicitly ask. Mutating tools still need approval."
 
     let mut messages: Vec<ChatMessage> = vec![ChatMessage::system(&system)];
 
-    // Inject prior conversation for maximized session memory (native tool chains).
+    // Inject a bounded, protocol-safe summary of the recent session. This keeps
+    // follow-up turns fast and avoids replaying old tool-call protocol without
+    // its matching live results.
     if has_history {
         messages.push(ChatMessage::system(
-            "The following messages are the earlier conversation in this session \
-(user requests, your replies, tool calls/results, and decisions). \
-Use them as continuous memory for everything that follows.",
+            "The following is compact recent memory from this same session. \
+Use its user decisions, earlier replies, tool actions, and tool results as context. \
+The tool entries are historical summaries; use fresh tools for the current workspace.",
         ));
-        for turn in &history {
-            let role = turn.role.to_ascii_lowercase();
-            match role.as_str() {
-                "user" => {
-                    let content = turn.content.trim();
-                    if !content.is_empty() {
-                        messages.push(ChatMessage::user(content));
-                    }
-                }
-                "tool" => {
-                    let id = turn.tool_call_id.as_deref().unwrap_or("call").to_string();
-                    let name = turn.name.as_deref().unwrap_or("tool");
-                    let content = if turn.content.trim().is_empty() {
-                        "(empty)"
-                    } else {
-                        turn.content.trim()
-                    };
-                    messages.push(ChatMessage::tool(&id, name, content));
-                }
-                "assistant" => {
-                    let tool_calls = turn.tool_calls.as_ref().map(|calls| {
-                        calls
-                            .iter()
-                            .map(|c| ToolCall {
-                                id: c.id.clone(),
-                                name: c.name.clone(),
-                                arguments: c.arguments.clone(),
-                            })
-                            .collect::<Vec<_>>()
-                    });
-                    let has_tools = tool_calls.as_ref().map(|c| !c.is_empty()).unwrap_or(false);
-                    let content = turn.content.trim();
-                    if content.is_empty() && !has_tools {
-                        continue;
-                    }
-                    messages.push(ChatMessage::assistant(
-                        content,
-                        if has_tools { tool_calls } else { None },
-                        None,
-                    ));
-                }
-                "system" => {
-                    let content = turn.content.trim();
-                    if !content.is_empty() {
-                        messages.push(ChatMessage::system(content));
-                    }
-                }
-                _ => {
-                    let content = turn.content.trim();
-                    if !content.is_empty() {
-                        messages.push(ChatMessage::assistant(content, None, None));
-                    }
-                }
-            }
-        }
+        messages.extend(compact_history_messages(&history));
     }
 
     messages.push(ChatMessage::user(&user_content));
@@ -832,6 +1436,11 @@ Use them as continuous memory for everything that follows.",
     let mut total_tokens: u64 = 0;
     // How many times we've forced plan-mode models to call ask_user after text-only replies.
     let mut plan_ask_nudges: u8 = 0;
+    // Only repeated replies with no tool action are considered stalled. The
+    // count resets after every tool turn; it is not an iteration limit.
+    let mut consecutive_stalled_recoveries: u8 = 0;
+    let mut provider_blip_recoveries: u8 = 0;
+    let mut smart_agent = crate::smart_agent::SmartAgentRun::new(smart_agent_enabled);
     emit(
         &app,
         &session_id,
@@ -841,6 +1450,7 @@ Use them as continuous memory for everything that follows.",
             "permission_mode": mode,
         }),
     );
+    smart_agent.emit_plan(&app, &session_id);
     emit(
         &app,
         &session_id,
@@ -956,20 +1566,107 @@ Use them as continuous memory for everything that follows.",
                 usage_tokens: 0,
             }
         } else {
-            tokio::select! {
-                biased;
-                _ = wait_until_cancelled(&cancel) => {
-                    emit_cancelled(&app, &session_id, iteration);
-                    return Ok(None);
+            // Stay alive across brief offline blips. Cap retries for stream cuts /
+            // proxy timeouts so continuing a session never loops on Reconnecting….
+            let mut reconnect_attempt: u32 = 0;
+            let mut recover_after_blip = false;
+            let response = loop {
+                let result = tokio::select! {
+                    biased;
+                    _ = wait_until_cancelled(&cancel) => {
+                        emit_cancelled(&app, &session_id, iteration);
+                        return Ok(None);
+                    }
+                    result = provider.chat(
+                        &messages,
+                        &tool_schemas,
+                        Some(reasoning_sink.clone()),
+                        Some(content_sink.clone()),
+                        Some(tool_call_sink.clone()),
+                    ) => result,
+                };
+                match result {
+                    Ok(response) => {
+                        provider_blip_recoveries = 0;
+                        break response;
+                    }
+                    Err(err) => {
+                        let Some(limit) = crate::llm::reconnect_attempt_limit(&err) else {
+                            return Err(err);
+                        };
+                        reconnect_attempt = reconnect_attempt.saturating_add(1);
+                        if limit > 0 && reconnect_attempt > limit {
+                            if provider_blip_recoveries < MAX_PROVIDER_BLIP_RECOVERIES
+                                && can_recover_from_provider_blip(&err, iteration, &messages)
+                            {
+                                recover_after_blip = true;
+                                break LlmResponse {
+                                    text: None,
+                                    tool_calls: Vec::new(),
+                                    reasoning_content: None,
+                                    stop_reason: "provider_blip".into(),
+                                    usage_tokens: 0,
+                                };
+                            }
+                            return Err(err);
+                        }
+                        let delay_ms =
+                            (1_000u64.saturating_mul(1u64 << reconnect_attempt.min(5))).min(30_000);
+                        let status_message = if limit == 0 {
+                            "Reconnecting…"
+                        } else if reconnect_attempt >= limit {
+                            "Reconnecting… last try"
+                        } else {
+                            "Reconnecting…"
+                        };
+                        emit(
+                            &app,
+                            &session_id,
+                            "status",
+                            json!({
+                                "message": status_message,
+                                "attempt": reconnect_attempt,
+                            }),
+                        );
+                        tokio::select! {
+                            biased;
+                            _ = wait_until_cancelled(&cancel) => {
+                                emit_cancelled(&app, &session_id, iteration);
+                                return Ok(None);
+                            }
+                            _ = tokio::time::sleep(Duration::from_millis(delay_ms)) => {}
+                        }
+                    }
                 }
-                result = provider.chat(
-                    &messages,
-                    &tool_schemas,
-                    Some(reasoning_sink),
-                    Some(content_sink),
-                    Some(tool_call_sink),
-                ) => result?,
+            };
+
+            if recover_after_blip {
+                provider_blip_recoveries = provider_blip_recoveries.saturating_add(1);
+                let reason = AutomaticContinuationReason::ProviderBlip;
+                emit(
+                    &app,
+                    &session_id,
+                    "status",
+                    json!({
+                        "message": "Provider hiccup — continuing…",
+                        "attempt": provider_blip_recoveries,
+                    }),
+                );
+                emit(
+                    &app,
+                    &session_id,
+                    "reasoning",
+                    json!({
+                        "text": reason.status_text(),
+                        "iteration": iteration,
+                    }),
+                );
+                messages.push(ChatMessage::user(reason.instruction()));
+                iteration = iteration.saturating_add(1);
+                continue;
             }
+
+            response
         };
         resp.text = resp.text.map(|text| {
             integration_chat::redact_sensitive_text(&text, known_integration_secrets.as_ref())
@@ -994,25 +1691,25 @@ Use them as continuous memory for everything that follows.",
             resp.usage_tokens,
         );
 
-        // Persist cost-weighted burn + hard-stop when plan/4h/week is gone.
-        // Record before emit so usage events carry a fresh license snapshot
-        // (keeps the Usage UI accurate across concurrent multi-model sessions).
+        // Mirror only hosted-plan usage locally for a responsive usage display.
+        // Cursor and direct/BYOK providers must never consume the customer's
+        // Hormachuelos wallet. The hosted API remains the authoritative hard
+        // stop, so this cached mirror never cancels a run mid-turn.
         let mut license_snapshot = None;
-        if resp.usage_tokens > 0 {
+        if use_hosted && resp.usage_tokens > 0 {
             if let Ok(lic) = crate::license::record_provider_usage(
                 &settings.provider,
                 &settings.model,
                 resp.usage_tokens,
             ) {
-                if lic.is_rate_blocked() {
-                    crate::state::AppState::halt_all_for_usage_limit(&app);
-                }
                 license_snapshot = serde_json::to_value(lic.for_api()).ok();
             }
-        } else if let Ok(mut lic) = crate::license::LicenseStatus::load() {
-            let _ = lic.refresh_rate_windows();
-            if lic.is_rate_blocked() {
-                crate::state::AppState::halt_all_for_usage_limit(&app);
+        } else if use_hosted {
+            // Keep the telemetry state normalized even when an upstream does
+            // not report usage. In particular this clears stale legacy 4h /
+            // weekly blocks inherited from older installations.
+            if let Ok(mut lic) = crate::license::LicenseStatus::load() {
+                let _ = lic.refresh_usage_status();
                 license_snapshot = serde_json::to_value(lic.for_api()).ok();
             }
         }
@@ -1029,29 +1726,6 @@ Use them as continuous memory for everything that follows.",
                 "license": license_snapshot,
             }),
         );
-
-        if let Some(ref snap) = license_snapshot {
-            let blocked = snap
-                .get("blockedBy")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            if !blocked.is_empty() {
-                emit(
-                    &app,
-                    &session_id,
-                    "text",
-                    json!({
-                        "text": format!(
-                            "\n\n— Usage limit reached ({}). Stopping all runs.",
-                            blocked
-                        )
-                    }),
-                );
-                emit_cancelled(&app, &session_id, iteration);
-                return Ok(None);
-            }
-        }
 
         if cancel.load(Ordering::SeqCst) {
             emit_cancelled(&app, &session_id, iteration);
@@ -1086,6 +1760,73 @@ Use them as continuous memory for everything that follows.",
         }
 
         if resp.tool_calls.is_empty() {
+            let announced = reply_announces_pending_action(resp.text.as_deref().unwrap_or(""));
+            let continuation_reason = if stop_reason_requires_continuation(&resp.stop_reason) {
+                Some(AutomaticContinuationReason::OutputLimit)
+            } else if requires_project_completion && !auth_request_routed && mode != "plan" {
+                Some(AutomaticContinuationReason::CompletionCheck)
+            } else if announced && !auth_request_routed && mode != "plan" {
+                Some(AutomaticContinuationReason::AnnouncedAction)
+            } else {
+                None
+            };
+
+            if let Some(reason) = continuation_reason {
+                let made_concrete_progress = match reason {
+                    AutomaticContinuationReason::AnnouncedAction
+                    | AutomaticContinuationReason::ProviderBlip => false,
+                    _ => !reply_looks_stalled(&resp),
+                };
+                consecutive_stalled_recoveries = next_stalled_recovery_count(
+                    consecutive_stalled_recoveries,
+                    made_concrete_progress,
+                );
+                if consecutive_stalled_recoveries >= MAX_CONSECUTIVE_STALLED_RECOVERIES {
+                    smart_agent.pause(
+                        &app,
+                        &session_id,
+                        "Automatic recovery paused after repeated provider replies without a tool action.",
+                    );
+                    emit(
+                        &app,
+                        &session_id,
+                        "text",
+                        json!({
+                            "text": "\n\n— Automatic recovery paused after repeated replies without a concrete tool action. Your workspace and session progress are preserved."
+                        }),
+                    );
+                    emit(
+                        &app,
+                        &session_id,
+                        "end",
+                        json!({
+                            "reason": "continuation_safety_guard",
+                            "iteration": iteration,
+                            "total_tokens": total_tokens,
+                        }),
+                    );
+                    return Ok(None);
+                }
+
+                messages.push(ChatMessage::assistant(
+                    resp.text.as_deref().unwrap_or(""),
+                    None,
+                    resp.reasoning_content.clone(),
+                ));
+                emit(
+                    &app,
+                    &session_id,
+                    "reasoning",
+                    json!({
+                        "text": reason.status_text(),
+                        "iteration": iteration,
+                    }),
+                );
+                messages.push(ChatMessage::user(reason.instruction()));
+                iteration = iteration.saturating_add(1);
+                continue;
+            }
+
             // Plan mode often lists choices in prose without calling ask_user â€” the UI then shows nothing.
             // Nudge the model to call the tool so clickable options appear.
             let should_nudge_plan = mode == "plan"
@@ -1129,12 +1870,53 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
             return Ok(None);
         }
 
+        // A provider tool call is concrete forward progress. Reset only the
+        // recovery watchdog, never the task or conversation history.
+        consecutive_stalled_recoveries =
+            next_stalled_recovery_count(consecutive_stalled_recoveries, true);
         let assistant_msg = ChatMessage::assistant(
             resp.text.as_deref().unwrap_or(""),
             Some(resp.tool_calls.clone()),
             resp.reasoning_content.clone(),
         );
         messages.push(assistant_msg);
+
+        // Models commonly issue a first workspace-inspection batch (for
+        // example list_dir + glob + grep + read_file). Those local reads do
+        // not depend on one another, so finish them together while retaining
+        // original result order below. Mixed batches deliberately stay serial:
+        // a write, shell command, browser action, confirmation, or computer
+        // action must preserve the model's exact ordering.
+        let mut parallel_read_results = if resp.tool_calls.len() > 1
+            && resp
+                .tool_calls
+                .iter()
+                .all(|call| tools::is_parallel_safe_readonly_tool(&call.name))
+        {
+            emit(
+                &app,
+                &session_id,
+                "status",
+                json!({
+                    "message": format!("Inspecting {} workspace items in parallel…", resp.tool_calls.len()),
+                }),
+            );
+            let results = execute_parallel_readonly_batch(
+                &resp.tool_calls,
+                root,
+                settings.command_timeout_secs,
+                tool_ctx.clone(),
+                &cancel,
+            )
+            .await;
+            if cancel.load(Ordering::SeqCst) {
+                emit_cancelled(&app, &session_id, iteration);
+                return Ok(None);
+            }
+            results
+        } else {
+            None
+        };
 
         for (tool_index, tc) in resp.tool_calls.iter().enumerate() {
             if cancel.load(Ordering::SeqCst) {
@@ -1178,6 +1960,7 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
                 }
             }
 
+            smart_agent.on_tool_call(&app, &session_id, &tc.id, &tc.name, &tc.arguments);
             let public_arguments = public_tool_arguments(&tc.name, &tc.arguments);
             let args_str = serde_json::to_string_pretty(&public_arguments).unwrap_or_default();
 
@@ -1203,7 +1986,18 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
                 );
             }
 
-            let (ok, content) = if tc.name == "ask_user" {
+            let precomputed = parallel_read_results
+                .as_mut()
+                .and_then(|results| results.remove(&tc.id));
+            let (ok, content) = if let Some((ok, content)) = precomputed {
+                (
+                    ok,
+                    integration_chat::redact_sensitive_text(
+                        &content,
+                        known_integration_secrets.as_ref(),
+                    ),
+                )
+            } else if tc.name == "ask_user" {
                 let question = tc
                     .arguments
                     .get("question")
@@ -1381,6 +2175,38 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
             };
 
             if content.starts_with("__DONE__") {
+                if smart_agent.request_final_review(&app, &session_id) {
+                    let review_message =
+                        crate::smart_agent::SmartAgentRun::final_review_instruction();
+                    messages.push(ChatMessage::tool(
+                        &tc.id,
+                        &tc.name,
+                        "Host requested one final workspace verification pass before delivery.",
+                    ));
+                    emit(
+                        &app,
+                        &session_id,
+                        "tool_result",
+                        json!({
+                            "id": tc.id,
+                            "name": tc.name,
+                            "ok": true,
+                            "content": "Running one final Smart Agent verification pass before delivery.",
+                        }),
+                    );
+                    emit(
+                        &app,
+                        &session_id,
+                        "reasoning",
+                        json!({
+                            "text": "Verifying the workspace before delivery...",
+                            "iteration": iteration,
+                        }),
+                    );
+                    messages.push(ChatMessage::user(review_message));
+                    iteration = iteration.saturating_add(1);
+                    continue;
+                }
                 let summary = content.trim_start_matches("__DONE__").to_string();
                 let title = tc
                     .arguments
@@ -1423,6 +2249,7 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
                     })
                     .unwrap_or_default();
                 messages.push(ChatMessage::tool(&tc.id, &tc.name, &content));
+                smart_agent.complete(&app, &session_id);
                 emit(
                     &app,
                     &session_id,
@@ -1452,6 +2279,7 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
             } else {
                 content.clone()
             };
+            smart_agent.on_tool_result(&app, &session_id, &tc.id, &tc.name, ok);
             // Flag streamed commands so UI can skip re-dumping full output
             let streamed = matches!(tc.name.as_str(), "run_command") || tc.name.starts_with("git_");
             emit(
@@ -1579,6 +2407,8 @@ fn display_model_name(model_id: &str) -> String {
     match raw.to_ascii_lowercase().as_str() {
         "hormachuelos-v1" => "Hormachuelos v1".into(),
         "hormachuelos-v2" => "Hormachuelos v2".into(),
+        "hormachuelos-v3" => "Hormachuelos v3".into(),
+        "hormachuelos-v4" => "Hormachuelos v4 (VISION)".into(),
         _ => raw.to_string(),
     }
 }
@@ -1589,6 +2419,7 @@ fn display_provider_name(provider_id: &str) -> String {
         "ollama" => "Ollama".into(),
         "deepseek" => "DeepSeek".into(),
         "cursor" => "Cursor SDK".into(),
+        "xai" => "xAI".into(),
         "hormachuelos_free" => "HORMACHUELOS FREE".into(),
         "openai" => "OpenAI".into(),
         "glm" => "GLM".into(),
@@ -1596,6 +2427,7 @@ fn display_provider_name(provider_id: &str) -> String {
         "anthropic" => "Anthropic".into(),
         "gemini" => "Gemini".into(),
         "pollinations" => "Pollinations".into(),
+        "commandcode" => "HORMACHUELOS NEW MODELS".into(),
         other if !other.is_empty() => {
             let mut chars = other.chars();
             match chars.next() {
@@ -1668,12 +2500,18 @@ fn project_context_block(root: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        cursor_computer_use_instructions, cursor_effort_for_request,
-        cursor_permission_instructions, display_model_name, display_provider_name,
-        identity_instructions, normalized_permission_mode, public_tool_arguments,
-        public_tool_preview_delta, resolve_tool_preview_name, tool_confirm_summary, truncate_utf8,
-        uses_cursor_sdk,
+        can_recover_from_provider_blip, compact_history_messages, cursor_computer_use_instructions,
+        cursor_effort_for_request, cursor_permission_instructions, display_model_name,
+        display_provider_name, identity_instructions, next_stalled_recovery_count,
+        normalized_permission_mode, public_tool_arguments, public_tool_preview_delta,
+        reply_announces_pending_action, reply_looks_stalled, resolve_tool_preview_name,
+        starts_as_explanatory_request, stop_reason_requires_continuation,
+        task_likely_requires_project_completion, tool_confirm_summary, truncate_utf8,
+        uses_cursor_sdk, HistoryToolCall, HistoryTurn, MAX_CONSECUTIVE_STALLED_RECOVERIES,
+        NATIVE_HISTORY_MAX_BYTES, NATIVE_HISTORY_MAX_TURNS,
     };
+    use crate::llm::{ChatMessage, LlmResponse};
+    use anyhow::anyhow;
     use serde_json::json;
 
     const TYPED_SENTINEL: &str = "typed-secret-SENTINEL-agent-4b83";
@@ -1684,6 +2522,67 @@ mod tests {
         let (truncated, was_truncated) = truncate_utf8(value, 3);
         assert_eq!(truncated, "a");
         assert!(was_truncated);
+    }
+
+    #[test]
+    fn native_history_is_bounded_and_never_replays_old_tool_protocol() {
+        let mut history = (0..40)
+            .map(|index| HistoryTurn {
+                role: "user".into(),
+                content: format!("old request {index}: {}", "x".repeat(1_200)),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            })
+            .collect::<Vec<_>>();
+        history.push(HistoryTurn {
+            role: "assistant".into(),
+            content: "I inspected the project.".into(),
+            tool_calls: Some(vec![HistoryToolCall {
+                id: "old-call".into(),
+                name: "read_file".into(),
+                arguments: json!({ "path": "src/main.ts" }),
+            }]),
+            tool_call_id: None,
+            name: None,
+        });
+        history.push(HistoryTurn {
+            role: "tool".into(),
+            content: "export const latest = true;".into(),
+            tool_calls: None,
+            tool_call_id: Some("old-call".into()),
+            name: Some("read_file".into()),
+        });
+        history.push(HistoryTurn {
+            role: "user".into(),
+            content: "Continue from the latest implementation.".into(),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        });
+
+        let messages = compact_history_messages(&history);
+        let bytes = messages
+            .iter()
+            .map(|message| message.content.as_str().map(str::len).unwrap_or_default() + 16)
+            .sum::<usize>();
+
+        assert!(messages.len() <= NATIVE_HISTORY_MAX_TURNS);
+        assert!(bytes <= NATIVE_HISTORY_MAX_BYTES);
+        assert!(messages.iter().all(|message| message.role != "tool"));
+        assert!(messages.iter().all(|message| message.tool_calls.is_none()));
+        assert!(messages.iter().any(|message| message
+            .content
+            .as_str()
+            .unwrap_or_default()
+            .contains("Earlier tool result: read_file")));
+        assert!(messages
+            .last()
+            .unwrap()
+            .content
+            .as_str()
+            .unwrap()
+            .contains("Continue from the latest"));
     }
 
     #[test]
@@ -1747,9 +2646,14 @@ mod tests {
         assert_eq!(display_model_name("composer-2.5"), "composer-2.5");
         assert_eq!(display_model_name("vendor/model:free"), "vendor/model:free");
         assert_eq!(display_provider_name("cursor"), "Cursor SDK");
+        assert_eq!(display_provider_name("xai"), "xAI");
         assert_eq!(display_provider_name("glm"), "GLM");
         assert_eq!(display_model_name("hormachuelos-v1"), "Hormachuelos v1");
         assert_eq!(display_model_name("hormachuelos-v2"), "Hormachuelos v2");
+        assert_eq!(
+            display_model_name("hormachuelos-v4"),
+            "Hormachuelos v4 (VISION)"
+        );
         assert_eq!(
             display_provider_name("hormachuelos_free"),
             "HORMACHUELOS FREE"
@@ -1805,5 +2709,164 @@ mod tests {
             cursor_effort_for_request("light", "explain this file", false),
             "low"
         );
+    }
+
+    #[test]
+    fn output_limit_stop_reasons_resume_instead_of_ending_the_run() {
+        assert!(stop_reason_requires_continuation("length"));
+        assert!(stop_reason_requires_continuation("MAX_TOKENS"));
+        assert!(stop_reason_requires_continuation("max output tokens"));
+        assert!(stop_reason_requires_continuation("token_limit_reached"));
+        assert!(stop_reason_requires_continuation("stream_interrupted"));
+        assert!(!stop_reason_requires_continuation("stop"));
+        assert!(!stop_reason_requires_continuation("tool_calls"));
+        assert!(!stop_reason_requires_continuation("content_filter"));
+    }
+
+    #[test]
+    fn recovery_watchdog_resets_after_concrete_tool_progress() {
+        let mut stalls = 0;
+        for _ in 0..(MAX_CONSECUTIVE_STALLED_RECOVERIES - 1) {
+            stalls = next_stalled_recovery_count(stalls, false);
+        }
+        assert!(stalls < MAX_CONSECUTIVE_STALLED_RECOVERIES);
+
+        stalls = next_stalled_recovery_count(stalls, true);
+        assert_eq!(stalls, 0);
+
+        for _ in 0..MAX_CONSECUTIVE_STALLED_RECOVERIES {
+            stalls = next_stalled_recovery_count(stalls, false);
+        }
+        assert_eq!(stalls, MAX_CONSECUTIVE_STALLED_RECOVERIES);
+    }
+
+    #[test]
+    fn recovery_watchdog_allows_long_tasks_with_many_recoveries_after_tools() {
+        let mut stalls = 0;
+
+        // This deliberately exceeds the former task-wide 12-pass cap. Every
+        // recovery follows concrete work, so it must remain at zero rather
+        // than ending a valid long-running implementation task.
+        for _ in 0..15 {
+            stalls = next_stalled_recovery_count(stalls, false);
+            assert_eq!(stalls, 1);
+            stalls = next_stalled_recovery_count(stalls, true);
+            assert_eq!(stalls, 0);
+        }
+    }
+
+    #[test]
+    fn text_only_replies_do_not_count_as_stalls() {
+        // A model mid-thought that streams a real progress sentence must not
+        // advance the safety counter, even when it has not called a tool yet.
+        let with_text = LlmResponse {
+            text: Some("Let me inspect the workspace first.".into()),
+            tool_calls: Vec::new(),
+            reasoning_content: None,
+            stop_reason: "stop".into(),
+            usage_tokens: 10,
+        };
+        assert!(!reply_looks_stalled(&with_text));
+
+        // Empty or wordless replies are genuine stalls and must count.
+        let empty = LlmResponse {
+            text: None,
+            tool_calls: Vec::new(),
+            reasoning_content: None,
+            stop_reason: "stop".into(),
+            usage_tokens: 10,
+        };
+        assert!(reply_looks_stalled(&empty));
+        let whitespace = LlmResponse {
+            text: Some("   \n\t  ".into()),
+            tool_calls: Vec::new(),
+            reasoning_content: None,
+            stop_reason: "stop".into(),
+            usage_tokens: 10,
+        };
+        assert!(reply_looks_stalled(&whitespace));
+
+        // After a text checkpoint the watchdog stays at zero; only true
+        // wordless stalls accumulate toward the safety cap.
+        let mut stalls = 0;
+        for _ in 0..(MAX_CONSECUTIVE_STALLED_RECOVERIES * 2) {
+            stalls = next_stalled_recovery_count(stalls, !reply_looks_stalled(&with_text));
+        }
+        assert_eq!(stalls, 0);
+    }
+
+    #[test]
+    fn narrated_tool_intent_without_tools_is_detected() {
+        assert!(reply_announces_pending_action(
+            "Let me find the supervisor credentials from the codebase to sign in."
+        ));
+        assert!(reply_announces_pending_action(
+            "I'll search the project for the default password next."
+        ));
+        assert!(reply_announces_pending_action(
+            "Looking for the login config in the repo."
+        ));
+        assert!(!reply_announces_pending_action(
+            "Want me to sign in as the supervisor account and check the dashboard?"
+        ));
+        assert!(!reply_announces_pending_action(
+            "The login page is a split-screen layout with brand logos."
+        ));
+        assert!(!reply_announces_pending_action(""));
+    }
+
+    #[test]
+    fn mid_task_provider_502_can_auto_recover() {
+        let blip =
+            anyhow!("provider_unavailable: The provider is temporarily unavailable. (HTTP 502)");
+        assert!(can_recover_from_provider_blip(&blip, 1, &[]));
+        assert!(!can_recover_from_provider_blip(&blip, 0, &[]));
+        assert!(can_recover_from_provider_blip(
+            &blip,
+            0,
+            &[ChatMessage {
+                role: "tool".into(),
+                content: json!("ok"),
+                tool_calls: None,
+                tool_call_id: Some("t1".into()),
+                name: Some("shell".into()),
+                reasoning_content: None,
+            }]
+        ));
+        assert!(!can_recover_from_provider_blip(
+            &anyhow!("auth_error: Invalid key"),
+            3,
+            &[]
+        ));
+    }
+
+    #[test]
+    fn project_work_requests_get_a_completion_handshake_but_questions_do_not() {
+        assert!(task_likely_requires_project_completion(
+            "Build a website and release the installer"
+        ));
+        assert!(task_likely_requires_project_completion(
+            "Fix the APK build error"
+        ));
+        assert!(task_likely_requires_project_completion("continue"));
+        assert!(task_likely_requires_project_completion(
+            "Use the bot settings to run a benchmark with live Binance charts and save the results"
+        ));
+        assert!(task_likely_requires_project_completion(
+            "Backtest the trading strategy for July and report the final equity"
+        ));
+        assert!(!task_likely_requires_project_completion(
+            "What is the difference between a website and an app?"
+        ));
+        assert!(!task_likely_requires_project_completion(
+            "Explain how the current provider works"
+        ));
+        assert!(!task_likely_requires_project_completion(
+            "Can you make a happy birthday message?"
+        ));
+        assert!(starts_as_explanatory_request("how do i run a benchmark?"));
+        assert!(!task_likely_requires_project_completion(
+            "How do I run a benchmark with this bot?"
+        ));
     }
 }

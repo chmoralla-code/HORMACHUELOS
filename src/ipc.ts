@@ -19,6 +19,8 @@ export type Settings = {
   taglish: boolean;
   /** Allow the Cursor SDK agent to observe and control approved Windows apps. */
   computer_use_enabled: boolean;
+  /** Keep long build tasks on a durable plan and request a final verification pass. */
+  smart_agent_enabled: boolean;
   /** Cursor SDK effort: light | medium | high | xhigh | ultra */
   model_effort?: string;
 };
@@ -30,6 +32,23 @@ export type ConnectionTestResult = {
   latencyMs: number;
   errorCode: string | null;
   message: string;
+};
+
+/** Safe, server-issued hosted provider catalog. It never contains API keys or upstream URLs. */
+export type HostedProviderCatalogModel = {
+  id: string;
+  label: string;
+};
+
+export type HostedProviderCatalogEntry = {
+  id: string;
+  label: string;
+  models: HostedProviderCatalogModel[];
+};
+
+export type HostedProviderCatalogResult = {
+  data: HostedProviderCatalogEntry[];
+  restricted?: boolean;
 };
 
 export type ComputerUseStatus = {
@@ -97,7 +116,7 @@ export type LicenseStatus = {
   tokensUsed: number;
   topUpUrl: string;
   message: string;
-  /** Provider-style rate windows */
+  /** Recent activity telemetry; these fields never enforce a usage limit. */
   window4hUsed?: number;
   window4hStartedAt?: string;
   window4hBudget?: number;
@@ -106,10 +125,14 @@ export type LicenseStatus = {
   windowWeekStartedAt?: string;
   windowWeekBudget?: number;
   windowWeekResetsAt?: string;
-  /** "" | "plan" | "4h" | "week" */
+  /** "" | "plan" — only an empty hosted plan wallet blocks use. */
   blockedBy?: string;
   /** Dev bypass — limits not enforced (debug builds). */
   limitsDisabled?: boolean;
+  /** True when entitlement was verified against the hosted API. */
+  hosted?: boolean;
+  /** Server-issued HORMA-… key used as Bearer for the hosted proxy. */
+  licenseKey?: string;
 };
 
 export const api = {
@@ -136,6 +159,8 @@ export const api = {
     invoke("test_provider_connection", { provider, model, baseUrl }),
   listProviderModels: (provider: string, baseUrl: string | null): Promise<string[]> =>
     invoke("list_provider_models", { provider, baseUrl }),
+  listHostedProviderCatalog: (): Promise<HostedProviderCatalogResult | HostedProviderCatalogEntry[]> =>
+    invoke("list_hosted_provider_catalog"),
   createProjectDir: (path: string, templateId?: string): Promise<void> =>
     invoke("create_project_dir", { path, templateId: templateId ?? null }),
   listProjectTemplates: (): Promise<ProjectTemplate[]> => invoke("list_project_templates"),
@@ -154,6 +179,21 @@ export const api = {
   /** Save a clipboard/drag-drop image to a temp file; returns absolute path. */
   savePastedImage: (dataBase64: string, mime?: string | null): Promise<string> =>
     invoke("save_pasted_image", { dataBase64, mime: mime ?? null }),
+  /**
+   * Capture only a user-selected rectangle inside the current preview. The
+   * native command is deliberately scoped to the calling app window; it cannot
+   * enumerate or capture arbitrary desktop windows.
+   */
+  capturePreviewSelection: (region: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    devicePixelRatio: number;
+  }): Promise<string> => invoke("capture_preview_selection", { region }),
+  /** Copy an on-disk image into the paste dir (Explorer paste / file picker). */
+  importImagePath: (path: string): Promise<string> =>
+    invoke("import_image_path", { path }),
   agentRun: (
     prompt: string,
     sessionId: string,
@@ -165,11 +205,21 @@ export const api = {
       name?: string;
     }> = [],
     projectRoot?: string,
-  ): Promise<void> => invoke("agent_run", { prompt, sessionId, history, projectRoot }),
+    cursorAgentId?: string | null,
+  ): Promise<string | null> =>
+    invoke("agent_run", {
+      prompt,
+      sessionId,
+      history,
+      projectRoot,
+      cursorAgentId: cursorAgentId ?? null,
+    }),
   agentStop: (sessionId: string): Promise<void> => invoke("agent_stop", { sessionId }),
   openProjectInExplorer: (relativePath: string | null = null): Promise<void> =>
     invoke("open_project_in_explorer", { relativePath }),
   appVersion: (): Promise<string> => invoke("app_version"),
+  /** Match in-app updates to the installer family already present on Windows. */
+  appInstallKind: (): Promise<"msi" | "nsis" | "unknown"> => invoke("app_install_kind"),
   /** Persist WebView state outside its cache before an installer replaces the app. */
   saveUpdateBackup: (stateJson: string): Promise<void> =>
     invoke("save_update_backup", { stateJson }),
@@ -184,19 +234,20 @@ export const api = {
     if (typeof sel === "string") return sel;
     return null;
   },
-  openImagePicker: async (): Promise<string | null> => {
+  openImagePicker: async (): Promise<string[]> => {
     const sel = await openDialog({
-      multiple: false,
-      title: "Attach image",
+      multiple: true,
+      title: "Attach images",
       filters: [
         {
           name: "Images",
-          extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"],
+          extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp"],
         },
       ],
     });
-    if (typeof sel === "string") return sel;
-    return null;
+    if (typeof sel === "string") return [sel];
+    if (Array.isArray(sel)) return sel.filter((p): p is string => typeof p === "string");
+    return [];
   },
   openFilePicker: async (): Promise<string[]> => {
     const sel = await openDialog({
@@ -249,7 +300,10 @@ export type IntegrationTestResult = {
 
 export type AgentEventPayload =
   | { kind: "start"; payload: { prompt: string } }
+  | { kind: "task_plan"; payload: { title: string; summary: string; steps: { id: string; label: string; state: string }[]; active_step: number; status: string; detail?: string } }
+  | { kind: "task_progress"; payload: { step: number; phase: string; status: string; detail: string; completed_before?: number; complete_all?: boolean } }
   | { kind: "thinking"; payload: { iteration: number } }
+  | { kind: "status"; payload: { message: string; attempt?: number; detail?: string } }
   | { kind: "reasoning"; payload: { text: string; iteration?: number } }
   | { kind: "text"; payload: { text: string } }
   | { kind: "tool_preview"; payload: { id: string; name: string; arguments_delta?: string } }

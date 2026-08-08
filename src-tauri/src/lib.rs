@@ -8,6 +8,8 @@ pub mod integration_chat;
 pub mod integrations;
 pub mod license;
 pub mod llm;
+pub mod preview_capture;
+pub mod smart_agent;
 pub mod state;
 pub mod templates;
 pub mod tools;
@@ -24,6 +26,38 @@ struct ConnectionTestResult {
     latency_ms: u128,
     error_code: Option<String>,
     message: String,
+}
+
+/// Public-safe hosted catalog returned by the website. It deliberately has no
+/// upstream base URL or credential fields, so it can be sent to the desktop
+/// picker without exposing administrator-managed provider secrets.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HostedProviderCatalogModel {
+    id: String,
+    label: String,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HostedProviderCatalogEntry {
+    id: String,
+    label: String,
+    models: Vec<HostedProviderCatalogModel>,
+}
+
+#[derive(serde::Deserialize)]
+struct HostedProviderCatalogResponse {
+    data: Vec<HostedProviderCatalogEntry>,
+    #[serde(default)]
+    restricted: bool,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HostedProviderCatalogResult {
+    data: Vec<HostedProviderCatalogEntry>,
+    restricted: bool,
 }
 
 #[tauri::command]
@@ -106,12 +140,7 @@ async fn set_api_key(provider: String, key: String) -> Result<(), String> {
 #[tauri::command]
 async fn has_api_key(provider: String) -> Result<bool, String> {
     config::validate_provider_id(&provider).map_err(|e| e.to_string())?;
-    if provider.eq_ignore_ascii_case("cursor") {
-        return Ok(config::load_cursor_sdk_api_key("cursor")
-            .map(|key| !key.trim().is_empty())
-            .unwrap_or(false));
-    }
-    Ok(config::has_api_key(&provider))
+    Ok(config::has_provider_api_key(&provider))
 }
 
 #[tauri::command]
@@ -259,7 +288,30 @@ async fn test_provider_connection(
         };
     }
     let is_hormachuelos_free = provider.eq_ignore_ascii_case("hormachuelos_free");
-    let effective_base_url = if is_hormachuelos_free {
+    let license = license::LicenseStatus::load().unwrap_or_default();
+    let is_managed_alias = config::is_custom_hosted_provider_alias(&provider);
+    // Connection tests must exercise a saved customer key directly. Otherwise
+    // a harmless BYOK test could accidentally use (and bill) hosted credits.
+    let byok_key =
+        if !is_hormachuelos_free && !is_managed_alias && llm::provider_needs_key(&provider) {
+            config::load_provider_api_key(&provider)
+                .ok()
+                .filter(|key| !key.trim().is_empty())
+        } else {
+            None
+        };
+    let use_hosted = !is_hormachuelos_free
+        && byok_key.is_none()
+        && license::should_use_hosted_for_provider(&license, &provider);
+    if is_managed_alias && !use_hosted {
+        return Ok(ConnectionTestResult {
+            ok: false,
+            latency_ms: started.elapsed().as_millis(),
+            error_code: Some("hosted_plan_required".into()),
+            message: "This provider alias is managed by the Hormachuelos server. Sign in with an active hosted plan to use it.".into(),
+        });
+    }
+    let effective_base_url = if is_hormachuelos_free || use_hosted {
         Some(license::hosted_chat_base_url())
     } else {
         base_url.clone()
@@ -276,8 +328,12 @@ async fn test_provider_connection(
                 });
             }
         }
+    } else if use_hosted {
+        license.license_key.clone()
+    } else if let Some(key) = byok_key {
+        key
     } else if llm::provider_needs_key(&provider) {
-        match config::load_api_key(&provider) {
+        match config::load_provider_api_key(&provider) {
             Ok(key) => key,
             Err(_) => {
                 return Ok(ConnectionTestResult {
@@ -343,7 +399,12 @@ async fn list_provider_models(
 ) -> Result<Vec<String>, String> {
     config::validate_provider_id(&provider).map_err(|e| e.to_string())?;
     if provider.eq_ignore_ascii_case("hormachuelos_free") {
-        let builtin_aliases = ["hormachuelos-v1", "hormachuelos-v2"];
+        let builtin_aliases = [
+            "hormachuelos-v1",
+            "hormachuelos-v2",
+            "hormachuelos-v3",
+            "hormachuelos-v4",
+        ];
         let session = match config::load_website_session() {
             Ok(session) => session,
             // Keep a usable offline fallback before the browser-link flow
@@ -377,8 +438,20 @@ async fn list_provider_models(
             .await
             .map_err(|e| e.to_string());
     }
+    if provider.eq_ignore_ascii_case("commandcode") {
+        return Ok(llm::commandcode::KNOWN_MODELS
+            .iter()
+            .map(|model| model.to_string())
+            .collect());
+    }
     let license = license::LicenseStatus::load().unwrap_or_default();
     let use_hosted = license::should_use_hosted_for_provider(&license, &provider);
+    if config::is_custom_hosted_provider_alias(&provider) && !use_hosted {
+        return Err(
+            "This provider alias is managed by the Hormachuelos server. Sign in with an active hosted plan to load its models."
+                .into(),
+        );
+    }
     let (key, base_url) = if use_hosted {
         (license.license_key.clone(), license::hosted_chat_base_url())
     } else {
@@ -389,7 +462,7 @@ async fn list_provider_models(
         let base_url =
             llm::validate_provider_base_url(&provider, base_url).map_err(|e| e.to_string())?;
         let key = if llm::provider_needs_key(&provider) {
-            config::load_api_key(&provider).map_err(|_| {
+            config::load_provider_api_key(&provider).map_err(|_| {
                 "Save an API key for this provider before refreshing models.".to_string()
             })?
         } else {
@@ -403,6 +476,102 @@ async fn list_provider_models(
         _ => llm::openai::fetch_model_ids(&provider, &key, &base_url).await,
     }
     .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn list_hosted_provider_catalog() -> Result<HostedProviderCatalogResult, String> {
+    let session = config::load_website_session().unwrap_or_default();
+    let license = license::LicenseStatus::load().unwrap_or_default();
+    let license_key = if license.hosted && license.active && !license.license_key.trim().is_empty()
+    {
+        license.license_key
+    } else {
+        String::new()
+    };
+    if session.trim().is_empty() && license_key.trim().is_empty() {
+        return Ok(HostedProviderCatalogResult {
+            data: Vec::new(),
+            restricted: false,
+        });
+    }
+
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|_| "Could not initialize the hosted catalog connection.".to_string())?;
+    let mut request = client
+        .get(format!("{}/catalog", license::hosted_chat_base_url()))
+        .header("Accept", "application/json");
+    if !license_key.trim().is_empty() {
+        request = request.bearer_auth(&license_key);
+    }
+    if !session.trim().is_empty() {
+        request = request.header("X-Horma-Session", session.trim());
+    }
+    let response = request.send().await.map_err(|_| {
+        "Could not load the hosted provider catalog. Check your connection and sign-in status."
+            .to_string()
+    })?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Hosted provider catalog is unavailable (HTTP {}). Refresh your account connection and try again.",
+            response.status().as_u16()
+        ));
+    }
+    let payload = response
+        .json::<HostedProviderCatalogResponse>()
+        .await
+        .map_err(|_| "Hosted provider catalog returned an invalid response.".to_string())?;
+
+    let mut provider_ids = std::collections::HashSet::new();
+    let mut catalog = Vec::new();
+    for entry in payload.data {
+        let id = entry.id.trim().to_ascii_lowercase();
+        if config::validate_provider_id(&id).is_err()
+            || id.eq_ignore_ascii_case("cursor")
+            || id.eq_ignore_ascii_case("ollama")
+            || !provider_ids.insert(id.clone())
+        {
+            continue;
+        }
+        let label = entry.label.trim();
+        if label.is_empty() || label.len() > 120 || label.chars().any(char::is_control) {
+            continue;
+        }
+        let mut model_ids = std::collections::HashSet::new();
+        let mut models = Vec::new();
+        for model in entry.models {
+            let model_id = model.id.trim();
+            let model_label = model.label.trim();
+            if model_id.is_empty()
+                || model_id.len() > 200
+                || model_id.chars().any(char::is_control)
+                || model_label.is_empty()
+                || model_label.len() > 120
+                || model_label.chars().any(char::is_control)
+                || !model_ids.insert(model_id.to_string())
+            {
+                continue;
+            }
+            models.push(HostedProviderCatalogModel {
+                id: model_id.to_string(),
+                label: model_label.to_string(),
+            });
+        }
+        if !models.is_empty() {
+            catalog.push(HostedProviderCatalogEntry {
+                id,
+                label: label.to_string(),
+                models,
+            });
+        }
+    }
+    catalog.sort_by(|left, right| left.label.cmp(&right.label));
+    Ok(HostedProviderCatalogResult {
+        data: catalog,
+        restricted: payload.restricted,
+    })
 }
 
 #[tauri::command]
@@ -483,6 +652,40 @@ fn record_license_usage(tokens: u64) -> Result<license::LicenseStatus, String> {
     license::record_token_usage(tokens).map_err(|e| e.to_string())
 }
 
+fn paste_image_extension(mime: &str, fallback_name: &str) -> &'static str {
+    let mime_l = mime.to_ascii_lowercase();
+    let name_l = fallback_name.to_ascii_lowercase();
+    if mime_l.contains("jpeg")
+        || mime_l.contains("jpg")
+        || name_l.ends_with(".jpg")
+        || name_l.ends_with(".jpeg")
+    {
+        "jpg"
+    } else if mime_l.contains("webp") || name_l.ends_with(".webp") {
+        "webp"
+    } else if mime_l.contains("gif") || name_l.ends_with(".gif") {
+        "gif"
+    } else if mime_l.contains("bmp") || name_l.ends_with(".bmp") {
+        "bmp"
+    } else {
+        "png"
+    }
+}
+
+fn write_paste_image_bytes(bytes: &[u8], ext: &str) -> Result<String, String> {
+    if bytes.is_empty() {
+        return Err("Empty image data.".into());
+    }
+    if bytes.len() > 25 * 1024 * 1024 {
+        return Err("Image is too large (max 25 MB).".into());
+    }
+    let dir = std::env::temp_dir().join("hormachuelos-paste");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(format!("paste-{}.{}", uuid::Uuid::new_v4(), ext));
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 /// Persist a clipboard / drag-drop image so the composer can attach it by path.
 #[tauri::command]
 fn save_pasted_image(data_base64: String, mime: Option<String>) -> Result<String, String> {
@@ -496,31 +699,37 @@ fn save_pasted_image(data_base64: String, mime: Option<String>) -> Result<String
         .decode(b64)
         .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(b64))
         .map_err(|e| format!("Invalid image data: {e}"))?;
-    if bytes.is_empty() {
-        return Err("Empty image data.".into());
+    let ext = paste_image_extension(mime.as_deref().unwrap_or(""), "");
+    write_paste_image_bytes(&bytes, ext)
+}
+
+/// Copy an on-disk image (Explorer paste, file picker) into the app paste dir
+/// so `view_image` can always read it.
+#[tauri::command]
+fn import_image_path(path: String) -> Result<String, String> {
+    let src = std::path::PathBuf::from(path.trim().trim_matches('"'));
+    if !src.is_file() {
+        return Err(format!("Image file not found: {}", src.display()));
     }
-    if bytes.len() > 25 * 1024 * 1024 {
-        return Err("Image is too large (max 25 MB).".into());
+    let name = src
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("image.png");
+    let ext = src
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    if !matches!(
+        ext.as_str(),
+        "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp"
+    ) {
+        return Err(format!(
+            "Unsupported image type .{ext}. Use PNG, JPG, WEBP, GIF, or BMP."
+        ));
     }
-    let mime_l = mime.unwrap_or_default().to_ascii_lowercase();
-    let ext = if mime_l.contains("jpeg") || mime_l.contains("jpg") {
-        "jpg"
-    } else if mime_l.contains("webp") {
-        "webp"
-    } else if mime_l.contains("gif") {
-        "gif"
-    } else if mime_l.contains("bmp") {
-        "bmp"
-    } else if mime_l.contains("svg") {
-        "svg"
-    } else {
-        "png"
-    };
-    let dir = std::env::temp_dir().join("hormachuelos-paste");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let path = dir.join(format!("paste-{}.{}", uuid::Uuid::new_v4(), ext));
-    std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
-    Ok(path.to_string_lossy().into_owned())
+    let bytes = std::fs::read(&src).map_err(|e| format!("Could not read image: {e}"))?;
+    let out_ext = paste_image_extension("", name);
+    write_paste_image_bytes(&bytes, out_ext)
 }
 
 #[tauri::command]
@@ -559,9 +768,10 @@ async fn agent_run(
     session_id: String,
     history: Option<Vec<agent::HistoryTurn>>,
     project_root: Option<String>,
+    cursor_agent_id: Option<String>,
     app: tauri::AppHandle,
     state: tauri::State<'_, state::AppState>,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     if session_id.trim().is_empty() {
         return Err("Missing session id.".into());
     }
@@ -617,17 +827,20 @@ async fn agent_run(
         Err(_) => state.settings.lock().unwrap().clone(),
     };
 
-    // Block new runs when plan period usage is already exhausted (multi-session safe).
+    // A hosted plan's wallet is enforced by the hosted API, not this local
+    // cache. That avoids rejecting a client who has just topped up or used a
+    // different computer. Keep the local development/test-plan guard only.
     if let Ok(mut lic) = license::LicenseStatus::load() {
-        let _ = lic.refresh_plan_block();
-        if !lic.active {
+        let _ = lic.refresh_usage_status();
+        let local_test_plan = !lic.hosted && !lic.plan.eq_ignore_ascii_case("free");
+        if local_test_plan && !lic.active {
             return Err(if lic.message.trim().is_empty() {
                 "This license is inactive. Renew it before starting a new run.".into()
             } else {
                 lic.message
             });
         }
-        if !license::usage_limits_disabled() && lic.is_rate_blocked() {
+        if local_test_plan && !license::usage_limits_disabled() && lic.is_usage_exhausted() {
             return Err(
                 "You've used up this plan period. Mag-load via GCash or upgrade to continue."
                     .into(),
@@ -637,7 +850,12 @@ async fn agent_run(
 
     let run = state.start_run(&session_id)?;
     let app_handle = Arc::new(app);
-    let cursor_resume = state.cursor_agent_id(&session_id);
+    // Prefer the session-bound Cursor agent id from the frontend so each chat
+    // in the same project keeps its own durable memory across app restarts.
+    let cursor_resume = cursor_agent_id
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .or_else(|| state.cursor_agent_id(&session_id));
     let result = agent::run_loop(
         app_handle,
         project_root,
@@ -655,7 +873,7 @@ async fn agent_run(
         Err(_) => {}
     }
     state.finish_run(&session_id);
-    result.map(|_| ()).map_err(|e| e.to_string())
+    result.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -844,6 +1062,7 @@ pub fn run() {
             app_updater::save_update_backup,
             app_updater::load_update_backup,
             app_updater::clear_update_backup,
+            app_updater::app_install_kind,
             app_updater::install_app_update,
             set_project_root,
             list_recent_projects,
@@ -862,6 +1081,7 @@ pub fn run() {
             respond_to_confirm,
             test_provider_connection,
             list_provider_models,
+            list_hosted_provider_catalog,
             create_project_dir,
             list_project_templates,
             list_project_files,
@@ -871,6 +1091,8 @@ pub fn run() {
             apply_license_key,
             record_license_usage,
             save_pasted_image,
+            preview_capture::capture_preview_selection,
+            import_image_path,
             agent_run,
             agent_stop,
             open_project_in_explorer,

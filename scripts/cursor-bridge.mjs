@@ -3,20 +3,32 @@
  * Cursor SDK local-agent bridge for Hormachuelos.
  * Reads one JSON request from stdin, streams NDJSON events to stdout.
  *
- * Request: { apiKey, model?, effort?, cwd, prompt, history?, agentId?, permissionMode? }
+ * Request: { apiKey, model?, effort?, cwd, prompt, history?, agentId?, sessionId?, permissionMode? }
  * Events:  thinking | text | tool_call | tool_result | done | error
  */
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import readline from "node:readline";
 import { pathToFileURL } from "node:url";
-import { Agent, Cursor } from "@cursor/sdk";
+import { Agent, Cursor, JsonlLocalAgentStore } from "@cursor/sdk";
 
 function write(event) {
   // Must be unbuffered: when stdout is a pipe (Tauri spawn), Node block-buffers
   // and the UI stays stuck on "Thinking..." until the process exits.
   fs.writeSync(1, `${JSON.stringify(event)}\n`);
+}
+
+/** One on-disk Cursor store per Hormachuelos session — never share across chats. */
+function sessionAgentStore(sessionId) {
+  const safe = String(sessionId || "anon")
+    .replace(/[^a-zA-Z0-9_-]/g, "_")
+    .slice(0, 96) || "anon";
+  const root = path.join(os.homedir(), ".hormachuelos", "cursor-agents", safe);
+  fs.mkdirSync(root, { recursive: true });
+  return new JsonlLocalAgentStore(root);
 }
 
 function createDuplexProtocol(input = process.stdin) {
@@ -695,6 +707,60 @@ function createTextCoalescer(onFlush) {
 }
 
 /**
+ * Hide the host-only completion marker from the visible reply while accepting
+ * streamed chunks where the marker can be split at arbitrary boundaries.
+ * The Rust host uses the resulting completion flag to resume an unfinished
+ * Cursor agent on its durable checkpoint without asking the client to type
+ * "continue".
+ */
+function createCompletionMarkerFilter(marker, onText) {
+  const normalizedMarker = String(marker || "").trim();
+  let pending = "";
+  let completed = !normalizedMarker;
+
+  const removeCompleteMarkers = () => {
+    if (!normalizedMarker) return;
+    let markerIndex = pending.indexOf(normalizedMarker);
+    while (markerIndex >= 0) {
+      if (markerIndex > 0) onText(pending.slice(0, markerIndex));
+      pending = pending.slice(markerIndex + normalizedMarker.length);
+      completed = true;
+      markerIndex = pending.indexOf(normalizedMarker);
+    }
+  };
+
+  return {
+    push(text) {
+      if (!text) return;
+      if (!normalizedMarker) {
+        onText(text);
+        return;
+      }
+      pending += text;
+      removeCompleteMarkers();
+
+      // Keep a suffix large enough to recognize a marker crossing the next
+      // stream boundary; everything before it is safe for the UI.
+      const keep = Math.min(normalizedMarker.length - 1, pending.length);
+      const flushLength = pending.length - keep;
+      if (flushLength > 0) {
+        onText(pending.slice(0, flushLength));
+        pending = pending.slice(flushLength);
+      }
+    },
+    flush() {
+      if (!normalizedMarker) return;
+      removeCompleteMarkers();
+      if (pending) onText(pending);
+      pending = "";
+    },
+    get completed() {
+      return completed;
+    },
+  };
+}
+
+/**
  * Thinking may arrive as tiny deltas OR full cumulative snapshots.
  * Normalize to deltas and emit immediately so the UI can type live.
  */
@@ -749,6 +815,7 @@ async function runMain(protocol) {
 
   const cwd = (req.cwd || "").trim();
   const prompt = (req.prompt || "").trim();
+  const completionMarker = String(req.completionMarker || "").trim();
   if (!cwd) throw new Error("Missing cwd.");
   if (!prompt) throw new Error("Missing prompt.");
 
@@ -758,13 +825,18 @@ async function runMain(protocol) {
   const policy = resolveExecutionPolicy(req.permissionMode);
   const customTools = createComputerUseTools(req, policy, protocol);
   const hasComputerUse = Object.keys(customTools).length > 0;
+  const sessionId = String(req.sessionId || "").trim();
+  const agentStore = sessionAgentStore(sessionId);
   const options = {
     apiKey,
+    name: sessionId ? `Hormachuelos ${sessionId.slice(0, 12)}` : "Hormachuelos session",
     mode: policy.sdkMode,
     local: {
       cwd,
       autoReview: policy.autoReview,
       sandboxOptions: resolveSandboxOptions(),
+      // Per-session store so chats in the same project never share Cursor memory.
+      store: agentStore,
       // Do not import ambient user/plugin instructions into the host policy boundary.
       settingSources: [],
     },
@@ -779,10 +851,17 @@ async function runMain(protocol) {
     try {
       agent = await Agent.resume(requestedAgentId, options);
       resumed = true;
-    } catch {
-      // A stale/corrupt SDK checkpoint must not destroy conversation continuity:
-      // create a clean agent and replay only the bounded transcript below.
+    } catch (resumeErr) {
+      // Pre-0.1.43 agents lived in the default Cursor store. After the
+      // per-session store migration, resume fails — start clean and replay
+      // only this chat's Hormachuelos transcript (never another session).
+      write({
+        type: "status",
+        message: "Starting a fresh agent for this session…",
+      });
       agent = await Agent.create(options);
+      resumed = false;
+      void resumeErr;
     }
   } else {
     agent = await Agent.create(options);
@@ -790,6 +869,8 @@ async function runMain(protocol) {
 
   write({ type: "thinking" });
 
+  // Fresh agents get Hormachuelos transcript only; resumed agents keep SDK memory.
+  // Never inject another session's history into this agent.
   const basePrompt = buildAgentPrompt(prompt, resumed ? [] : req.history);
   const agentPrompt = hasComputerUse
     ? `${computerUsePrompt(policy)}\n\n${basePrompt}`
@@ -797,7 +878,7 @@ async function runMain(protocol) {
   const sendOptions = {
     mode: policy.sdkMode,
     // Expire a run left active by a killed bridge before starting the follow-up.
-    local: { force: resumed },
+    local: { force: resumed, store: agentStore },
   };
   if (hasComputerUse) sendOptions.local.customTools = customTools;
   if (model) sendOptions.model = model;
@@ -845,11 +926,14 @@ async function runMain(protocol) {
     write({ type: "text", text: chunk });
     emitUsageDelta(false);
   });
+  const completionFilter = createCompletionMarkerFilter(completionMarker, (chunk) =>
+    textOut.push(chunk),
+  );
 
   function flushHeldAssistant() {
     thinkingActive = false;
     for (const chunk of heldAssistant.splice(0)) {
-      textOut.push(chunk);
+      completionFilter.push(chunk);
     }
   }
 
@@ -992,7 +1076,7 @@ async function runMain(protocol) {
     if (thinkingActive) {
       heldAssistant.push(delta);
     } else {
-      textOut.push(delta);
+      completionFilter.push(delta);
     }
   }
 
@@ -1110,22 +1194,30 @@ async function runMain(protocol) {
   }
 
   flushHeldAssistant();
-  textOut.flush();
-
-  // Seal any tools the SDK left open so the UI doesn't keep shimmering after Done
-  for (const [id, meta] of openTools.entries()) {
-    emitToolResult(id, meta.name, true, "(completed)");
-  }
-
   const result = await run.wait();
   const finalText =
     (typeof result?.result === "string" && result.result) ||
     (typeof result?.text === "string" && result.text) ||
     "";
 
-  if (!sawText && finalText) {
-    assistantChars += finalText.length;
-    write({ type: "text", text: finalText });
+  if (!assistantSeen && finalText) {
+    pushAssistantText(finalText);
+  } else if (
+    completionMarker &&
+    !completionFilter.completed &&
+    finalText.includes(completionMarker)
+  ) {
+    // Some SDK runtimes stream the prose but expose the terminal marker only
+    // on RunResult. Record it without replaying the already-visible reply.
+    completionFilter.push(completionMarker);
+  }
+  flushHeldAssistant();
+  completionFilter.flush();
+  textOut.flush();
+
+  // Seal any tools the SDK left open so the UI doesn't keep shimmering after Done
+  for (const [id, meta] of openTools.entries()) {
+    emitToolResult(id, meta.name, true, "(completed)");
   }
 
   const status = result?.status || "finished";
@@ -1146,6 +1238,7 @@ async function runMain(protocol) {
   write({
     type: "done",
     status,
+    completed: completionFilter.completed,
     // Never put the reply text here — Rust used to forward it as a Done-card
     // summary and the UI showed the same answer twice.
     agentId: agent.agentId || agent.id || null,
@@ -1169,6 +1262,7 @@ export {
   boundedHistory,
   buildAgentPrompt,
   computerApprovalSummary,
+  createCompletionMarkerFilter,
   createComputerUseTools,
   helperEnvironment,
   isToolAllowed,

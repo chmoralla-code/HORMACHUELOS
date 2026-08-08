@@ -48,6 +48,36 @@ fn update_cache_path(version: &str, extension: &str) -> Result<PathBuf, String> 
     Ok(dir.join(format!("Hormachuelos_{version}_x64-update.{extension}")))
 }
 
+#[cfg(windows)]
+fn install_kind_for_executable(executable: &Path) -> &'static str {
+    let has_nsis_uninstaller = executable
+        .parent()
+        .is_some_and(|directory| directory.join("uninstall.exe").is_file());
+    if has_nsis_uninstaller {
+        "nsis"
+    } else {
+        // WiX/MSI installs do not bundle uninstall.exe. Portable development
+        // copies also use MSI as the safer first installer family.
+        "msi"
+    }
+}
+
+#[tauri::command]
+pub fn app_install_kind() -> &'static str {
+    #[cfg(windows)]
+    {
+        std::env::current_exe()
+            .ok()
+            .as_deref()
+            .map(install_kind_for_executable)
+            .unwrap_or("msi")
+    }
+    #[cfg(not(windows))]
+    {
+        "unknown"
+    }
+}
+
 #[tauri::command]
 pub fn save_update_backup(state_json: String) -> Result<(), String> {
     if state_json.is_empty() || state_json.len() > MAX_BACKUP_BYTES {
@@ -288,81 +318,397 @@ async fn download_installer(
 #[cfg(windows)]
 fn install_helper_script() -> &'static str {
     r#"
-$ErrorActionPreference = 'Stop'
-$parentProcessId = [int]$args[0]
-$installerPath = $args[1]
-$appPath = $args[2]
-try { Wait-Process -Id $parentProcessId -Timeout 120 -ErrorAction SilentlyContinue } catch {}
+param(
+  [Parameter(Mandatory = $true)][ValidateRange(1, 2147483647)][int]$ParentProcessId,
+  [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$InstallerPath,
+  [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$AppPath,
+  [Parameter(Mandatory = $true)][ValidatePattern('^\d+\.\d+\.\d+$')][string]$ExpectedVersion,
+  [Parameter(Mandatory = $true)][ValidatePattern('^[a-fA-F0-9]{64}$')][string]$ExpectedSha256,
+  [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$ReadyPath,
+  [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$LogPath
+)
 
-function Resolve-InstalledHormachuelosPath {
-  $installDirs = @(
-    (Get-ItemProperty -Path 'HKCU:\Software\Hormachuelos\Hormachuelos' -ErrorAction SilentlyContinue).InstallDir,
-    (Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Hormachuelos' -ErrorAction SilentlyContinue).InstallLocation,
-    (Get-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Hormachuelos' -ErrorAction SilentlyContinue).InstallLocation,
-    (Split-Path -Parent $appPath)
-  )
-  foreach ($installDir in $installDirs) {
-    if ([string]::IsNullOrWhiteSpace($installDir)) { continue }
-    $candidate = Join-Path -Path $installDir.Trim('"') -ChildPath 'ai-forge.exe'
-    if (Test-Path -LiteralPath $candidate) { return $candidate }
-  }
-  return $appPath
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+function Write-UpdateLog {
+  param([Parameter(Mandatory = $true)][string]$Message)
+  try {
+    $line = '{0} {1}' -f [DateTimeOffset]::Now.ToString('o'), $Message
+    Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8
+  } catch {}
 }
 
-$exitCode = 1
-try {
-  if ([IO.Path]::GetExtension($installerPath).ToLowerInvariant() -eq '.msi') {
-    $quotedInstaller = '"' + $installerPath + '"'
-    $result = Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/i', $quotedInstaller, '/passive', '/norestart') -Wait -PassThru
-  } else {
-    $result = Start-Process -FilePath $installerPath -ArgumentList @('/P', '/UPDATE') -Wait -PassThru
+function Get-HormachuelosCandidates {
+  $candidates = @($AppPath)
+  foreach ($manufacturerKey in @(
+    'HKCU:\Software\Hormachuelos\Hormachuelos',
+    'HKLM:\Software\Hormachuelos\Hormachuelos'
+  )) {
+    try {
+      $item = Get-Item -LiteralPath $manufacturerKey -ErrorAction Stop
+      $candidates += [string]$item.GetValue('')
+      $candidates += [string]$item.GetValue('InstallDir')
+    } catch {}
   }
-  $exitCode = $result.ExitCode
-} catch {}
-if ($exitCode -eq 0 -or $exitCode -eq 3010) {
-  Remove-Item -LiteralPath $installerPath -Force -ErrorAction SilentlyContinue
-  Start-Sleep -Milliseconds 350
-  $launchPath = Resolve-InstalledHormachuelosPath
-  try { Start-Process -FilePath $launchPath } catch {
-    if ($launchPath -ne $appPath) {
-      try { Start-Process -FilePath $appPath } catch {}
+
+  foreach ($uninstallRoot in @(
+    'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall',
+    'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall',
+    'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+  )) {
+    try {
+      foreach ($key in Get-ChildItem -LiteralPath $uninstallRoot -ErrorAction Stop) {
+        $entry = Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction SilentlyContinue
+        if ($null -eq $entry) { continue }
+        $displayNameProperty = $entry.PSObject.Properties['DisplayName']
+        if ($null -ne $displayNameProperty -and [string]$displayNameProperty.Value -eq 'Hormachuelos') {
+          $installLocationProperty = $entry.PSObject.Properties['InstallLocation']
+          if ($null -ne $installLocationProperty) {
+            $candidates += [string]$installLocationProperty.Value
+          }
+        }
+      }
+    } catch {}
+  }
+
+  foreach ($baseDirectory in @($env:ProgramW6432, $env:ProgramFiles)) {
+    if (![string]::IsNullOrWhiteSpace($baseDirectory)) {
+      $candidates += Join-Path -Path $baseDirectory -ChildPath 'Hormachuelos'
     }
   }
-} else {
-  try { Start-Process -FilePath $appPath } catch {}
+  if (![string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+    $candidates += Join-Path -Path $env:LOCALAPPDATA -ChildPath 'Hormachuelos'
+    $candidates += Join-Path -Path $env:LOCALAPPDATA -ChildPath 'Programs\Hormachuelos'
+  }
+  return $candidates
 }
+
+function Test-HormachuelosVersion {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][bool]$RequireExpectedVersion
+  )
+  if (!(Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+  if (!$RequireExpectedVersion) { return $true }
+  try {
+    $actualVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo($Path).ProductVersion
+    if ([string]::IsNullOrWhiteSpace($actualVersion)) { return $false }
+    return ([version]$actualVersion).ToString(3) -eq ([version]$ExpectedVersion).ToString(3)
+  } catch {
+    return $false
+  }
+}
+
+function Resolve-HormachuelosPath {
+  param([Parameter(Mandatory = $true)][bool]$RequireExpectedVersion)
+  foreach ($candidateValue in Get-HormachuelosCandidates) {
+    if ([string]::IsNullOrWhiteSpace($candidateValue)) { continue }
+    $candidate = $candidateValue.Trim().Trim('"')
+    if ([IO.Path]::GetExtension($candidate).ToLowerInvariant() -ne '.exe') {
+      $candidate = Join-Path -Path $candidate -ChildPath 'ai-forge.exe'
+    }
+    if (Test-HormachuelosVersion -Path $candidate -RequireExpectedVersion $RequireExpectedVersion) {
+      return $candidate
+    }
+  }
+  return $null
+}
+
+function Assert-InstallerHash {
+  $actualSha256 = (Get-FileHash -LiteralPath $InstallerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ($actualSha256 -ne $ExpectedSha256.ToLowerInvariant()) {
+    throw 'The verified installer changed before it could be started.'
+  }
+}
+
+function Test-HormachuelosRunning {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  try { $expectedPath = [IO.Path]::GetFullPath($Path) } catch { return $false }
+  foreach ($process in @(Get-Process -Name 'ai-forge' -ErrorAction SilentlyContinue)) {
+    try {
+      if ([IO.Path]::GetFullPath($process.Path) -ieq $expectedPath) { return $true }
+    } catch {}
+  }
+  return $false
+}
+
+function Remove-UpdateHelperFiles {
+  Remove-Item -LiteralPath $ReadyPath -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+}
+
+function Open-PreviousHormachuelos {
+  $fallbackPath = Resolve-HormachuelosPath -RequireExpectedVersion $false
+  if (![string]::IsNullOrWhiteSpace($fallbackPath)) {
+    try {
+      Start-Process -FilePath $fallbackPath
+      Write-UpdateLog "Reopened previous app after update failure: $fallbackPath"
+    } catch {
+      Write-UpdateLog "Previous app could not be reopened: $($_.Exception.Message)"
+    }
+  } else {
+    Write-UpdateLog 'No runnable Hormachuelos executable was found after the update failure.'
+  }
+}
+
+try {
+  $logDirectory = Split-Path -Parent $LogPath
+  if (![string]::IsNullOrWhiteSpace($logDirectory)) {
+    [IO.Directory]::CreateDirectory($logDirectory) | Out-Null
+  }
+  if (!(Test-Path -LiteralPath $InstallerPath -PathType Leaf)) {
+    throw "Verified installer is missing: $InstallerPath"
+  }
+  if (!(Test-Path -LiteralPath $AppPath -PathType Leaf)) {
+    throw "Running application is missing: $AppPath"
+  }
+  Assert-InstallerHash
+  Write-UpdateLog "Helper ready for Hormachuelos $ExpectedVersion."
+  [IO.File]::WriteAllText(
+    $ReadyPath,
+    "ready:$ExpectedVersion",
+    [Text.UTF8Encoding]::new($false)
+  )
+} catch {
+  Write-UpdateLog "Helper initialization failed: $($_.Exception.Message)"
+  exit 10
+}
+
+try {
+  Wait-Process -Id $ParentProcessId -Timeout 120 -ErrorAction SilentlyContinue
+} catch {}
+if ($null -ne (Get-Process -Id $ParentProcessId -ErrorAction SilentlyContinue)) {
+  Write-UpdateLog 'The running app did not close within 120 seconds; installation was cancelled.'
+  Remove-UpdateHelperFiles
+  exit 11
+}
+
+try {
+  Assert-InstallerHash
+} catch {
+  Write-UpdateLog "Installer integrity check failed after app exit: $($_.Exception.Message)"
+  Open-PreviousHormachuelos
+  Remove-UpdateHelperFiles
+  exit 13
+}
+
+$exitCode = -1
+try {
+  $extension = [IO.Path]::GetExtension($InstallerPath).ToLowerInvariant()
+  Write-UpdateLog "Starting $extension installer."
+  if ($extension -eq '.msi') {
+    $quotedInstaller = '"' + $InstallerPath + '"'
+    $result = Start-Process -FilePath 'msiexec.exe' -ArgumentList @(
+      '/i', $quotedInstaller, '/passive', '/norestart',
+      'AUTOLAUNCHAPP=True', 'LAUNCHAPPARGS=""'
+    ) -Wait -PassThru
+  } elseif ($extension -eq '.exe') {
+    $result = Start-Process -FilePath $InstallerPath -ArgumentList @(
+      '/P', '/UPDATE', '/R'
+    ) -Wait -PassThru
+  } else {
+    throw "Unsupported installer type: $extension"
+  }
+  $exitCode = [int]$result.ExitCode
+  Write-UpdateLog "Installer exited with code $exitCode."
+} catch {
+  Write-UpdateLog "Installer failed to start: $($_.Exception.Message)"
+}
+
+if ($exitCode -in @(0, 1641, 3010)) {
+  if ($exitCode -in @(1641, 3010)) {
+    Write-UpdateLog "Windows reported that a reboot may still be required (code $exitCode)."
+  }
+  $launchPath = Resolve-HormachuelosPath -RequireExpectedVersion $true
+  if (![string]::IsNullOrWhiteSpace($launchPath)) {
+    try {
+      $nativeRestarted = $false
+      for ($attempt = 0; $attempt -lt 20; $attempt += 1) {
+        if (Test-HormachuelosRunning -Path $launchPath) {
+          $nativeRestarted = $true
+          break
+        }
+        Start-Sleep -Milliseconds 250
+      }
+      if ($nativeRestarted) {
+        Write-UpdateLog "Installer opened updated app: $launchPath"
+      } else {
+        $startedProcess = Start-Process -FilePath $launchPath -PassThru
+        Start-Sleep -Milliseconds 500
+        if ($startedProcess.HasExited) {
+          throw "Updated app exited immediately with code $($startedProcess.ExitCode)."
+        }
+        Write-UpdateLog "Helper opened updated app: $launchPath"
+      }
+      Remove-Item -LiteralPath $InstallerPath -Force -ErrorAction SilentlyContinue
+      Remove-UpdateHelperFiles
+      exit 0
+    } catch {
+      Write-UpdateLog "Updated app could not be opened: $($_.Exception.Message)"
+    }
+  } else {
+    Write-UpdateLog "Installer succeeded, but Hormachuelos $ExpectedVersion was not found."
+  }
+}
+
+Open-PreviousHormachuelos
+Remove-UpdateHelperFiles
+exit 12
 "#
 }
 
 #[cfg(windows)]
-fn launch_install_helper(installer: &Path, current_exe: &Path) -> Result<(), String> {
+fn update_helper_log_path() -> Result<PathBuf, String> {
+    let dirs = directories::ProjectDirs::from("com", "ai-forge", "AI-Forge")
+        .ok_or_else(|| "Could not locate the Hormachuelos update log folder.".to_string())?;
+    let directory = dirs.data_local_dir().join("logs");
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| format!("Could not prepare the update log folder: {error}"))?;
+    Ok(directory.join("update-helper.log"))
+}
+
+#[cfg(windows)]
+struct InstallHelperCommand<'a> {
+    helper_path: &'a Path,
+    installer: &'a Path,
+    current_exe: &'a Path,
+    expected_version: &'a str,
+    expected_sha256: &'a str,
+    ready_path: &'a Path,
+    log_path: &'a Path,
+    parent_id: u32,
+}
+
+#[cfg(windows)]
+fn install_helper_command(options: InstallHelperCommand<'_>) -> std::process::Command {
     use std::os::windows::process::CommandExt;
 
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let parent_id = std::process::id().to_string();
-    let script = install_helper_script();
-
-    std::process::Command::new("powershell.exe")
+    let mut command = std::process::Command::new("powershell.exe");
+    command
         .args([
             "-NoLogo",
             "-NoProfile",
             "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
             "-WindowStyle",
             "Hidden",
-            "-Command",
-            script,
-            &parent_id,
+            "-File",
         ])
-        .arg(installer)
-        .arg(current_exe)
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
-        .map_err(|error| format!("Could not start the internal update installer: {error}"))?;
-    Ok(())
+        .arg(options.helper_path)
+        .arg("-ParentProcessId")
+        .arg(options.parent_id.to_string())
+        .arg("-InstallerPath")
+        .arg(options.installer)
+        .arg("-AppPath")
+        .arg(options.current_exe)
+        .arg("-ExpectedVersion")
+        .arg(options.expected_version)
+        .arg("-ExpectedSha256")
+        .arg(options.expected_sha256)
+        .arg("-ReadyPath")
+        .arg(options.ready_path)
+        .arg("-LogPath")
+        .arg(options.log_path)
+        .creation_flags(CREATE_NO_WINDOW);
+    command
+}
+
+#[cfg(windows)]
+async fn launch_install_helper(
+    installer: &Path,
+    current_exe: &Path,
+    expected_version: &str,
+    expected_sha256: &str,
+) -> Result<(), String> {
+    let cache_directory = installer
+        .parent()
+        .ok_or_else(|| "The downloaded installer has no parent folder.".to_string())?;
+    let process_id = std::process::id();
+    let helper_path = cache_directory.join(format!("update-helper-{process_id}.ps1"));
+    let ready_path = cache_directory.join(format!("update-helper-{process_id}.ready"));
+    let log_path = update_helper_log_path()?;
+    let _ = std::fs::remove_file(&ready_path);
+    std::fs::write(&helper_path, install_helper_script())
+        .map_err(|error| format!("Could not prepare the internal update helper: {error}"))?;
+
+    let mut command = install_helper_command(InstallHelperCommand {
+        helper_path: &helper_path,
+        installer,
+        current_exe,
+        expected_version,
+        expected_sha256,
+        ready_path: &ready_path,
+        log_path: &log_path,
+        parent_id: process_id,
+    });
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            let _ = std::fs::remove_file(&ready_path);
+            let _ = std::fs::remove_file(&helper_path);
+            return Err(format!(
+                "Could not start the internal update helper: {error}"
+            ));
+        }
+    };
+
+    let expected_ready = format!("ready:{expected_version}");
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+    loop {
+        if let Ok(value) = std::fs::read_to_string(&ready_path) {
+            if value.trim() == expected_ready {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                if let Some(status) = child.try_wait().map_err(|error| {
+                    format!("Could not monitor the internal update helper: {error}")
+                })? {
+                    let _ = std::fs::remove_file(&ready_path);
+                    let _ = std::fs::remove_file(&helper_path);
+                    return Err(format!(
+                        "The update helper stopped before the app could close (exit code {}). Hormachuelos stayed open. Details: {}",
+                        status.code().unwrap_or(-1),
+                        log_path.display()
+                    ));
+                }
+                let _ = std::fs::remove_file(&ready_path);
+                return Ok(());
+            }
+        }
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("Could not monitor the internal update helper: {error}"))?
+        {
+            let _ = std::fs::remove_file(&ready_path);
+            let _ = std::fs::remove_file(&helper_path);
+            return Err(format!(
+                "The update helper could not initialize (exit code {}). Hormachuelos stayed open. Details: {}",
+                status.code().unwrap_or(-1),
+                log_path.display()
+            ));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_file(&ready_path);
+            let _ = std::fs::remove_file(&helper_path);
+            return Err(format!(
+                "The update helper did not become ready. Hormachuelos stayed open. Details: {}",
+                log_path.display()
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
 }
 
 #[cfg(not(windows))]
-fn launch_install_helper(_installer: &Path, _current_exe: &Path) -> Result<(), String> {
+async fn launch_install_helper(
+    _installer: &Path,
+    _current_exe: &Path,
+    _expected_version: &str,
+    _expected_sha256: &str,
+) -> Result<(), String> {
     Err("Internal updates are currently supported on Windows only.".into())
 }
 
@@ -395,9 +741,9 @@ async fn install_app_update_inner(
     );
     let current_exe = std::env::current_exe()
         .map_err(|error| format!("Could not locate the running Hormachuelos app: {error}"))?;
-    state.stop_all_runs();
     emit_progress(app, "installing", None, "Starting the internal installer…");
-    launch_install_helper(&installer, &current_exe)?;
+    launch_install_helper(&installer, &current_exe, &version, &sha256).await?;
+    state.stop_all_runs();
     emit_progress(
         app,
         "restarting",
@@ -421,8 +767,8 @@ pub async fn install_app_update(
         return Err("An app update is already running.".into());
     }
     let result = install_app_update_inner(&app, &state, download_url, version, sha256).await;
+    UPDATE_RUNNING.store(false, Ordering::SeqCst);
     if result.is_err() {
-        UPDATE_RUNNING.store(false, Ordering::SeqCst);
         emit_progress(
             &app,
             "error",
@@ -482,11 +828,105 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn update_helper_starts_the_installed_app_after_a_successful_install() {
+    fn update_helper_uses_named_parameters_and_validates_the_restarted_version() {
         let script = super::install_helper_script();
-        assert!(script.contains("Resolve-InstalledHormachuelosPath"));
-        assert!(script.contains("@('/P', '/UPDATE')"));
-        assert!(!script.contains("@('/P', '/UPDATE', '/R')"));
+        assert!(script.contains("param("));
+        assert!(!script.contains("$args["));
+        assert!(script.contains("[IO.File]::WriteAllText("));
+        assert!(script.contains("ready:$ExpectedVersion"));
+        assert!(script.contains("Assert-InstallerHash"));
+        assert!(script.contains("Resolve-HormachuelosPath -RequireExpectedVersion $true"));
+        assert!(script.contains("'/P', '/UPDATE', '/R'"));
+        assert!(script.contains("'AUTOLAUNCHAPP=True'"));
         assert!(script.contains("Start-Process -FilePath $launchPath"));
+        assert!(script.contains("update failure"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn update_helper_is_started_as_a_real_powershell_file() {
+        let helper = std::path::Path::new(r"C:\Temp Folder\update-helper.ps1");
+        let installer = std::path::Path::new(r"C:\Temp Folder\Hormachuelos update.exe");
+        let app = std::path::Path::new(r"C:\Program Files\Hormachuelos\ai-forge.exe");
+        let ready = std::path::Path::new(r"C:\Temp Folder\update.ready");
+        let log = std::path::Path::new(r"C:\Temp Folder\update.log");
+        let sha256 = "a".repeat(64);
+        let command = super::install_helper_command(super::InstallHelperCommand {
+            helper_path: helper,
+            installer,
+            current_exe: app,
+            expected_version: "0.1.12",
+            expected_sha256: &sha256,
+            ready_path: ready,
+            log_path: log,
+            parent_id: 4321,
+        });
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(command.get_program(), "powershell.exe");
+        assert!(args.iter().any(|arg| arg == "-File"));
+        assert!(!args.iter().any(|arg| arg == "-Command"));
+        let file_index = args.iter().position(|arg| arg == "-File").unwrap();
+        assert_eq!(args[file_index + 1], helper.to_string_lossy());
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-ParentProcessId", "4321"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-InstallerPath", installer.to_string_lossy().as_ref()]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-AppPath", app.to_string_lossy().as_ref()]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-ExpectedVersion", "0.1.12"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-ExpectedSha256", sha256.as_str()]));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn detects_the_installed_windows_installer_family() {
+        let directory = std::env::temp_dir().join(format!(
+            "hormachuelos-install-kind-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let app = directory.join("ai-forge.exe");
+        std::fs::write(&app, []).unwrap();
+
+        assert_eq!(super::install_kind_for_executable(&app), "msi");
+        std::fs::write(directory.join("uninstall.exe"), []).unwrap();
+        assert_eq!(super::install_kind_for_executable(&app), "nsis");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn update_helper_failure_is_acknowledged_before_the_app_can_exit() {
+        let directory = std::env::temp_dir().join(format!(
+            "hormachuelos-update-helper-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let missing_installer = directory.join("missing-installer.exe");
+        let current_exe = std::env::current_exe().unwrap();
+
+        let error = super::launch_install_helper(
+            &missing_installer,
+            &current_exe,
+            "9.9.9",
+            &"a".repeat(64),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("exit code 10"), "{error}");
+        assert!(error.contains("Hormachuelos stayed open"), "{error}");
+        let _ = std::fs::remove_dir_all(directory);
     }
 }

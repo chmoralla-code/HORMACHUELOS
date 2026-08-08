@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="/theme/tokens.css" />
+    <link rel="stylesheet" href="/theme/globals.css" />
+    <link rel="stylesheet" href="/app.css" />
+    <link rel="stylesheet" href="/theme/client-success.css" />
+    <title>Client Success Center harness</title>
+  </head>
+  <body>
+    <main style="padding: 24px">
+      <button id="open-client-success" type="button">Open Client Success Center</button>
+    </main>
+    <div id="modal-root" class="modal-root"></div>
+    <script type="module">
+      import { ClientSuccessCenter, composeProjectMissionPrompt } from "/components/client-success-center.ts";
+
+      const events = [];
+      const root = document.getElementById("modal-root");
+      const center = new ClientSuccessCenter(root, {
+        getProjectPath: () => "C:/Projects/Acme Launch",
+        onRunRecipe: (prompt) => {
+          events.push({ kind: "workflow", prompt });
+          return "sent";
+        },
+        onExportClientPack: async (handoffSummary) => {
+          events.push({ kind: "pack", handoffSummary });
+          return { zipPath: "C:/Projects/Acme Launch-client-pack.zip", filesCount: 12 };
+        },
+      });
+      document.getElementById("open-client-success").addEventListener("click", () => center.open());
+      window.__clientSuccessHarness = { events, compose: () => composeProjectMissionPrompt("C:/Projects/Acme Launch", "Build the requested page") };
+    </script>
+  </body>
+</html>

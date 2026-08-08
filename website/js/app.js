@@ -1,32 +1,39 @@
 /**
  * Hormachuelos marketing site — SPA with server auth (email/password, no email magic links).
- * Temporary PHP prices. GCash-first checkout demo (no real payment gateway yet).
+ * PHP pricing with a secure GCash proof-review checkout.
  */
 
 const STORAGE_USER = "horma:user";
 const STORAGE_TOKEN = "horma:token";
 const STORAGE_ADMIN = "horma:admin";
 const STORAGE_ORDERS = "horma:orders";
+const STORAGE_PAYMENT_REQUESTS = "horma:payment_requests";
 const STORAGE_DESKTOP_CODE = "horma:desktop_code";
 const STORAGE_DESKTOP_FLOW = "horma:desktop_flow";
 
-/** Public assets hosted on Supabase Storage (keeps Vercel deploy under size limits). */
+/**
+ * Desktop installer files are uploaded to Supabase Storage by the release
+ * pipeline (`npm run release`), which is also the source of truth for
+ * /api/update. The static /downloads files are excluded from Vercel deploys
+ * (see .vercelignore), so the fallback URLs must point at Supabase Storage to
+ * stay downloadable.
+ */
 const ASSET_BASE =
   "https://mketkzycxmtvgdbwzsvh.supabase.co/storage/v1/object/public/public-assets";
 
 /** Desktop installer files (uploaded to Supabase after `npm run desktop:build`). */
 const DESKTOP_DOWNLOADS = {
-  version: "0.1.11",
+  version: "0.1.52",
   windows: {
     msi: {
       label: "Windows installer (MSI)",
-      href: "/downloads/Hormachuelos_0.1.11_x64_en-US.msi",
-      file: "Hormachuelos_0.1.11_x64_en-US.msi",
+      href: `${ASSET_BASE}/downloads/Hormachuelos_0.1.52_x64_en-US.msi`,
+      file: "Hormachuelos_0.1.52_x64_en-US.msi",
     },
     setup: {
       label: "Windows setup (EXE)",
-      href: "/downloads/Hormachuelos_0.1.11_x64-setup.exe",
-      file: "Hormachuelos_0.1.11_x64-setup.exe",
+      href: `${ASSET_BASE}/downloads/Hormachuelos_0.1.52_x64-setup.exe`,
+      file: "Hormachuelos_0.1.52_x64-setup.exe",
     },
   },
 };
@@ -62,14 +69,13 @@ const BILLING = {
   },
 };
 
-/** Max tiers — lean ROI (~80% of plan price → usage pool). Pools vs Pro (1×). */
+/** Max tiers — multipliers for team plans (token pools stay server-side). */
 const MAX_ROI_TIERS = {
   "5x": {
     id: "max5",
     label: "5×",
     multiplier: 5,
     price: 2499,
-    pool: "27.5M units",
     tagline: "Teams & parallel builds",
   },
   "10x": {
@@ -77,7 +83,6 @@ const MAX_ROI_TIERS = {
     label: "10×",
     multiplier: 10,
     price: 4999,
-    pool: "55M units",
     tagline: "Agency sprints",
   },
   "20x": {
@@ -85,10 +90,41 @@ const MAX_ROI_TIERS = {
     label: "20×",
     multiplier: 20,
     price: 9999,
-    pool: "110M units",
     tagline: "Multi-seat shops",
   },
 };
+
+const GCASH_RECEIVER_LABEL = "CH*****O M.";
+
+/** Keep in sync with website/api/_lib/payments.js PLAN_CHECKOUTS. */
+const GCASH_CHECKOUTS = {
+  starter: { planName: "Starter", amountPhp: 299, qrPath: "/images/gcash/gcash-299.png" },
+  pro: { planName: "Pro", amountPhp: 999, qrPath: "/images/gcash/gcash-999.png" },
+  proplus: { planName: "Pro+", amountPhp: 2499, qrPath: "/images/gcash/gcash-2499.png" },
+  max5: { planName: "Max 5×", amountPhp: 2499, qrPath: "/images/gcash/gcash-2499.png" },
+  max10: { planName: "Max 10×", amountPhp: 4999, qrPath: "/images/gcash/gcash-4999.png" },
+  max20: { planName: "Max 20×", amountPhp: 9999, qrPath: "/images/gcash/gcash-9999.png" },
+};
+
+function normalizeCheckoutPlanId(planId, tierKey = "") {
+  const id = String(planId || "pro").toLowerCase();
+  if (id === "max" || id === "agency" || id === "ultra") {
+    const tier = MAX_ROI_TIERS[tierKey] || MAX_ROI_TIERS["5x"];
+    return tier?.id || "max5";
+  }
+  if (id === "pro+" || id === "pro_plus") return "proplus";
+  if (id === "fifteen" || id === "15day" || id === "15-day") return "pro";
+  return id;
+}
+
+function gcashCheckoutDetails(planId, tierKey = "") {
+  const normalized = normalizeCheckoutPlanId(planId, tierKey);
+  const details = GCASH_CHECKOUTS[normalized];
+  if (!details) {
+    return { planId: "pro", ...GCASH_CHECKOUTS.pro, receiverLabel: GCASH_RECEIVER_LABEL };
+  }
+  return { planId: normalized, ...details, receiverLabel: GCASH_RECEIVER_LABEL };
+}
 
 const PLANS = [
   {
@@ -102,7 +138,7 @@ const PLANS = [
       "Included usage wallet",
       "Plan · Auto modes",
       "Pinoy templates + Client Pack",
-      "GCash & Maya checkout",
+      "GCash QR checkout",
       "Messenger support",
     ],
   },
@@ -114,10 +150,10 @@ const PLANS = [
     price: 999,
     features: [
       "Everything in Starter",
-      "3× usage headroom",
+      "Larger usage wallet",
       "Full autonomy mode",
       "Priority model routing",
-      "GCash credit top-ups",
+      "GCash proof review",
       "Client Pack + deploy checklist",
       "Priority support (Viber / FB)",
     ],
@@ -132,7 +168,7 @@ const PLANS = [
     defaultTier: "5x",
     features: [
       "Everything in Pro",
-      "ROI-tier usage pool",
+      "Highest usage headroom",
       "Up to 5 team seats",
       "Shared workspaces",
       "BIR-ready receipts",
@@ -143,7 +179,7 @@ const PLANS = [
 
 const FEATURES = [
   { icon: "AI", title: "Local-first agent", body: "Open a project folder and let the agent read, edit, and run tools — on your machine." },
-  { icon: "₱", title: "Pay with GCash", body: "No foreign card required. Checkout in PHP with GCash or Maya — built for Filipino builders." },
+  { icon: "₱", title: "Pay with GCash", body: "No foreign card required. Pay the exact PHP amount through GCash, then submit a receipt proof for review." },
   { icon: "Pk", title: "Client Pack", body: "One-click zip + CLIENT_HANDOFF.md with deploy checklist — ready to send to clients." },
   { icon: "Pl", title: "Plan · Auto · Full", body: "Start careful, scale autonomy when you trust the run. OpenCode-style controls." },
   { icon: "Mo", title: "Bring your models", body: "DeepSeek, OpenRouter, and more. Your keys, your spend, your rules." },
@@ -154,11 +190,11 @@ const FEATURES = [
 const FAQ = [
   {
     q: "Bakit mas unique ang Hormachuelos vs Cursor / ChatGPT?",
-    a: "Global AI tools almost never accept GCash. We price in ₱ PHP and checkout with GCash / Maya so freelancers and students can pay without a credit card or USD billing.",
+    a: "Global AI tools almost never accept GCash. We price in ₱ PHP and support GCash checkout so freelancers and students can pay without a credit card or USD billing.",
   },
   {
     q: "Real ba ang GCash payment ngayon?",
-    a: "This site is a product demo: checkout is interactive and saves a local order. Live PayMongo / Xendit GCash will replace the mock when merchant KYC is ready.",
+    a: "Yes. After choosing a plan, you will see its exact GCash QR amount, upload a clear receipt image, and receive the plan after the receipt passes automated checks or a manual review.",
   },
   {
     q: "Paano gumagana ang pay-as-you-go pricing?",
@@ -238,6 +274,7 @@ async function refreshSessionUser() {
     const data = await apiAuth("/api/auth/me");
     setSessionUser(data.user, getSessionToken());
     if (Array.isArray(data.orders)) saveJSON(STORAGE_ORDERS, data.orders);
+    if (Array.isArray(data.paymentRequests)) setPaymentRequests(data.paymentRequests);
     return data.user;
   } catch {
     setSessionUser(null);
@@ -339,12 +376,49 @@ function addOrder(order) {
   return order;
 }
 
+function getPaymentRequests() {
+  return loadJSON(STORAGE_PAYMENT_REQUESTS, []);
+}
+
+function setPaymentRequests(requests) {
+  const safe = Array.isArray(requests) ? requests.filter((request) => request?.id) : [];
+  saveJSON(STORAGE_PAYMENT_REQUESTS, safe.slice(0, 30));
+}
+
+function upsertPaymentRequest(request) {
+  if (!request?.id) return;
+  const next = [request, ...getPaymentRequests().filter((item) => item?.id !== request.id)];
+  setPaymentRequests(next);
+}
+
 function formatPHP(n) {
   return new Intl.NumberFormat("en-PH", {
     style: "currency",
     currency: "PHP",
     maximumFractionDigits: 0,
   }).format(n);
+}
+
+function paymentStatusText(status) {
+  const labels = {
+    awaiting_proof: "Waiting for proof",
+    upload_ready: "Ready to scan",
+    scanning: "Scanning receipt",
+    review_required: "Needs review",
+    approval_processing: "Activating plan",
+    approved: "Approved",
+    rejected: "Rejected",
+    scan_failed: "Scan needs review",
+  };
+  return labels[String(status || "").toLowerCase()] || "Payment request";
+}
+
+function paymentStatusTone(status) {
+  const normalized = String(status || "").toLowerCase();
+  if (normalized === "approved") return "ok";
+  if (normalized === "rejected") return "danger";
+  if (normalized === "review_required" || normalized === "scan_failed") return "warn";
+  return "pending";
 }
 
 function toast(msg) {
@@ -499,18 +573,32 @@ function renderHome() {
   return page(`
     <section class="hero container">
       <div class="eyebrow ix-reveal" data-delay="0"><span class="dot"></span> Built for PH · GCash ready</div>
-      <h1 class="ix-headline" aria-label="GPT 5.6, Opus 5, Opus 4.8 and more. Pinoy-made AI for builders without bank accounts.">
-        GPT 5.6, Opus 5, Opus 4.8 &amp; more — Pinoy-made AI for builders without bank accounts.
+      <h1 class="ix-headline ix-hero-headline ix-reveal" data-delay="0" aria-label="OpenAI, Claude, DeepSeek, Hormachuelos, Ollama, OpenRouter. All models in one place.">
+        <span class="ix-hero-models">
+          <span class="ix-model-chip" data-provider="openai" style="--ix-delay:0" tabindex="0">OpenAi</span><span class="ix-hero-sep">,</span>
+          <span class="ix-model-chip" data-provider="claude" style="--ix-delay:1" tabindex="0">Claude</span><span class="ix-hero-sep">,</span>
+          <span class="ix-model-chip" data-provider="deepseek" style="--ix-delay:2" tabindex="0">Deepseek</span><span class="ix-hero-sep">,</span>
+          <span class="ix-model-chip" data-provider="hormachuelos" style="--ix-delay:3" tabindex="0">Hormachuelos</span><span class="ix-hero-sep">,</span>
+          <span class="ix-model-chip" data-provider="ollama" style="--ix-delay:4" tabindex="0">Ollama</span><span class="ix-hero-sep">,</span>
+          <span class="ix-model-chip" data-provider="openrouter" style="--ix-delay:5" tabindex="0">Openrouter</span><span class="ix-hero-sep">.</span>
+        </span>
+        <span class="ix-hero-tagline">
+          <span class="ix-static">All models in </span>
+          <span class="ix-type-wrap" aria-live="polite">
+            <span id="hero-type" class="ix-type" data-phrases="one place|one desktop|one checkout|your workflow">one place</span>
+            <span class="ix-caret" aria-hidden="true"></span>
+          </span>
+        </span>
       </h1>
       <p class="lead ix-reveal" data-delay="1" data-ix-hover-words>
-        Hormachuelos is a monochrome AI coding agent with PHP pricing. No foreign card. No USD surprise. Code on your machine — bayad sa GCash.
+        PinoyMade ARTIFICIAL INTELLIGENCE (GUI) software and a website that is easy to use and built for vibe coders that don't have bank accounts.
       </p>
       <div class="hero-cta ix-reveal" data-delay="2">
         <a class="btn btn-primary btn-lg" href="#/pricing">View pricing</a>
         ${renderDownloadButton("btn-lg")}
       </div>
       <div class="trust-row ix-reveal" data-delay="3">
-        <button type="button" class="trust-chip" data-tip="Pay with the wallet you already use">GCash &amp; Maya checkout</button>
+        <button type="button" class="trust-chip" data-tip="Pay the exact amount then upload one clear receipt">GCash QR + proof review</button>
         <button type="button" class="trust-chip" data-tip="No USD conversion surprises">₱ transparent pricing</button>
         <button type="button" class="trust-chip" data-tip="Agent works on your local folders">Desktop agent · your folders</button>
       </div>
@@ -550,11 +638,11 @@ function renderHome() {
             </thead>
             <tbody>
               <tr tabindex="0" data-line="They stop at Visa. We start at GCash."><td>GCash</td><td class="no">No</td><td class="yes">Yes</td></tr>
-              <tr tabindex="0" data-line="Maya works too — same PH wallets."><td>Maya</td><td class="no">No</td><td class="yes">Yes</td></tr>
+              <tr tabindex="0" data-line="Every receipt gets amount, duplicate, and visual-risk checks."><td>Receipt review</td><td class="no">No</td><td class="yes">Yes</td></tr>
               <tr tabindex="0" data-line="See ₱ on the price tag, not $20 + FX."><td>PHP pricing</td><td class="no">USD + FX</td><td class="yes">₱ PHP</td></tr>
               <tr tabindex="0" data-line="Message us on Messenger — 09505339963."><td>Local support</td><td class="no">Email / Discord</td><td class="yes"><a class="compare-messenger" href="https://www.facebook.com/profile.php?id=61584774638218" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">Messenger</a> + 09505339963</td></tr>
-              <tr tabindex="0" data-line="No surprise hourly or weekly caps — keep building."><td>Usage reset</td><td class="no">Hourly · Weekly · Monthly</td><td class="yes">No hourly, weekly, or monthly reset</td></tr>
-              <tr tabindex="0" data-line="Try for ₱149 — fifteen days, no card drama."><td>From</td><td class="no">~$20/mo card</td><td class="yes">₱149 / 15 days</td></tr>
+              <tr tabindex="0" data-line="No expiry — keep building on your plan wallet."><td>Usage reset</td><td class="no">Hourly · Weekly · Monthly</td><td class="yes">No Expiry</td></tr>
+              <tr tabindex="0" data-line="Starter from ₱299 — lowest subscription, no card drama."><td>From</td><td class="no">~$20/mo card</td><td class="yes">299php lowest subscription</td></tr>
             </tbody>
           </table>
           <p class="compare-live mono" id="compare-live" aria-live="polite">Click a row to hear the pitch…</p>
@@ -565,8 +653,7 @@ function renderHome() {
     <section class="section">
       <div class="container">
         <div class="cta-band ix-reveal">
-          <h2 data-ix-split>Start in 15 days. Or go yearly.</h2>
-          <p data-ix-hover-words>Temporary promo pricing while we finish live GCash via PayMongo. Lock a plan that fits your cash flow.</p>
+          <p data-ix-hover-words>Choose a plan, pay its exact GCash amount, then track your private proof review from the dashboard.</p>
           <a class="btn btn-primary btn-lg" href="#/pricing">See plans</a>
         </div>
       </div>
@@ -597,26 +684,25 @@ function renderFeatures() {
   `);
 }
 
-function findPlanByCheckoutId(planId) {
+function findPlanByCheckoutId(planId, tierKey = "") {
+  const id = normalizeCheckoutPlanId(planId, tierKey);
   for (const plan of PLANS) {
-    if (plan.id === planId) return { plan, tier: null };
+    if (plan.id === id) return { plan, tier: null };
     if (plan.tiers) {
       for (const tier of Object.values(plan.tiers)) {
-        if (tier.id === planId) return { plan, tier };
+        if (tier.id === id) return { plan, tier };
       }
     }
   }
   return { plan: PLANS[1], tier: null };
 }
 
-function checkoutAmount(planId) {
-  const { plan, tier } = findPlanByCheckoutId(planId);
-  if (tier) return tier.price;
-  return plan.price;
+function checkoutAmount(planId, tierKey = "") {
+  return gcashCheckoutDetails(planId, tierKey).amountPhp;
 }
 
-function checkoutPlanLabel(planId) {
-  const { plan, tier } = findPlanByCheckoutId(planId);
+function checkoutPlanLabel(planId, tierKey = "") {
+  const { plan, tier } = findPlanByCheckoutId(planId, tierKey);
   if (tier) return `Max ${tier.label}`;
   return plan.name;
 }
@@ -636,8 +722,8 @@ function renderPricing() {
         <div class="pricing-grid" id="pricing-grid"></div>
         <div class="gcash-note ix-reveal">
           <span class="pay-badge">GCash</span>
-          <span class="pay-badge">Maya</span>
-          <span class="ix-type-once" data-text="Demo checkout · live gateway coming soon"></span>
+          <span class="pay-badge">Exact ₱ amount</span>
+          <span class="ix-type-once" data-text="Private proof upload · secure review"></span>
         </div>
       </div>
     </section>
@@ -678,13 +764,7 @@ function renderPricing() {
             </div>
           </div>`
         : "";
-      const tierMeta = plan.tiers && tier
-        ? `<div class="max-tier-meta">
-            <span class="max-tier-chip">${escapeHtml(tier.tagline)}</span>
-            <span class="max-tier-chip">${escapeHtml(tier.pool)}</span>
-            <span class="max-tier-chip">80% → usage</span>
-          </div>`
-        : "";
+      const tierMeta = "";
       return `
         <article class="price-card ix-card ${plan.featured ? "featured" : ""}" data-plan-card="${plan.id}" tabindex="0">
           ${plan.featured ? `<span class="badge">Popular</span>` : ""}
@@ -715,7 +795,7 @@ function renderPricing() {
         maxTier = btn.getAttribute("data-max-tier") || "5x";
         paintCards(true);
         const tier = MAX_ROI_TIERS[maxTier];
-        typeInto(live, `Max ${tier.label} · ${formatPHP(tier.price)} · lean ROI (~80% to usage)`, 18);
+        typeInto(live, `Max ${tier.label} · ${formatPHP(tier.price)} · ${tier.tagline}`, 18);
       });
     });
 
@@ -1108,7 +1188,9 @@ function renderDashboard() {
       const full = data.user;
       setSessionUser(full, getSessionToken());
       if (Array.isArray(data.orders)) saveJSON(STORAGE_ORDERS, data.orders);
+      if (Array.isArray(data.paymentRequests)) setPaymentRequests(data.paymentRequests);
       const orders = data.orders || getOrders().filter((o) => o.email === full.email);
+      const paymentRequests = data.paymentRequests || getPaymentRequests();
       const planLabel = full.plan ? checkoutPlanLabel(full.plan) : null;
       const bill = BILLING[full.period] || BILLING.payg;
       const emailEl = wrap.querySelector("#dash-email");
@@ -1164,6 +1246,21 @@ function renderDashboard() {
                       .join("")}</ul>`
               }
             </div>
+            <div class="card">
+              <h3>Payment requests</h3>
+              ${
+                paymentRequests.length === 0
+                  ? `<p class="muted small" style="margin-top:12px">No GCash payment requests yet.</p>`
+                  : `<ul class="feature-list payment-request-list" style="margin-top:12px">${paymentRequests
+                      .slice(0, 5)
+                      .map(
+                        (request) =>
+                          `<li><span class="payment-status ${paymentStatusTone(request.status)}">${escapeHtml(paymentStatusText(request.status))}</span><span>${escapeHtml(request.planName || request.planId || "Plan")} · ${formatPHP(request.amountPhp)}</span><span class="mono muted small">${escapeHtml(String(request.id || "").slice(0, 8))}</span></li>`,
+                      )
+                      .join("")}</ul>`
+              }
+              <p class="muted small" style="margin:14px 0 0">Only approved payment requests activate a plan. Under-review requests stay visible here until a decision is made.</p>
+            </div>
           </div>`;
       }
     } catch (ex) {
@@ -1206,7 +1303,7 @@ function renderAdmin() {
       <div class="dash-head">
         <div>
           <h1>Admin</h1>
-          <p class="muted small">Manage registered users, plans, and hosted usage limits.</p>
+          <p class="muted small">Manage users, plans, secure provider credentials, aliases, and software releases.</p>
         </div>
         <div id="admin-actions" style="display:flex;gap:8px;flex-wrap:wrap"></div>
       </div>
@@ -1271,6 +1368,7 @@ function renderAdmin() {
   function wireAdminChrome(tab) {
     actions.innerHTML = `
       <button type="button" class="btn btn-sm ${tab === "users" ? "btn-primary" : ""}" id="admin-tab-users">Users</button>
+      <button type="button" class="btn btn-sm ${tab === "payments" ? "btn-primary" : ""}" id="admin-tab-payments">Payments</button>
       <button type="button" class="btn btn-sm ${tab === "models" ? "btn-primary" : ""}" id="admin-tab-models">Models</button>
       <button type="button" class="btn btn-sm ${tab === "releases" ? "btn-primary" : ""}" id="admin-tab-releases">Releases</button>
       <button type="button" class="btn btn-sm" id="admin-refresh">Refresh</button>
@@ -1282,6 +1380,7 @@ function renderAdmin() {
     };
     actions.querySelector("#admin-refresh").onclick = () => paintAdmin(tab);
     actions.querySelector("#admin-tab-users").onclick = () => paintAdmin("users");
+    actions.querySelector("#admin-tab-payments").onclick = () => paintAdmin("payments");
     actions.querySelector("#admin-tab-models").onclick = () => paintAdmin("models");
     actions.querySelector("#admin-tab-releases").onclick = () => paintAdmin("releases");
   }
@@ -1292,6 +1391,10 @@ function renderAdmin() {
       return;
     }
     wireAdminChrome(tab);
+    if (tab === "payments") {
+      await paintPayments();
+      return;
+    }
     if (tab === "models") {
       await paintModels();
       return;
@@ -1306,15 +1409,38 @@ function renderAdmin() {
   async function paintUsers() {
     root.innerHTML = `<p class="muted">Loading users…</p>`;
     try {
-      const data = await apiAdmin("/api/admin/users");
+      const [data, providerData] = await Promise.all([
+        apiAdmin("/api/admin/users"),
+        apiAdmin("/api/admin/providers"),
+      ]);
       const users = data.users || [];
+      const providers = (Array.isArray(providerData.providers) ? providerData.providers : [])
+        .filter((provider) => provider.active !== false && provider.providerId !== "commandcode");
+      const configs = (Array.isArray(providerData.configs) ? providerData.configs : [])
+        .filter((model) => model.active !== false && model.providerId !== "commandcode");
+      const modelsByProvider = new Map();
+      for (const model of configs) {
+        const providerId = String(model.providerId || "").trim().toLowerCase();
+        if (!providerId) continue;
+        const items = modelsByProvider.get(providerId) || [];
+        items.push(model);
+        modelsByProvider.set(providerId, items);
+      }
+
       if (!users.length) {
         root.innerHTML = `<div class="card"><p class="muted" style="margin:0">No registered users yet.</p></div>`;
         return;
       }
+
+      const accessSummary = (user) => {
+        if (!user.restricted) return "Plan default";
+        const count = Array.isArray(user.allowedProviders) ? user.allowedProviders.length : 0;
+        return count ? `${count} provider${count === 1 ? "" : "s"}` : "None allowed";
+      };
+
       root.innerHTML = `
         <div class="admin-table-wrap">
-          <table class="admin-table">
+          <table class="admin-table admin-users-table">
             <thead>
               <tr>
                 <th>User</th>
@@ -1324,6 +1450,7 @@ function renderAdmin() {
                 <th>Tokens used</th>
                 <th>Expires</th>
                 <th>License</th>
+                <th>AI access</th>
                 <th></th>
               </tr>
             </thead>
@@ -1331,7 +1458,11 @@ function renderAdmin() {
               ${users
                 .map((u) => {
                   const plan = u.plan || "free";
-                  return `<tr data-id="${escapeHtml(u.id)}">
+                  const planOptions = ["free", "starter", "pro", "proplus", "max5", "max10", "max20"];
+                  if (plan && !planOptions.includes(plan)) planOptions.unshift(plan);
+                  const allowedProviders = Array.isArray(u.allowedProviders) ? u.allowedProviders : [];
+                  const allowedModels = u.allowedModels && typeof u.allowedModels === "object" ? u.allowedModels : {};
+                  return `<tr class="admin-user-row" data-id="${escapeHtml(u.id)}" data-restricted="${u.restricted ? "1" : "0"}" data-allowed-providers="${escapeHtml(JSON.stringify(allowedProviders))}" data-allowed-models="${escapeHtml(JSON.stringify(allowedModels))}">
                     <td>
                       <div class="admin-user">
                         <strong>${escapeHtml(u.name || "—")}</strong>
@@ -1341,7 +1472,7 @@ function renderAdmin() {
                     </td>
                     <td>
                       <select class="field admin-plan">
-                        ${["free", "starter", "pro", "proplus", "max5", "max10", "max20"]
+                        ${planOptions
                           .map(
                             (p) =>
                               `<option value="${p}" ${plan === p ? "selected" : ""}>${p}</option>`,
@@ -1359,36 +1490,216 @@ function renderAdmin() {
                         Active
                       </label>
                     </td>
+                    <td>
+                      <button type="button" class="btn btn-sm admin-access-toggle">${escapeHtml(accessSummary(u))}</button>
+                    </td>
                     <td><button type="button" class="btn btn-sm btn-primary admin-save">Save</button></td>
+                  </tr>
+                  <tr class="admin-access-panel" data-id="${escapeHtml(u.id)}" hidden>
+                    <td colspan="9">
+                      <div class="admin-access-editor">
+                        <label class="admin-active">
+                          <input type="checkbox" class="admin-restrict" ${u.restricted ? "checked" : ""} />
+                          Restrict which AI providers and models this user can use
+                        </label>
+                        <p class="muted small admin-access-hint">Paused providers and paused/prohibited model aliases are hidden here. Uncheck restriction to restore the normal plan-based catalog.</p>
+                        <div class="admin-access-body" ${u.restricted ? "" : "hidden"}>
+                          <div class="admin-access-col">
+                            <strong>Providers</strong>
+                            <div class="admin-access-checks admin-access-providers">
+                              ${providers
+                                .map((provider) => {
+                                  const id = escapeHtml(provider.providerId);
+                                  const checked = allowedProviders.includes(provider.providerId) ? "checked" : "";
+                                  return `<label class="admin-access-check"><input type="checkbox" class="admin-provider-check" value="${id}" ${checked} /> ${escapeHtml(provider.displayName || provider.providerId)}</label>`;
+                                })
+                                .join("") || `<span class="muted small">No active providers configured.</span>`}
+                            </div>
+                          </div>
+                          <div class="admin-access-col">
+                            <strong>Models <span class="muted">(from selected providers only)</span></strong>
+                            <div class="admin-access-checks admin-access-models"></div>
+                          </div>
+                        </div>
+                      </div>
+                    </td>
                   </tr>`;
                 })
                 .join("")}
             </tbody>
           </table>
         </div>
-        <p class="muted small" style="margin-top:12px">${users.length} user${users.length === 1 ? "" : "s"} · edits apply to website account + hosted license usage.</p>`;
+        <p class="muted small" style="margin-top:12px">${users.length} user${users.length === 1 ? "" : "s"} · edits apply to website account + hosted license usage · AI access controls the hosted catalog and chat proxy.</p>`;
 
-      root.querySelectorAll("tr[data-id]").forEach((tr) => {
+      const renderModelsForRow = (userRow, panel) => {
+        const modelsHost = panel.querySelector(".admin-access-models");
+        if (!modelsHost) return;
+        const restrictOn = panel.querySelector(".admin-restrict")?.checked;
+        const selectedProviders = [...panel.querySelectorAll(".admin-provider-check:checked")].map(
+          (input) => input.value,
+        );
+        let allowedModels = {};
+        try {
+          allowedModels = JSON.parse(userRow.getAttribute("data-allowed-models") || "{}") || {};
+        } catch {
+          allowedModels = {};
+        }
+        if (!restrictOn) {
+          modelsHost.innerHTML = `<span class="muted small">Restriction off — plan default catalog applies.</span>`;
+          return;
+        }
+        if (!selectedProviders.length) {
+          modelsHost.innerHTML = `<span class="muted small">Select at least one provider to choose models.</span>`;
+          return;
+        }
+        const parts = [];
+        for (const providerId of selectedProviders) {
+          const provider = providers.find((item) => item.providerId === providerId);
+          const models = modelsByProvider.get(providerId) || [];
+          const selected = Array.isArray(allowedModels[providerId]) ? allowedModels[providerId] : [];
+          const allSelected = !selected.length || selected.includes("*");
+          parts.push(`<div class="admin-access-model-group" data-provider="${escapeHtml(providerId)}">
+            <div class="admin-access-model-group-head">
+              <span>${escapeHtml(provider?.displayName || providerId)}</span>
+              <label class="admin-access-check"><input type="checkbox" class="admin-model-all" data-provider="${escapeHtml(providerId)}" ${allSelected ? "checked" : ""} /> All active models</label>
+            </div>
+            <div class="admin-access-model-list" ${allSelected ? "hidden" : ""}>
+              ${
+                models.length
+                  ? models
+                      .map((model) => {
+                        const checked = !allSelected && selected.includes(model.alias) ? "checked" : "";
+                        return `<label class="admin-access-check"><input type="checkbox" class="admin-model-check" data-provider="${escapeHtml(providerId)}" value="${escapeHtml(model.alias)}" ${checked} /> ${escapeHtml(model.displayName || model.alias)} <span class="mono muted small">${escapeHtml(model.alias)}</span></label>`;
+                      })
+                      .join("")
+                  : `<span class="muted small">No active models for this provider.</span>`
+              }
+            </div>
+          </div>`);
+        }
+        modelsHost.innerHTML = parts.join("");
+      };
+
+      const syncAccessAttr = (userRow, panel) => {
+        const restricted = Boolean(panel.querySelector(".admin-restrict")?.checked);
+        userRow.setAttribute("data-restricted", restricted ? "1" : "0");
+        if (!restricted) {
+          userRow.setAttribute("data-allowed-providers", "[]");
+          userRow.setAttribute("data-allowed-models", "{}");
+          return;
+        }
+        const providersSelected = [...panel.querySelectorAll(".admin-provider-check:checked")].map(
+          (input) => input.value,
+        );
+        const models = {};
+        for (const providerId of providersSelected) {
+          const all = panel.querySelector(`.admin-model-all[data-provider="${CSS.escape(providerId)}"]`);
+          if (!all || all.checked) {
+            models[providerId] = ["*"];
+            continue;
+          }
+          const aliases = [...panel.querySelectorAll(`.admin-model-check[data-provider="${CSS.escape(providerId)}"]:checked`)].map(
+            (input) => input.value,
+          );
+          models[providerId] = aliases;
+        }
+        userRow.setAttribute("data-allowed-providers", JSON.stringify(providersSelected));
+        userRow.setAttribute("data-allowed-models", JSON.stringify(models));
+      };
+
+      root.querySelectorAll("tr.admin-user-row[data-id]").forEach((tr) => {
+        const id = tr.getAttribute("data-id");
+        const panel = root.querySelector(`tr.admin-access-panel[data-id="${CSS.escape(id)}"]`);
+        if (!panel) return;
+
+        const refreshAccessButton = () => {
+          const btn = tr.querySelector(".admin-access-toggle");
+          if (!btn) return;
+          const restricted = tr.getAttribute("data-restricted") === "1";
+          if (!restricted) {
+            btn.textContent = "Plan default";
+            return;
+          }
+          let providersSelected = [];
+          try {
+            providersSelected = JSON.parse(tr.getAttribute("data-allowed-providers") || "[]") || [];
+          } catch {
+            providersSelected = [];
+          }
+          const count = providersSelected.length;
+          btn.textContent = count ? `${count} provider${count === 1 ? "" : "s"}` : "None allowed";
+        };
+
+        tr.querySelector(".admin-access-toggle")?.addEventListener("click", () => {
+          panel.hidden = !panel.hidden;
+          if (!panel.hidden) renderModelsForRow(tr, panel);
+        });
+
+        panel.querySelector(".admin-restrict")?.addEventListener("change", (event) => {
+          const body = panel.querySelector(".admin-access-body");
+          if (body) body.hidden = !event.target.checked;
+          syncAccessAttr(tr, panel);
+          renderModelsForRow(tr, panel);
+          refreshAccessButton();
+        });
+
+        panel.querySelector(".admin-access-providers")?.addEventListener("change", (event) => {
+          if (!event.target.classList.contains("admin-provider-check")) return;
+          syncAccessAttr(tr, panel);
+          renderModelsForRow(tr, panel);
+          refreshAccessButton();
+        });
+
+        panel.querySelector(".admin-access-models")?.addEventListener("change", (event) => {
+          const target = event.target;
+          if (target.classList.contains("admin-model-all")) {
+            const group = target.closest(".admin-access-model-group");
+            const list = group?.querySelector(".admin-access-model-list");
+            if (list) list.hidden = target.checked;
+            if (target.checked) {
+              group?.querySelectorAll(".admin-model-check").forEach((input) => {
+                input.checked = false;
+              });
+            }
+          }
+          syncAccessAttr(tr, panel);
+          refreshAccessButton();
+        });
+
+        renderModelsForRow(tr, panel);
+        syncAccessAttr(tr, panel);
+
         tr.querySelector(".admin-save")?.addEventListener("click", async () => {
           const btn = tr.querySelector(".admin-save");
           btn.disabled = true;
           btn.textContent = "Saving…";
           try {
+            syncAccessAttr(tr, panel);
             const plan = tr.querySelector(".admin-plan").value;
+            const restricted = tr.getAttribute("data-restricted") === "1";
+            let allowedProviders = null;
+            let allowedModels = null;
+            if (restricted) {
+              allowedProviders = JSON.parse(tr.getAttribute("data-allowed-providers") || "[]");
+              allowedModels = JSON.parse(tr.getAttribute("data-allowed-models") || "{}");
+            }
             await apiAdmin("/api/admin/users", {
               method: "PATCH",
               body: {
-                id: tr.getAttribute("data-id"),
+                id,
                 plan,
                 credits: Number(tr.querySelector(".admin-credits").value) || 0,
                 tokenBudget: Number(tr.querySelector(".admin-budget").value) || 0,
                 tokensUsed: Number(tr.querySelector(".admin-used").value) || 0,
                 expiresAt: tr.querySelector(".admin-expires").value || undefined,
                 licenseActive: tr.querySelector(".admin-lic-active").checked,
+                allowedProviders,
+                allowedModels,
               },
             });
             toast("User updated");
             btn.textContent = "Saved";
+            refreshAccessButton();
             setTimeout(() => {
               btn.disabled = false;
               btn.textContent = "Save";
@@ -1410,53 +1721,507 @@ function renderAdmin() {
     }
   }
 
-  async function paintModels() {
-    root.innerHTML = `<p class="muted">Loading hosted models…</p>`;
+  async function paintPayments() {
+    root.innerHTML = `<p class="muted">Loading payment requests…</p>`;
     try {
-      const data = await apiAdmin("/api/admin/models");
-      const configs = data.configs || [];
-      const storageWarning = data.credentialStorageReady
-        ? ""
-        : `<div class="alert warn">Credential encryption is not configured on the server. Set <code>HORMACHUELOS_MODEL_CONFIG_KEY</code> before saving a model key.</div>`;
+      const data = await apiAdmin("/api/admin/payments");
+      const payments = Array.isArray(data.payments) ? data.payments : [];
       root.innerHTML = `
-        <div class="card" style="margin-bottom:16px">
-          <h3 style="margin-top:0">Hosted HORMACHUELOS models</h3>
-          <p class="muted small">Keys are encrypted on the server and are never sent to the desktop app. Saving a key here updates the hosted route used by every compatible signed-in app version.</p>
-          ${storageWarning}
-          <form id="hosted-model-form" class="admin-release-form">
-            <div class="field"><label>Alias</label><input id="model-alias" class="field" required placeholder="hormachuelos-v3" pattern="[a-z0-9][a-z0-9._-]*" /></div>
-            <div class="field"><label>Display name</label><input id="model-name" class="field" required placeholder="Hormachuelos v3" /></div>
-            <div class="field"><label>Upstream model ID</label><input id="model-upstream" class="field" required placeholder="deepseek-v4-flash" /></div>
-            <div class="field"><label>HTTPS base URL</label><input id="model-base" class="field" required type="url" placeholder="https://provider.example/v1" /></div>
-            <div class="field"><label>Provider API key</label><input id="model-key" class="field" required type="password" autocomplete="new-password" placeholder="Paste once — it will not be shown again" /></div>
-            <label class="admin-active" style="margin:8px 0 14px;display:inline-flex"><input type="checkbox" id="model-active" checked /> Active</label>
-            <div class="field-error" id="model-error" hidden></div>
-            <button class="btn btn-primary" type="submit">Add hosted model</button>
-          </form>
-        </div>
-        <div class="admin-table-wrap">
-          <table class="admin-table">
-            <thead><tr><th>Alias</th><th>Upstream model</th><th>Base URL</th><th>Server key</th><th>Active</th><th></th></tr></thead>
+        <section class="card admin-payment-intro">
+          <div>
+            <p class="admin-eyebrow">GCash proof review</p>
+            <h2>Approve only after you review the evidence</h2>
+            <p class="muted">Automatic approval runs only when the exact amount, new receipt fingerprint, new GCash reference, and clean high-confidence visual scan all pass. Every other request stays here and can also be decided from your private Telegram chat.</p>
+          </div>
+          <div class="admin-security-note"><span aria-hidden="true">◆</span><p><strong>Receipt files are private.</strong> “View proof” opens a short-lived signed link only for this authenticated admin session.</p></div>
+        </section>
+        <div class="admin-table-wrap" style="margin-top:16px">
+          <table class="admin-table admin-payment-table">
+            <thead>
+              <tr>
+                <th>Buyer / order</th>
+                <th>Plan / amount</th>
+                <th>Receipt scan</th>
+                <th>Proof</th>
+                <th>Status</th>
+                <th>Decision</th>
+              </tr>
+            </thead>
             <tbody>
-              ${configs.length
-                ? configs.map((m) => `<tr data-model-id="${escapeHtml(m.id)}" data-provider="${escapeHtml(m.providerId)}">
-                    <td><strong>${escapeHtml(m.displayName)}</strong><span class="muted small mono">${escapeHtml(m.alias)}</span></td>
-                    <td><input class="field admin-model-upstream" value="${escapeHtml(m.upstreamModel)}" /></td>
-                    <td><input class="field admin-model-base" type="url" value="${escapeHtml(m.baseUrl)}" /></td>
-                    <td><input class="field admin-model-key" type="password" autocomplete="new-password" placeholder="${m.keyConfigured ? "•••••••• (leave blank to keep)" : "No key saved"}" /><span class="muted small">${m.keyConfigured ? "Key configured" : "No key configured"}</span></td>
-                    <td><label class="admin-active"><input type="checkbox" class="admin-model-active" ${m.active ? "checked" : ""} /> Active</label></td>
-                    <td><button type="button" class="btn btn-sm btn-primary admin-model-save">Save</button><button type="button" class="btn btn-sm admin-model-clear" ${m.keyConfigured ? "" : "disabled"}>Clear key</button></td>
-                  </tr>`).join("")
-                : `<tr><td colspan="6" class="muted">No hosted models yet. Add one above.</td></tr>`}
+              ${
+                payments.length
+                  ? payments
+                      .map((payment) => {
+                        const final = ["approved", "rejected"].includes(String(payment.status || "").toLowerCase());
+                        const flags = Array.isArray(payment.scanFlags) && payment.scanFlags.length
+                          ? payment.scanFlags.map((flag) => escapeHtml(flag.replace(/_/g, " "))).join(", ")
+                          : "No review flags";
+                        return `<tr data-payment-id="${escapeHtml(payment.id)}">
+                          <td>
+                            <div class="admin-user"><strong>${escapeHtml(payment.customer?.name || "—")}</strong><span class="muted small mono">${escapeHtml(payment.customer?.email || "—")}</span><span class="mono small">${escapeHtml(String(payment.id || "").slice(0, 8))}</span></div>
+                          </td>
+                          <td><strong>${escapeHtml(payment.planName || payment.planId || "—")}</strong><span class="muted small">${formatPHP(payment.amountPhp)}</span></td>
+                          <td>
+                            <strong>${payment.scanConfidence == null ? "Not complete" : `${Math.round(Number(payment.scanConfidence) * 100)}% confidence`}</strong>
+                            <span class="muted small">${escapeHtml(payment.referenceMasked || "No readable reference")}</span>
+                            <span class="muted small">${escapeHtml(payment.scanSummary || "No scan summary yet.")}</span>
+                            <span class="payment-flags">${flags}</span>
+                          </td>
+                          <td>${payment.proofUrl ? `<a class="btn btn-sm" href="${escapeHtml(payment.proofUrl)}" target="_blank" rel="noopener noreferrer">View proof</a>` : `<span class="muted small">Not uploaded</span>`}</td>
+                          <td><span class="payment-status ${paymentStatusTone(payment.status)}">${escapeHtml(paymentStatusText(payment.status))}</span><span class="muted small">${escapeHtml(String(payment.createdAt || "").slice(0, 10))}</span></td>
+                          <td class="admin-payment-actions">
+                            <button type="button" class="btn btn-sm btn-primary admin-payment-approve" ${final ? "disabled" : ""}>Approve</button>
+                            <button type="button" class="btn btn-sm danger admin-payment-reject" ${final ? "disabled" : ""}>Reject</button>
+                          </td>
+                        </tr>`;
+                      })
+                      .join("")
+                  : `<tr><td colspan="6" class="muted">No payment requests yet.</td></tr>`
+              }
             </tbody>
           </table>
         </div>`;
 
+      root.querySelectorAll("tr[data-payment-id]").forEach((row) => {
+        const decide = async (action) => {
+          const id = row.getAttribute("data-payment-id");
+          const message = action === "approve"
+            ? "Approve this payment and activate its plan?"
+            : "Reject this payment request?";
+          if (!confirm(message)) return;
+          const buttons = row.querySelectorAll("button");
+          buttons.forEach((button) => {
+            button.disabled = true;
+          });
+          try {
+            await apiAdmin("/api/admin/payments", { method: "PATCH", body: { orderId: id, action } });
+            toast(action === "approve" ? "Payment approved and plan activated" : "Payment request rejected");
+            await paintAdmin("payments");
+          } catch (ex) {
+            toast(String(ex.message || ex));
+            buttons.forEach((button) => {
+              button.disabled = false;
+            });
+          }
+        };
+        row.querySelector(".admin-payment-approve")?.addEventListener("click", () => decide("approve"));
+        row.querySelector(".admin-payment-reject")?.addEventListener("click", () => decide("reject"));
+      });
+    } catch (ex) {
+      if (String(ex.message || "").toLowerCase().includes("admin")) {
+        setAdminToken("");
+        paintLogin();
+        return;
+      }
+      root.innerHTML = `<div class="alert warn">${escapeHtml(String(ex.message || ex))}</div>`;
+    }
+  }
+
+  async function paintModels() {
+    root.innerHTML = `<p class="muted">Loading provider registry…</p>`;
+    try {
+      const data = await apiAdmin("/api/admin/providers");
+      const providers = Array.isArray(data.providers) ? data.providers : [];
+      const configs = Array.isArray(data.configs) ? data.configs : [];
+      const modelsByProvider = new Map();
+      for (const config of configs) {
+        const providerId = String(config.providerId || "").trim().toLowerCase();
+        const items = modelsByProvider.get(providerId) || [];
+        items.push(config);
+        modelsByProvider.set(providerId, items);
+      }
+
+      const storageWarning = data.credentialStorageReady
+        ? ""
+        : `<div class="alert warn">Credential encryption is not configured on the server. Set <code>HORMACHUELOS_MODEL_CONFIG_KEY</code> before saving a provider or model API key.</div>`;
+
+      const modelRow = (model, provider) => {
+        const inheritedEndpoint = !String(model.baseUrl || "").trim();
+        const isVirtual = Boolean(model.virtual || model.systemManaged);
+        const keyStatus = isVirtual
+          ? (model.note || "Uses the HORMACHUELOS NEW MODELS key")
+          : model.keyConfigured
+            ? "Route-specific key saved"
+            : provider.keyConfigured
+              ? "Uses the provider default key"
+              : "No key configured";
+        return `<div class="admin-model-row${isVirtual ? " is-virtual" : ""}" data-model-id="${escapeHtml(model.id)}" data-provider-id="${escapeHtml(provider.providerId)}" data-virtual="${isVirtual ? "1" : "0"}">
+          <div class="admin-model-row-head">
+            <strong>${escapeHtml(model.displayName || model.alias)}</strong>
+            <span class="admin-state ${model.active ? "is-active" : "is-paused"}">${model.active ? "Active" : "Paused"}</span>
+            ${isVirtual ? `<span class="admin-state is-virtual">Vision route</span>` : ""}
+          </div>
+          <div class="admin-model-grid">
+            <div class="field"><label>Model alias shown in app</label><input class="field admin-model-alias mono" value="${escapeHtml(model.alias)}" maxlength="81" pattern="[a-z0-9][a-z0-9._-]*" required ${isVirtual ? "readonly" : ""} /></div>
+            <div class="field"><label>Model display name</label><input class="field admin-model-name" value="${escapeHtml(model.displayName)}" maxlength="120" required ${isVirtual ? "readonly" : ""} /></div>
+            <div class="field"><label>Upstream model ID</label><input class="field admin-model-upstream mono" value="${escapeHtml(model.upstreamModel)}" maxlength="200" required ${isVirtual ? "readonly" : ""} /></div>
+            <div class="field"><label>Endpoint override <span class="muted">(optional)</span></label><input class="field admin-model-base mono" type="url" value="${escapeHtml(model.baseUrl || "")}" maxlength="400" placeholder="${inheritedEndpoint ? "Uses provider endpoint" : "https://provider.example/v1"}" ${isVirtual ? "readonly" : ""} /><p class="muted small">${isVirtual ? escapeHtml(model.note || "Managed Vision route") : inheritedEndpoint ? "Inherited from provider" : "This model overrides the provider endpoint"}</p></div>
+            <div class="field admin-key-field"><label>Route API key override <span class="muted">(optional)</span></label><input class="field admin-model-key" type="password" autocomplete="new-password" ${isVirtual ? "disabled" : ""} placeholder="${isVirtual ? "Uses HORMACHUELOS NEW MODELS key" : model.keyConfigured ? "•••••••• (leave blank to keep)" : "Use provider key"}" /><p class="muted small">${escapeHtml(keyStatus)}</p></div>
+            <label class="admin-active admin-toggle-field"><input type="checkbox" class="admin-model-active" ${model.active ? "checked" : ""} ${isVirtual ? "disabled" : ""} /> Model active</label>
+          </div>
+          <div class="admin-row-actions">
+            ${isVirtual
+              ? `<p class="muted small" style="margin:0">Managed automatically. Enable Vision by configuring the HORMACHUELOS NEW MODELS provider key.</p>`
+              : `<button type="button" class="btn btn-sm btn-primary admin-model-save">Save alias</button>
+            <button type="button" class="btn btn-sm admin-model-clear" ${model.keyConfigured ? "" : "disabled"}>Clear route key</button>
+            <button type="button" class="btn btn-sm danger admin-model-delete">Delete alias</button>`}
+          </div>
+        </div>`;
+      };
+
+      const addModelForm = (provider) => `<details class="admin-add-model">
+        <summary>Add a model alias to this provider</summary>
+        <form class="admin-model-add-form" data-provider-id="${escapeHtml(provider.providerId)}">
+          <div class="admin-model-grid">
+            <div class="field"><label>Model alias shown in app</label><input class="field new-model-alias mono" required maxlength="81" placeholder="my-model-fast" pattern="[a-z0-9][a-z0-9._-]*" /></div>
+            <div class="field"><label>Model display name</label><input class="field new-model-name" required maxlength="120" placeholder="My Model Fast" /></div>
+            <div class="field"><label>Upstream model ID</label><input class="field new-model-upstream mono" required maxlength="200" placeholder="grok-4.5" /></div>
+            <div class="field"><label>Endpoint override <span class="muted">(optional)</span></label><input class="field new-model-base mono" type="url" maxlength="400" placeholder="Uses provider endpoint" /></div>
+            <div class="field admin-key-field"><label>Route API key override <span class="muted">(optional)</span></label><input class="field new-model-key" type="password" autocomplete="new-password" placeholder="Uses provider key" /></div>
+            <label class="admin-active admin-toggle-field"><input type="checkbox" class="new-model-active" checked /> Model active</label>
+          </div>
+          <div class="admin-row-actions"><button type="submit" class="btn btn-sm btn-primary">Add model alias</button></div>
+        </form>
+      </details>`;
+
+      const providerCards = providers.map((provider) => {
+        const models = (modelsByProvider.get(provider.providerId) || [])
+          .slice()
+          .sort((left, right) => String(left.displayName).localeCompare(String(right.displayName)));
+        const keyStatus = provider.keyConfigured ? "Default key configured" : "No default key";
+        const modelSummary = `${models.length} model alias${models.length === 1 ? "" : "es"}`;
+        return `<article class="admin-provider-card" data-provider-id="${escapeHtml(provider.providerId)}" data-profile-id="${escapeHtml(provider.id || "")}" data-profile-configured="${provider.profileConfigured ? "true" : "false"}" data-model-count="${String(models.length)}">
+          <header class="admin-provider-head">
+            <div>
+              <p class="admin-eyebrow">Provider configuration</p>
+              <h3>${escapeHtml(provider.displayName)}</h3>
+              <p class="muted small mono">${escapeHtml(provider.providerId)}</p>
+            </div>
+            <div class="admin-provider-status"><span class="admin-state ${provider.active ? "is-active" : "is-paused"}">${provider.active ? "Active" : "Paused"}</span><span class="muted small">${escapeHtml(modelSummary)}</span></div>
+          </header>
+          <div class="admin-provider-grid">
+            <div class="field"><label>Provider ID</label><input class="field mono admin-provider-id" value="${escapeHtml(provider.providerId)}" readonly aria-readonly="true" /><p class="muted small">Stable technical ID</p></div>
+            <div class="field"><label>Provider alias shown in app</label><input class="field admin-provider-name" value="${escapeHtml(provider.displayName)}" maxlength="120" required /></div>
+            <div class="field admin-provider-endpoint"><label>Default HTTPS endpoint</label><input class="field mono admin-provider-base" type="url" value="${escapeHtml(provider.baseUrl)}" maxlength="400" required /><p class="muted small">OpenAI-compatible chat-completions endpoint</p></div>
+            <div class="field admin-key-field"><label>Default server API key</label><input class="field admin-provider-key" type="password" autocomplete="new-password" placeholder="${provider.keyConfigured ? "•••••••• (leave blank to keep)" : "Paste a provider key"}" /><p class="muted small">${keyStatus}. It applies to aliases without a route-specific override.</p></div>
+            <label class="admin-active admin-toggle-field"><input type="checkbox" class="admin-provider-active" ${provider.active ? "checked" : ""} /> Provider active</label>
+          </div>
+          <div class="admin-provider-actions">
+            <button type="button" class="btn btn-sm btn-primary admin-provider-save">${provider.profileConfigured ? "Save provider" : "Configure provider"}</button>
+            <button type="button" class="btn btn-sm admin-provider-clear" ${provider.keyConfigured ? "" : "disabled"}>Clear default key</button>
+            ${provider.profileConfigured && models.length === 0 ? `<button type="button" class="btn btn-sm danger admin-provider-delete">Remove provider</button>` : ""}
+          </div>
+          <section class="admin-model-section">
+            <div class="admin-model-section-head"><div><p class="admin-eyebrow">Model aliases</p><h4>Models available under ${escapeHtml(provider.displayName)}</h4></div><span class="muted small">${escapeHtml(modelSummary)}</span></div>
+            ${models.length ? `<div class="admin-model-list">${models.map((model) => modelRow(model, provider)).join("")}</div>` : `<div class="admin-empty-models">No model aliases yet. Configure the provider, then add the first alias below.</div>`}
+            ${addModelForm(provider)}
+          </section>
+        </article>`;
+      }).join("");
+
+      root.innerHTML = `
+        <section class="admin-provider-intro card">
+          <div>
+            <p class="admin-eyebrow">Secure provider registry</p>
+            <h2>Provider keys, names, and model aliases</h2>
+            <p class="muted">Every API key is write-only and encrypted before it reaches storage. Set a provider default once, override an individual model only when that model needs a different credential, and control the names clients see in the desktop picker.</p>
+          </div>
+          <div class="admin-security-note"><span aria-hidden="true">◆</span><p><strong>Keys never leave the server.</strong> The dashboard only reports whether a key is configured; it never displays the saved value.</p></div>
+        </section>
+        ${storageWarning}
+        <section class="admin-add-provider-card card">
+          <div class="admin-model-section-head"><div><p class="admin-eyebrow">Create provider</p><h3>Add a custom hosted provider</h3></div><span class="muted small">Use an OpenAI-compatible endpoint</span></div>
+          <form id="admin-provider-new-form">
+            <div class="admin-provider-grid">
+              <div class="field"><label>Provider ID</label><input class="field mono" id="new-provider-id" required maxlength="49" placeholder="my-provider" pattern="[a-z][a-z0-9_-]*" /><p class="muted small">Lowercase letters, numbers, dashes, or underscores</p></div>
+              <div class="field"><label>Provider alias shown in app</label><input class="field" id="new-provider-name" required maxlength="120" placeholder="My Provider" /></div>
+              <div class="field admin-provider-endpoint"><label>Default HTTPS endpoint</label><input class="field mono" id="new-provider-base" required type="url" maxlength="400" placeholder="https://provider.example/v1" /></div>
+              <div class="field admin-key-field"><label>Default server API key</label><input class="field" id="new-provider-key" type="password" autocomplete="new-password" placeholder="Paste a provider key" /><p class="muted small">You can add the provider first and save the key later.</p></div>
+              <label class="admin-active admin-toggle-field"><input type="checkbox" id="new-provider-active" checked /> Provider active</label>
+            </div>
+            <div class="admin-row-actions"><button class="btn btn-primary" type="submit">Add provider</button></div>
+          </form>
+        </section>
+        <div class="admin-provider-list">${providerCards}</div>`;
+
+      const providerFields = (card) => ({
+        id: card.getAttribute("data-profile-id") || undefined,
+        providerId: card.getAttribute("data-provider-id"),
+        displayName: card.querySelector(".admin-provider-name").value.trim(),
+        baseUrl: card.querySelector(".admin-provider-base").value.trim(),
+        active: card.querySelector(".admin-provider-active").checked,
+      });
+
+      root.querySelectorAll(".admin-provider-card").forEach((card) => {
+        const save = card.querySelector(".admin-provider-save");
+        const clear = card.querySelector(".admin-provider-clear");
+        const remove = card.querySelector(".admin-provider-delete");
+        save?.addEventListener("click", async () => {
+          const key = card.querySelector(".admin-provider-key").value.trim();
+          save.disabled = true;
+          save.textContent = "Saving…";
+          try {
+            const body = providerFields(card);
+            if (key) body.apiKey = key;
+            await apiAdmin("/api/admin/providers", {
+              method: card.getAttribute("data-profile-configured") === "true" ? "PATCH" : "POST",
+              body,
+            });
+            toast("Provider saved securely");
+            await paintAdmin("models");
+          } catch (ex) {
+            toast(String(ex.message || ex));
+            save.disabled = false;
+            save.textContent = card.getAttribute("data-profile-configured") === "true" ? "Save provider" : "Configure provider";
+          }
+        });
+        clear?.addEventListener("click", async () => {
+          if (!confirm("Clear this provider's default API key? Aliases with a route-specific key will continue to work.")) return;
+          clear.disabled = true;
+          try {
+            await apiAdmin("/api/admin/providers", {
+              method: "PATCH",
+              body: { ...providerFields(card), clearApiKey: true },
+            });
+            toast("Provider default key cleared");
+            await paintAdmin("models");
+          } catch (ex) {
+            toast(String(ex.message || ex));
+            clear.disabled = false;
+          }
+        });
+        remove?.addEventListener("click", async () => {
+          const providerName = card.querySelector(".admin-provider-name").value.trim() || "this provider";
+          if (!confirm(`Remove ${providerName}? It has no model aliases, so this only removes its saved provider configuration.`)) return;
+          remove.disabled = true;
+          try {
+            await apiAdmin("/api/admin/providers", {
+              method: "DELETE",
+              body: { providerId: card.getAttribute("data-provider-id") },
+            });
+            toast("Provider removed");
+            await paintAdmin("models");
+          } catch (ex) {
+            toast(String(ex.message || ex));
+            remove.disabled = false;
+          }
+        });
+      });
+
+      const modelFields = (row) => ({
+        id: row.getAttribute("data-model-id"),
+        providerId: row.getAttribute("data-provider-id"),
+        alias: row.querySelector(".admin-model-alias").value.trim(),
+        displayName: row.querySelector(".admin-model-name").value.trim(),
+        upstreamModel: row.querySelector(".admin-model-upstream").value.trim(),
+        baseUrl: row.querySelector(".admin-model-base").value.trim(),
+        active: row.querySelector(".admin-model-active").checked,
+      });
+
+      root.querySelectorAll(".admin-model-row").forEach((row) => {
+        if (row.getAttribute("data-virtual") === "1") return;
+        const save = row.querySelector(".admin-model-save");
+        const clear = row.querySelector(".admin-model-clear");
+        const remove = row.querySelector(".admin-model-delete");
+        save?.addEventListener("click", async () => {
+          const key = row.querySelector(".admin-model-key").value.trim();
+          save.disabled = true;
+          save.textContent = "Saving…";
+          try {
+            const body = modelFields(row);
+            if (key) body.apiKey = key;
+            await apiAdmin("/api/admin/models", { method: "PATCH", body });
+            toast("Model alias saved");
+            await paintAdmin("models");
+          } catch (ex) {
+            toast(String(ex.message || ex));
+            save.disabled = false;
+            save.textContent = "Save alias";
+          }
+        });
+        clear?.addEventListener("click", async () => {
+          if (!confirm("Clear this route-specific API key? The model will use the provider default key if one is configured.")) return;
+          clear.disabled = true;
+          try {
+            await apiAdmin("/api/admin/models", {
+              method: "PATCH",
+              body: { ...modelFields(row), clearApiKey: true },
+            });
+            toast("Route key cleared");
+            await paintAdmin("models");
+          } catch (ex) {
+            toast(String(ex.message || ex));
+            clear.disabled = false;
+          }
+        });
+        remove?.addEventListener("click", async () => {
+          const modelName = row.querySelector(".admin-model-name").value.trim() || "this model alias";
+          if (!confirm(`Delete ${modelName}? It will no longer appear in the desktop app.`)) return;
+          remove.disabled = true;
+          try {
+            await apiAdmin("/api/admin/models", {
+              method: "DELETE",
+              body: { id: row.getAttribute("data-model-id") },
+            });
+            toast("Model alias deleted");
+            await paintAdmin("models");
+          } catch (ex) {
+            toast(String(ex.message || ex));
+            remove.disabled = false;
+          }
+        });
+      });
+
+      root.querySelectorAll(".admin-model-add-form").forEach((form) => {
+        form.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          const btn = form.querySelector('button[type="submit"]');
+          btn.disabled = true;
+          btn.textContent = "Adding…";
+          try {
+            const key = form.querySelector(".new-model-key").value.trim();
+            const body = {
+              providerId: form.getAttribute("data-provider-id"),
+              alias: form.querySelector(".new-model-alias").value.trim(),
+              displayName: form.querySelector(".new-model-name").value.trim(),
+              upstreamModel: form.querySelector(".new-model-upstream").value.trim(),
+              baseUrl: form.querySelector(".new-model-base").value.trim(),
+              active: form.querySelector(".new-model-active").checked,
+            };
+            if (key) body.apiKey = key;
+            await apiAdmin("/api/admin/models", { method: "POST", body });
+            toast("Model alias added");
+            await paintAdmin("models");
+          } catch (ex) {
+            toast(String(ex.message || ex));
+            btn.disabled = false;
+            btn.textContent = "Add model alias";
+          }
+        });
+      });
+
+      root.querySelector("#admin-provider-new-form")?.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const form = event.currentTarget;
+        const btn = form.querySelector('button[type="submit"]');
+        btn.disabled = true;
+        btn.textContent = "Adding…";
+        try {
+          const key = root.querySelector("#new-provider-key").value.trim();
+          const body = {
+            providerId: root.querySelector("#new-provider-id").value.trim(),
+            displayName: root.querySelector("#new-provider-name").value.trim(),
+            baseUrl: root.querySelector("#new-provider-base").value.trim(),
+            active: root.querySelector("#new-provider-active").checked,
+          };
+          if (key) body.apiKey = key;
+          await apiAdmin("/api/admin/providers", { method: "POST", body });
+          toast("Custom provider added securely");
+          await paintAdmin("models");
+        } catch (ex) {
+          toast(String(ex.message || ex));
+          btn.disabled = false;
+          btn.textContent = "Add provider";
+        }
+      });
+    } catch (ex) {
+      if (String(ex.message || "").toLowerCase().includes("admin")) {
+        setAdminToken("");
+        paintLogin();
+        return;
+      }
+      root.innerHTML = `<div class="alert warn">${escapeHtml(String(ex.message || ex))}</div>`;
+    }
+  }
+
+  async function paintLegacyModels() {
+    root.innerHTML = `<p class="muted">Loading hosted models…</p>`;
+    try {
+      const data = await apiAdmin("/api/admin/models");
+      const configs = Array.isArray(data.configs) ? data.configs : [];
+      const providerOptions = Array.isArray(data.providerOptions) ? data.providerOptions : [];
+      const providerLabels = new Map(
+        providerOptions.map((provider) => [provider.id, provider.label]),
+      );
+      const providerLabel = (id) => {
+        const normalized = String(id || "").trim().toLowerCase();
+        return providerLabels.get(normalized) || normalized
+          .split(/[-_]+/)
+          .filter(Boolean)
+          .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+          .join(" ") || "Hosted provider";
+      };
+      const knownProviderIds = new Set(providerOptions.map((provider) => provider.id));
+      for (const config of configs) knownProviderIds.add(config.providerId);
+      const formProviderOptions = [...knownProviderIds]
+        .sort((left, right) => providerLabel(left).localeCompare(providerLabel(right)))
+        .map((id) => `<option value="${escapeHtml(id)}">${escapeHtml(providerLabel(id))} · ${escapeHtml(id)}</option>`)
+        .join("");
+      const groupedConfigs = new Map();
+      for (const config of configs) {
+        const rows = groupedConfigs.get(config.providerId) || [];
+        rows.push(config);
+        groupedConfigs.set(config.providerId, rows);
+      }
+      const storageWarning = data.credentialStorageReady
+        ? ""
+        : `<div class="alert warn">Credential encryption is not configured on the server. Set <code>HORMACHUELOS_MODEL_CONFIG_KEY</code> before saving a model key.</div>`;
+      const tables = [...groupedConfigs.entries()]
+        .sort(([left], [right]) => providerLabel(left).localeCompare(providerLabel(right)))
+        .map(([providerId, rows]) => `
+          <section class="card" style="margin-bottom:16px">
+            <div style="display:flex;gap:12px;align-items:baseline;justify-content:space-between;flex-wrap:wrap">
+              <div><h3 style="margin:0">${escapeHtml(providerLabel(providerId))}</h3><p class="muted small mono" style="margin:4px 0 0">provider alias: ${escapeHtml(providerId)}</p></div>
+              <span class="muted small">${rows.length} model route${rows.length === 1 ? "" : "s"}</span>
+            </div>
+            <div class="admin-table-wrap" style="margin-top:12px">
+              <table class="admin-table">
+                <thead><tr><th>Provider alias</th><th>Model alias &amp; name</th><th>Upstream model</th><th>Base URL</th><th>Server key</th><th>Active</th><th></th></tr></thead>
+                <tbody>
+                  ${rows
+                    .slice()
+                    .sort((left, right) => String(left.displayName).localeCompare(String(right.displayName)))
+                    .map((model) => `<tr data-model-id="${escapeHtml(model.id)}">
+                      <td><input class="field admin-model-provider" value="${escapeHtml(model.providerId)}" aria-label="Provider alias" /></td>
+                      <td><input class="field admin-model-alias mono" value="${escapeHtml(model.alias)}" aria-label="Model alias" /><input class="field admin-model-name" value="${escapeHtml(model.displayName)}" aria-label="Model display name" style="margin-top:6px" /></td>
+                      <td><input class="field admin-model-upstream" value="${escapeHtml(model.upstreamModel)}" aria-label="Upstream model ID" /></td>
+                      <td><input class="field admin-model-base" type="url" value="${escapeHtml(model.baseUrl)}" aria-label="HTTPS base URL" /></td>
+                      <td><input class="field admin-model-key" type="password" autocomplete="new-password" placeholder="${model.keyConfigured ? "•••••••• (leave blank to keep)" : "No key saved"}" aria-label="Replacement server API key" /><span class="muted small">${model.keyConfigured ? "Key configured" : "No key configured"}</span></td>
+                      <td><label class="admin-active"><input type="checkbox" class="admin-model-active" ${model.active ? "checked" : ""} /> Active</label></td>
+                      <td><button type="button" class="btn btn-sm btn-primary admin-model-save">Save</button><button type="button" class="btn btn-sm admin-model-clear" ${model.keyConfigured ? "" : "disabled"}>Clear key</button><button type="button" class="btn btn-sm danger admin-model-delete">Delete</button></td>
+                    </tr>`)
+                    .join("")}
+                </tbody>
+              </table>
+            </div>
+          </section>`)
+        .join("");
+      root.innerHTML = `
+        <div class="card" style="margin-bottom:16px">
+          <h3 style="margin-top:0">Hosted provider and model aliases</h3>
+          <p class="muted small">Create a provider alias, then add one or more model aliases beneath it. Each route keeps its upstream API key encrypted on the server; keys are never returned to the desktop app or ordinary users.</p>
+          ${storageWarning}
+          <form id="hosted-model-form" class="admin-release-form">
+            <div class="field"><label>Provider alias</label><select id="model-provider" class="field">${formProviderOptions}<option value="__custom__">Create a custom provider alias…</option></select></div>
+            <div class="field" id="model-provider-custom-wrap" hidden><label>New provider alias</label><input id="model-provider-custom" class="field mono" maxlength="49" placeholder="my-provider" pattern="[a-z][a-z0-9_-]*" /><p class="muted small" style="margin:6px 0 0">Use lowercase letters, numbers, dashes, or underscores. This identifier is the provider alias shown in the app.</p></div>
+            <div class="field"><label>Model alias</label><input id="model-alias" class="field mono" required maxlength="81" placeholder="my-model-fast" pattern="[a-z0-9][a-z0-9._-]*" /></div>
+            <div class="field"><label>Model display name</label><input id="model-name" class="field" required maxlength="120" placeholder="My Model Fast" /></div>
+            <div class="field"><label>Upstream model ID</label><input id="model-upstream" class="field" required maxlength="200" placeholder="grok-4.5" /></div>
+            <div class="field"><label>HTTPS base URL</label><input id="model-base" class="field" required type="url" maxlength="400" placeholder="https://provider.example/v1" /></div>
+            <div class="field"><label>Server API key</label><input id="model-key" class="field" type="password" autocomplete="new-password" placeholder="Paste once — it will not be shown again" /><p class="muted small" style="margin:6px 0 0">Required for a route to become available. Leave blank only when you are creating the route first and will add its key afterward.</p></div>
+            <p class="muted small" style="margin:0 0 12px">Example: select <code>xAI</code>, use model alias <code>gpt-5.6-sol</code> with upstream ID <code>grok-4.5</code>, and set the base URL to <code>https://api.x.ai/v1</code>.</p>
+            <label class="admin-active" style="margin:8px 0 14px;display:inline-flex"><input type="checkbox" id="model-active" checked /> Active</label>
+            <div class="field-error" id="model-error" hidden></div>
+            <button class="btn btn-primary" type="submit">Add model alias</button>
+          </form>
+        </div>
+        ${tables || `<div class="card muted">No hosted model aliases yet. Add the first provider route above.</div>`}`;
+
       const fieldsFor = (row) => ({
         id: row.getAttribute("data-model-id"),
-        providerId: row.getAttribute("data-provider"),
-        alias: row.querySelector(".mono").textContent.trim(),
-        displayName: row.querySelector("strong").textContent.trim(),
+        providerId: row.querySelector(".admin-model-provider").value.trim(),
+        alias: row.querySelector(".admin-model-alias").value.trim(),
+        displayName: row.querySelector(".admin-model-name").value.trim(),
         upstreamModel: row.querySelector(".admin-model-upstream").value.trim(),
         baseUrl: row.querySelector(".admin-model-base").value.trim(),
         active: row.querySelector(".admin-model-active").checked,
@@ -1496,7 +2261,35 @@ function renderAdmin() {
             btn.disabled = false;
           }
         });
+        row.querySelector(".admin-model-delete").addEventListener("click", async () => {
+          const modelName = row.querySelector(".admin-model-name").value.trim() || "this model alias";
+          if (!confirm(`Delete ${modelName}? This removes its server-side route and stops it from appearing in the desktop app.`)) return;
+          const btn = row.querySelector(".admin-model-delete");
+          btn.disabled = true;
+          try {
+            await apiAdmin("/api/admin/models", {
+              method: "DELETE",
+              body: { id: row.getAttribute("data-model-id") },
+            });
+            toast("Hosted model alias deleted");
+            await paintAdmin("models");
+          } catch (ex) {
+            toast(String(ex.message || ex));
+            btn.disabled = false;
+          }
+        });
       });
+
+      const providerSelect = root.querySelector("#model-provider");
+      const customProviderWrap = root.querySelector("#model-provider-custom-wrap");
+      const customProviderInput = root.querySelector("#model-provider-custom");
+      const syncCustomProvider = () => {
+        const isCustom = providerSelect.value === "__custom__";
+        customProviderWrap.hidden = !isCustom;
+        customProviderInput.required = isCustom;
+      };
+      providerSelect.addEventListener("change", syncCustomProvider);
+      syncCustomProvider();
 
       root.querySelector("#hosted-model-form").addEventListener("submit", async (event) => {
         event.preventDefault();
@@ -1506,10 +2299,13 @@ function renderAdmin() {
         btn.disabled = true;
         btn.textContent = "Saving…";
         try {
+          const providerId = providerSelect.value === "__custom__"
+            ? customProviderInput.value.trim()
+            : providerSelect.value;
           await apiAdmin("/api/admin/models", {
             method: "POST",
             body: {
-              providerId: "hormachuelos_free",
+              providerId,
               alias: root.querySelector("#model-alias").value.trim(),
               displayName: root.querySelector("#model-name").value.trim(),
               upstreamModel: root.querySelector("#model-upstream").value.trim(),
@@ -1524,7 +2320,7 @@ function renderAdmin() {
           error.hidden = false;
           error.textContent = String(ex.message || ex);
           btn.disabled = false;
-          btn.textContent = "Add hosted model";
+          btn.textContent = "Add model alias";
         }
       });
     } catch (ex) {
@@ -1658,11 +2454,13 @@ function renderAdmin() {
 function renderCheckout() {
   const user = getSessionUser();
   const q = queryOf();
-  const planId = q.get("plan") || "pro";
-  const period = q.get("period") || "payg";
   const tier = q.get("tier") || "";
-  const amount = checkoutAmount(planId);
-  const planLabel = checkoutPlanLabel(planId);
+  const period = q.get("period") || "payg";
+  const checkout = gcashCheckoutDetails(q.get("plan") || "pro", tier);
+  const planId = checkout.planId;
+  const amount = checkout.amountPhp;
+  const planLabel = checkoutPlanLabel(planId, tier);
+  const { plan } = findPlanByCheckoutId(planId, tier);
   const tierQ = tier ? `&tier=${encodeURIComponent(tier)}` : "";
 
   if (!user) {
@@ -1674,48 +2472,46 @@ function renderCheckout() {
     <div class="container checkout-layout">
       <div>
         <h1 style="margin:0 0 8px;font-size:1.6rem;letter-spacing:-0.03em">Checkout</h1>
-        <p class="muted" style="margin:0 0 20px">GCash-first checkout. Demo mode until PayMongo keys are live — you still get a desktop license key.</p>
-        <div class="card">
-          <h3 style="margin-top:0">Payment method</h3>
-          <div class="pay-methods">
-            <label class="pay-method">
-              <input type="radio" name="method" value="GCash" checked />
-              <div>
-                <strong>GCash</strong>
-                <div class="muted small">Most popular in PH</div>
-              </div>
-              <span class="pay-badge" style="margin-left:auto">GCash</span>
-            </label>
-            <label class="pay-method">
-              <input type="radio" name="method" value="Maya" />
-              <div>
-                <strong>Maya</strong>
-                <div class="muted small">E-wallet alternative</div>
-              </div>
-              <span class="pay-badge" style="margin-left:auto">Maya</span>
-            </label>
-            <label class="pay-method">
-              <input type="radio" name="method" value="Card" />
-              <div>
-                <strong>Card</strong>
-                <div class="muted small">Optional · same gateway later</div>
-              </div>
-            </label>
+        <p class="muted" style="margin:0 0 20px">Pay the exact plan amount with GCash, then submit one clear receipt image for secure review. Your paid plan activates only after approval.</p>
+        <section class="card gcash-payment-card" aria-labelledby="gcash-payment-heading">
+          <div class="payment-step-heading">
+            <span class="payment-step-number" aria-hidden="true">1</span>
+            <div><h3 id="gcash-payment-heading">Scan this GCash QR</h3><p class="muted small">This QR is locked to ${escapeHtml(planLabel)} · ${escapeHtml(formatPHP(amount))} only.</p></div>
           </div>
-          <div class="field">
-            <label for="gcash-ref">Mobile number (optional)</label>
-            <input id="gcash-ref" type="tel" placeholder="09xx xxx xxxx" autocomplete="tel" />
+          <div class="payment-amount-lock"><span>Exact amount to pay</span><strong id="payment-amount-lock">${formatPHP(amount)}</strong></div>
+          <div class="gcash-qr-panel">
+            <div class="gcash-qr-frame"><img id="gcash-qr" class="gcash-qr-image" src="${escapeHtml(checkout.qrPath)}" alt="GCash QR code for ${escapeHtml(formatPHP(amount))}" /></div>
+            <div class="gcash-qr-copy"><span class="pay-badge">GCash</span><strong id="gcash-receiver">Pay ${escapeHtml(formatPHP(amount))} to ${escapeHtml(checkout.receiverLabel)}</strong><p class="muted small">Pay exactly <span id="gcash-amount">${escapeHtml(formatPHP(amount))}</span>. A different amount cannot be auto-approved.</p></div>
           </div>
-          <button type="button" class="btn btn-primary btn-block btn-lg" id="pay-btn">
-            Pay ${formatPHP(amount)} with GCash
-          </button>
-          <p class="muted small center" style="margin-top:12px">Temporary prices · demo only · PayMongo/Xendit next</p>
-        </div>
+          <button type="button" class="btn btn-primary btn-block btn-lg" id="pay-btn">I've paid — upload receipt</button>
+          <p class="muted small center" style="margin:12px 0 0">Do not send a GCash PIN, OTP, or account password to Hormachuelos.</p>
+        </section>
+        <section class="card gcash-proof-card" id="payment-proof-stage" hidden aria-labelledby="payment-proof-heading">
+          <div class="payment-step-heading">
+            <span class="payment-step-number" aria-hidden="true">2</span>
+            <div><h3 id="payment-proof-heading">Upload your receipt</h3><p class="muted small">Use a clear JPG, PNG, or WebP proof (up to 6 MB) showing the ${escapeHtml(formatPHP(amount))} payment.</p></div>
+          </div>
+          <div class="receipt-upload-wrap">
+            <input id="payment-proof-input" type="file" accept="image/jpeg,image/png,image/webp" hidden />
+            <label class="receipt-upload" for="payment-proof-input">
+              <span class="receipt-upload-icon" aria-hidden="true">↑</span>
+              <span><strong>Choose payment proof</strong><small id="payment-proof-file">No file selected</small></span>
+            </label>
+            <img id="payment-proof-preview" class="receipt-proof-preview" alt="Selected receipt preview" hidden />
+          </div>
+          <div class="receipt-scan" id="payment-scan-progress" hidden aria-live="polite">
+            <div class="receipt-scan-visual" aria-hidden="true"><span></span><i></i></div>
+            <div><strong id="payment-scan-title">Preparing secure receipt scan…</strong><p class="muted small" id="payment-scan-detail">Your proof stays in private storage while it is checked.</p></div>
+          </div>
+          <div class="alert" id="payment-result" hidden role="status"></div>
+          <button type="button" class="btn btn-primary btn-block" id="submit-payment-proof" disabled>Submit proof for secure review</button>
+          <p class="muted small center" style="margin:12px 0 0">Automated checks compare the exact amount, receipt fingerprint, reference number, and visual consistency. Uncertain receipts are reviewed manually.</p>
+        </section>
       </div>
       <aside class="checkout-summary">
         <h2>Order summary</h2>
         <div class="summary-row"><span>Plan</span><span>${escapeHtml(planLabel)}</span></div>
-        <div class="summary-row"><span>Billing</span><span>Pay as you go · lean ROI</span></div>
+        <div class="summary-row"><span>Billing</span><span>Pay as you go</span></div>
         <div class="summary-row"><span>Account</span><span class="mono small">${escapeHtml(user.email)}</span></div>
         <div class="summary-row total"><span>Total</span><span class="mono">${formatPHP(amount)}</span></div>
         <ul class="feature-list" style="margin-top:12px">
@@ -1729,102 +2525,183 @@ function renderCheckout() {
   `);
 
   const payBtn = wrap.querySelector("#pay-btn");
-  const updatePayLabel = () => {
-    const method = wrap.querySelector('input[name="method"]:checked')?.value || "GCash";
-    payBtn.textContent = `Pay ${formatPHP(amount)} with ${method}`;
-  };
-  wrap.querySelectorAll('input[name="method"]').forEach((r) => r.addEventListener("change", updatePayLabel));
 
+  const proofStage = wrap.querySelector("#payment-proof-stage");
+  const paymentQr = wrap.querySelector("#gcash-qr");
+  const paymentAmount = wrap.querySelector("#gcash-amount");
+  const paymentReceiver = wrap.querySelector("#gcash-receiver");
+  const proofInput = wrap.querySelector("#payment-proof-input");
+  const proofFileName = wrap.querySelector("#payment-proof-file");
+  const proofPreview = wrap.querySelector("#payment-proof-preview");
+  const submitProofButton = wrap.querySelector("#submit-payment-proof");
+  const scanProgress = wrap.querySelector("#payment-scan-progress");
+  const scanTitle = wrap.querySelector("#payment-scan-title");
+  const scanDetail = wrap.querySelector("#payment-scan-detail");
+  const paymentResult = wrap.querySelector("#payment-result");
+  let activePayment = null;
+  let selectedProof = null;
+  let previewUrl = "";
+  let scanTimer = null;
+
+  const scanPhases = [
+    ["Uploading your private proof…", "The image is sent directly to protected receipt storage."],
+    ["Checking the receipt fingerprint…", "The same image cannot be reused for another payment request."],
+    ["Inspecting receipt details…", "The secure scanner compares visible GCash details with the exact plan amount."],
+    ["Comparing the reference number…", "A repeated reference number always requires manual review."],
+  ];
+
+  function showPaymentResult(order, autoApproved) {
+    if (!order) return;
+    upsertPaymentRequest(order);
+    paymentResult.hidden = false;
+    paymentResult.className = "alert " + (order.status === "approved" ? "ok" : "warn");
+    if (autoApproved || order.status === "approved") {
+      paymentResult.textContent = "Payment approved. Your plan is active and will appear in the dashboard shortly.";
+      void refreshSessionUser();
+      submitProofButton.disabled = true;
+      proofInput.disabled = true;
+      return;
+    }
+    const reason = order.scanSummary ? " " + order.scanSummary : "";
+    paymentResult.textContent =
+      "Receipt submitted. Status: " + paymentStatusText(order.status) + "." + reason +
+      " You can track the decision from your dashboard.";
+    submitProofButton.disabled = true;
+  }
+
+  function showPaymentError(message) {
+    paymentResult.hidden = false;
+    paymentResult.className = "alert warn";
+    paymentResult.textContent = String(message || "We could not process that receipt. Please try again.");
+  }
+
+  function setScanState(running) {
+    if (scanTimer) {
+      clearInterval(scanTimer);
+      scanTimer = null;
+    }
+    scanProgress.hidden = !running;
+    scanProgress.classList.toggle("is-scanning", running);
+    if (!running) return;
+    let index = 0;
+    const paintPhase = () => {
+      const phase = scanPhases[index % scanPhases.length];
+      scanTitle.textContent = phase[0];
+      scanDetail.textContent = phase[1];
+      index += 1;
+    };
+    paintPhase();
+    scanTimer = window.setInterval(paintPhase, 3200);
+  }
+
+  payBtn.textContent = "I've paid — upload receipt";
   payBtn.addEventListener("click", async () => {
-    const method = wrap.querySelector('input[name="method"]:checked')?.value || "GCash";
+    if (activePayment) {
+      proofStage.hidden = false;
+      proofStage.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
     payBtn.disabled = true;
-    payBtn.textContent = "Processing…";
+    payBtn.textContent = "Preparing secure payment…";
+    paymentResult.hidden = true;
     try {
-      const { createCheckout } = await import("./paymongo.js");
-      const checkout = await createCheckout({
-        amountPhp: amount,
-        planId,
-        planName: planLabel,
-        period,
-        email: user.email,
-        method,
+      const created = await apiAuth("/api/payments/create", {
+        method: "POST",
+        body: { planId, period },
       });
-
-      if (!checkout.demo && checkout.checkoutUrl) {
-        // Live PayMongo: redirect to GCash
-        sessionStorage.setItem(
-          "horma:pendingPayment",
-          JSON.stringify({
-            planId,
-            period,
-            amount,
-            method,
-            licenseKey: checkout.licenseKey,
-            paymentId: checkout.paymentId,
-          }),
-        );
-        location.href = checkout.checkoutUrl;
-        return;
+      activePayment = created.order;
+      upsertPaymentRequest(activePayment);
+      if (created.payment?.qrPath) paymentQr.src = created.payment.qrPath;
+      if (created.payment?.amountPhp) {
+        paymentAmount.textContent = formatPHP(created.payment.amountPhp);
+        paymentReceiver.textContent =
+          "Pay " + formatPHP(created.payment.amountPhp) + " to " + (created.payment.receiverLabel || GCASH_RECEIVER_LABEL);
       }
-
-      const order = {
-        id: checkout.paymentId || crypto.randomUUID(),
-        email: user.email,
-        planId,
-        planName: planLabel,
-        period,
-        amount,
-        method,
-        licenseKey: checkout.licenseKey,
-        at: Date.now(),
-        demo: true,
-      };
-      addOrder(order);
-
-      const creditBonus =
-        planId === "starter"
-          ? 50000
-          : planId === "pro"
-            ? 500000
-            : planId === "max20"
-              ? 4_000_000
-              : planId === "max10"
-                ? 2_000_000
-                : planId.startsWith("max")
-                  ? 1_000_000
-                  : 200000;
-      try {
-        const patched = await apiAuth("/api/auth/me", {
-          method: "PATCH",
-          body: {
-            plan: planId,
-            period,
-            licenseKey: checkout.licenseKey,
-            credits: (user.credits || 0) + creditBonus,
-            order,
-          },
-        });
-        setSessionUser(patched.user, getSessionToken());
-      } catch (syncErr) {
-        console.warn("Account sync failed", syncErr);
-        setSessionUser(
-          {
-            ...user,
-            plan: planId,
-            period,
-            licenseKey: checkout.licenseKey,
-            credits: (user.credits || 0) + creditBonus,
-          },
-          getSessionToken(),
-        );
-      }
-
-      navigate(`/success?order=${order.id}`);
-    } catch (err) {
-      console.error(err);
-      toast(String(err.message || err));
+      proofStage.hidden = false;
+      payBtn.textContent = "Receipt upload ready";
+      proofStage.scrollIntoView({ behavior: "smooth", block: "start" });
+    } catch (error) {
+      showPaymentError(error.message || error);
       payBtn.disabled = false;
-      updatePayLabel();
+      payBtn.textContent = "I've paid — upload receipt";
+    }
+  });
+
+  proofInput.addEventListener("change", () => {
+    const file = proofInput.files?.[0] || null;
+    if (previewUrl) {
+      URL.revokeObjectURL(previewUrl);
+      previewUrl = "";
+    }
+    selectedProof = null;
+    proofPreview.hidden = true;
+    submitProofButton.disabled = true;
+    paymentResult.hidden = true;
+    if (!file) {
+      proofFileName.textContent = "No file selected";
+      return;
+    }
+    const accepted = ["image/jpeg", "image/png", "image/webp"];
+    if (!accepted.includes(file.type) || file.size <= 0 || file.size > 6 * 1024 * 1024) {
+      proofInput.value = "";
+      proofFileName.textContent = "Choose a JPG, PNG, or WebP image up to 6 MB";
+      showPaymentError("Choose a clear JPG, PNG, or WebP receipt image no larger than 6 MB.");
+      return;
+    }
+    selectedProof = file;
+    previewUrl = URL.createObjectURL(file);
+    proofPreview.src = previewUrl;
+    proofPreview.hidden = false;
+    proofFileName.textContent = file.name + " · " + (file.size / 1024 / 1024).toFixed(1) + " MB";
+    submitProofButton.disabled = false;
+  });
+
+  submitProofButton.addEventListener("click", async () => {
+    if (!activePayment || !selectedProof) {
+      showPaymentError("Open the GCash QR and choose a receipt image first.");
+      return;
+    }
+    submitProofButton.disabled = true;
+    proofInput.disabled = true;
+    paymentResult.hidden = true;
+    setScanState(true);
+    try {
+      const intent = await apiAuth("/api/payments/upload-intent", {
+        method: "POST",
+        body: {
+          orderId: activePayment.id,
+          mimeType: selectedProof.type,
+          bytes: selectedProof.size,
+        },
+      });
+      activePayment = intent.order;
+      upsertPaymentRequest(activePayment);
+      const uploadHeaders = {
+        "Content-Type": selectedProof.type,
+        "x-upsert": "false",
+        "Cache-Control": "max-age=3600",
+      };
+      // The server returns a short-lived, one-object signed URL. Its scoped
+      // Storage token stays in that URL; the browser never receives a service
+      // role key or a general-purpose API credential.
+      const uploaded = await fetch(intent.uploadUrl, {
+        method: "PUT",
+        headers: uploadHeaders,
+        body: selectedProof,
+      });
+      if (!uploaded.ok) throw new Error("The receipt image could not be uploaded. Please try again.");
+      const submitted = await apiAuth("/api/payments/submit", {
+        method: "POST",
+        body: { orderId: activePayment.id },
+      });
+      activePayment = submitted.order;
+      showPaymentResult(submitted.order, submitted.autoApproved);
+    } catch (error) {
+      showPaymentError(error.message || error);
+      submitProofButton.disabled = !selectedProof;
+      proofInput.disabled = false;
+    } finally {
+      setScanState(false);
     }
   });
 
@@ -1832,36 +2709,36 @@ function renderCheckout() {
 }
 
 function renderSuccess() {
-  const orderId = queryOf().get("order");
-  const order = getOrders().find((o) => o.id === orderId);
-  const licenseKey = order?.licenseKey || "";
-  return page(`
-    <div class="container" style="padding:64px 0;max-width:560px;margin:0 auto;text-align:center">
-      <div class="eyebrow" style="margin-bottom:16px"><span class="dot"></span> ${order?.demo === false ? "Payment received" : "Payment simulated"}</div>
-      <h1 style="margin:0 0 12px;font-size:2rem;letter-spacing:-0.03em">You're in</h1>
-      <p class="muted" style="margin:0 0 20px">
-        ${
-          order
-            ? `${escapeHtml(order.planName)} · ${formatPHP(order.amount)} via ${escapeHtml(order.method)}`
-            : "Order recorded."
-        }
-      </p>
-      ${order ? `<p class="mono small muted" style="margin:0 0 16px">Order ${escapeHtml(order.id.slice(0, 8))}</p>` : ""}
-      ${
-        licenseKey
-          ? `<div class="card" style="text-align:left;margin:0 0 24px">
-              <h3 style="margin:0 0 8px">Desktop license key</h3>
-              <p class="muted small" style="margin:0 0 10px">Open Hormachuelos → Settings → Subscription · GCash → paste &amp; Activate.</p>
-              <code class="mono" style="display:block;padding:10px 12px;border-radius:8px;background:rgba(0,0,0,.25);word-break:break-all">${escapeHtml(licenseKey)}</code>
-            </div>`
-          : ""
-      }
-      <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap">
-        <a class="btn btn-primary" href="#/dashboard">Go to dashboard</a>
-        <a class="btn" href="#/download">Download app</a>
-      </div>
-    </div>
-  `);
+  const paymentOrderId = queryOf().get("order");
+  const wrap = page(
+    '<div class="container payment-status-page">' +
+      '<div class="eyebrow"><span class="dot"></span> Payment request</div>' +
+      '<h1>Payment status</h1>' +
+      '<p class="muted" id="payment-success-copy">Checking your payment request…</p>' +
+      '<p class="mono small muted" id="payment-success-id"></p>' +
+      '<div class="payment-status-actions"><a class="btn btn-primary" href="#/dashboard">Go to dashboard</a><a class="btn" href="#/pricing">View plans</a></div>' +
+    '</div>',
+  );
+  const copy = wrap.querySelector("#payment-success-copy");
+  const id = wrap.querySelector("#payment-success-id");
+  if (!paymentOrderId || !getSessionToken()) {
+    copy.textContent = "Open your dashboard to review payment requests and plan status.";
+  } else {
+    id.textContent = "Request " + paymentOrderId.slice(0, 8);
+    void apiAuth("/api/payments/status?orderId=" + encodeURIComponent(paymentOrderId))
+      .then((data) => {
+        const request = data.order;
+        upsertPaymentRequest(request);
+        copy.textContent =
+          paymentStatusText(request.status) +
+          ". " +
+          (request.scanSummary || "Your dashboard will show the latest decision.");
+      })
+      .catch(() => {
+        copy.textContent = "Your payment request is recorded. Open the dashboard for the latest status.";
+      });
+  }
+  return wrap;
 }
 
 function renderDownload() {
@@ -2034,12 +2911,12 @@ function renderSupport() {
 const TERMS = `
   <p>By using Hormachuelos and this website you agree to use the product lawfully, keep your account credentials private, and not abuse rate limits or shared infrastructure.</p>
   <p>Subscriptions and credit packs are sold in Philippine Pesos at the prices shown at checkout (temporary promo pricing may change).</p>
-  <p>This demo site does not process real payments. When live GCash is enabled via a licensed payment partner (e.g. PayMongo / Xendit), their terms also apply.</p>
+  <p>GCash payment proofs are reviewed against the selected plan amount, receipt fingerprint, reference number, and visual evidence. A receipt scan is a fraud-control measure, not a bank confirmation; Hormachuelos may request a manual review before activating a plan.</p>
 `;
 
 const PRIVACY = `
-  <p>We collect account email, name, and plan metadata to operate billing and support. Demo data stays in your browser localStorage.</p>
-  <p>When live payments launch, payment partners process e-wallet transactions; we receive payment status, not your GCash PIN.</p>
+  <p>We collect account email, name, plan metadata, and the minimum payment-proof information needed to operate billing and support.</p>
+  <p>Payment-proof images are stored privately for review. We do not ask for or store your GCash PIN, OTP, or account password.</p>
   <p>Project files stay on your machine when using the desktop agent unless you explicitly connect cloud features.</p>
 `;
 
@@ -2313,6 +3190,67 @@ function wireTrustChips(root) {
   });
 }
 
+/** Hero provider chips: stagger in, cycle highlight, pause on hover/focus. */
+function wireHeroHeadline(root) {
+  const headline = root.querySelector(".ix-hero-headline");
+  if (!headline) return;
+  const chips = [...headline.querySelectorAll(".ix-model-chip")];
+  if (!chips.length) return;
+
+  let activeIndex = 0;
+  let paused = false;
+  let timer = 0;
+
+  const setActive = (index) => {
+    activeIndex = index;
+    chips.forEach((chip, i) => chip.classList.toggle("ix-model-active", i === index));
+  };
+
+  const schedule = (delay = 2200) => {
+    clearTimeout(timer);
+    if (paused || prefersReducedMotion()) return;
+    timer = window.setTimeout(() => {
+      setActive((activeIndex + 1) % chips.length);
+      schedule(2200);
+    }, delay);
+  };
+
+  if (prefersReducedMotion()) {
+    setActive(0);
+    chips.forEach((chip) => {
+      chip.classList.add("ix-model-ready");
+    });
+    return;
+  }
+
+  setActive(0);
+  chips.forEach((chip, i) => {
+    chip.classList.add("ix-model-ready");
+    chip.addEventListener("mouseenter", () => {
+      paused = true;
+      clearTimeout(timer);
+      setActive(i);
+    });
+    chip.addEventListener("mouseleave", () => {
+      paused = false;
+      schedule(900);
+    });
+    chip.addEventListener("focus", () => {
+      paused = true;
+      clearTimeout(timer);
+      setActive(i);
+    });
+    chip.addEventListener("blur", () => {
+      if (!headline.contains(document.activeElement)) {
+        paused = false;
+        schedule(900);
+      }
+    });
+  });
+  schedule(2400);
+  onPageCleanup(() => clearTimeout(timer));
+}
+
 function wireTypeOnce(root) {
   root.querySelectorAll(".ix-type-once").forEach((el) => {
     const text = el.getAttribute("data-text") || el.textContent || "";
@@ -2328,6 +3266,7 @@ function initTextInteractions(root) {
   wireDemoVideo(root);
   wireCompare(root);
   wireTrustChips(root);
+  wireHeroHeadline(root);
   wireTypeOnce(root);
 
   const heroType = root.querySelector("#hero-type");

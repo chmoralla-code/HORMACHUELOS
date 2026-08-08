@@ -24,11 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.11";
-const BUILTIN_MSI_SHA256 = "834e2a11509eead4117247735a11fd2999bd9c622c15ecfe554a070aeed0427a";
-const BUILTIN_EXE_SHA256 = "c92177a6de6f544d55d8bc145e3cb0b36398412708f30282134e028eef34b728";
-const BUILTIN_RELEASE_NOTES =
-  "Keeps Projects, Sessions, and Usage readable in compact sidebars; moves setup controls into Workspace actions; and improves the in-app update and restart flow.";
+const BUILTIN_RELEASE_VERSION = "0.1.52";
+const BUILTIN_MSI_SHA256 = "3e5e5d284703d43a8f66494b60df6a7fd4fb8fbdb60f521578f50b4c08c312e1";
+const BUILTIN_EXE_SHA256 = "8b01e6db950b2b604d091ac5a81ac490215c090b11540dcf840fe952c9e32f63";
+const BUILTIN_RELEASE_NOTES = "Client Success Center with persistent project outcomes, build-to-proof workflows, QA readiness, and tailored client delivery packs. Design mode now selects and captures exact live-preview features for AI edits.";
 
 /**
  * A deployment-bundled release keeps the download/update path available even
@@ -36,16 +35,18 @@ const BUILTIN_RELEASE_NOTES =
  * A database release with the same or newer version always remains authoritative.
  */
 export function builtinLatestRelease() {
-  const siteUrl = String(
-    process.env.PUBLIC_SITE_URL || process.env.SITE_URL || "https://hormachuelos.vercel.app",
-  ).replace(/\/$/, "");
+  // This release is bundled with the website as a verified fallback. Normal
+  // admin-published releases still use Supabase Storage and win at the same
+  // version, but an unavailable publishing credential must not advertise a
+  // download URL that has not been uploaded yet.
+  const downloadBase = "https://hormachuelos.vercel.app/downloads";
   return {
     id: `builtin-${BUILTIN_RELEASE_VERSION}`,
     version: BUILTIN_RELEASE_VERSION,
     title: `Hormachuelos ${BUILTIN_RELEASE_VERSION}`,
     whatsNew: BUILTIN_RELEASE_NOTES,
-    msiUrl: `${siteUrl}/downloads/Hormachuelos_${BUILTIN_RELEASE_VERSION}_x64_en-US.msi`,
-    exeUrl: `${siteUrl}/downloads/Hormachuelos_${BUILTIN_RELEASE_VERSION}_x64-setup.exe`,
+    msiUrl: `${downloadBase}/Hormachuelos_${BUILTIN_RELEASE_VERSION}_x64_en-US.msi`,
+    exeUrl: `${downloadBase}/Hormachuelos_${BUILTIN_RELEASE_VERSION}_x64-setup.exe`,
     msiSha256: BUILTIN_MSI_SHA256,
     exeSha256: BUILTIN_EXE_SHA256,
     forceUpdate: false,

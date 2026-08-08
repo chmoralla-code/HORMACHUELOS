@@ -48,6 +48,7 @@ fn is_readonly_tool(name: &str) -> bool {
             | "env_vars"
             | "list_processes"
             | "file_info"
+            | "view_image"
             | "ask_user"
             | "done"
             | "connect_account"
@@ -56,6 +57,27 @@ fn is_readonly_tool(name: &str) -> bool {
             | "browse_page"
             | "computer_list_windows"
             | "computer_observe"
+    )
+}
+
+/// Local, side-effect-free tools that may run together when a model emits a
+/// single inspection batch. Keep this intentionally narrower than
+/// `is_readonly_tool`: network, account, question, completion, vision, and
+/// computer tools have ordering or interaction semantics even when they do not
+/// mutate the workspace.
+pub fn is_parallel_safe_readonly_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "read_file"
+            | "list_dir"
+            | "glob"
+            | "grep"
+            | "git_status"
+            | "list_drives"
+            | "sys_info"
+            | "env_vars"
+            | "list_processes"
+            | "file_info"
     )
 }
 
@@ -100,7 +122,7 @@ fn arg_path<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
 fn tool_targets_outside_project(name: &str, args: &Value, root: &Path) -> bool {
     match name {
         "read_file" | "write_file" | "edit_file" | "make_dir" | "delete_file" | "file_info"
-        | "open_path" | "list_dir" => {
+        | "open_path" | "list_dir" | "view_image" => {
             if let Some(p) = arg_path(args, "path") {
                 return path_escapes_project(root, p);
             }
@@ -174,7 +196,7 @@ pub fn needs_tool_confirm(name: &str, args: &Value, root: &Path, mode: &str) -> 
 
 #[cfg(test)]
 mod permission_mode_tests {
-    use super::{needs_tool_confirm, schemas};
+    use super::{is_parallel_safe_readonly_tool, needs_tool_confirm, schemas};
     use serde_json::json;
     use std::path::Path;
 
@@ -246,6 +268,37 @@ mod permission_mode_tests {
             "plan"
         ));
         assert!(!needs_tool_confirm("list_dir", &json!({}), root, "plan"));
+    }
+
+    #[test]
+    fn only_local_inspection_tools_are_parallel_safe() {
+        for name in [
+            "read_file",
+            "list_dir",
+            "glob",
+            "grep",
+            "git_status",
+            "file_info",
+        ] {
+            assert!(
+                is_parallel_safe_readonly_tool(name),
+                "{name} should be safe"
+            );
+        }
+        for name in [
+            "write_file",
+            "run_command",
+            "web_search",
+            "ask_user",
+            "done",
+            "connect_account",
+            "computer_observe",
+        ] {
+            assert!(
+                !is_parallel_safe_readonly_tool(name),
+                "{name} must stay ordered"
+            );
+        }
     }
 
     #[test]
@@ -453,6 +506,28 @@ fn resolve_project_read_path(root: &Path, relative: &str) -> Result<PathBuf> {
         anyhow::bail!("Project item resolves outside the active project.");
     }
     Ok(canonical)
+}
+
+/// Resolve an image path for `view_image`. Project-relative paths use the
+/// normal project boundary; absolute paths inside the app's paste temp dir
+/// (clipboard/drag-drop attachments) are also allowed since they are
+/// user-provided and never executed.
+fn resolve_image_read_path(root: &Path, raw: &str) -> Result<PathBuf> {
+    let p = Path::new(raw);
+    if p.is_absolute() {
+        let paste_dir = std::env::temp_dir().join("hormachuelos-paste");
+        let canonical = p
+            .canonicalize()
+            .with_context(|| format!("Could not resolve image path: {}", p.display()))?;
+        let Ok(paste_canon) = paste_dir.canonicalize() else {
+            anyhow::bail!("Image path is not inside the app paste directory.");
+        };
+        if canonical.starts_with(&paste_canon) {
+            return Ok(canonical);
+        }
+        anyhow::bail!("Image path resolves outside the project and the paste directory.");
+    }
+    resolve_project_read_path(root, raw)
 }
 
 pub fn path_escapes_project(root: &Path, rel: &str) -> bool {
@@ -830,6 +905,18 @@ pub fn schemas(computer_use_enabled: bool) -> Vec<Value> {
                 "parameters": {
                     "type": "object",
                     "properties": { "path": { "type": "string" } },
+                    "required": ["path"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "view_image",
+                "description": "View and describe an image file (PNG/JPG/WEBP/GIF/BMP) at an absolute or project-relative path. Attached images are auto-described with vision before the run (including Hormachuelos v4). Call this only for a closer look or a path that was not auto-viewed.",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "path": { "type": "string", "description": "Absolute or project-relative path to the image file" } },
                     "required": ["path"]
                 }
             }
@@ -1628,6 +1715,458 @@ fn download_public_file(url: &str, destination: &Path) -> Result<(u64, reqwest::
     result.map(|written| (written, final_url))
 }
 
+/// Read an image file and ask a vision-capable model to describe it.
+///
+/// Used so text-only models (DeepSeek, Hormachuelos v1–v4, …) can "see"
+/// pasted/attached images. Prefers a fast OpenRouter Gemini pass when a paid
+/// hosted plan is available; otherwise uses Command Code (same key as
+/// Hormachuelos v4) so FREE / signed-in users still get vision.
+pub fn view_image_file(root: &Path, raw_path: &str) -> Result<String> {
+    let full = resolve_image_read_path(root, raw_path)?;
+    let ext = full
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    if !matches!(
+        ext.as_str(),
+        "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp"
+    ) {
+        anyhow::bail!("view_image supports PNG, JPG, WEBP, GIF, and BMP files (got .{ext}).");
+    }
+    let mime = match ext.as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        _ => "image/png",
+    };
+    let bytes = std::fs::read(&full)
+        .with_context(|| format!("Could not read image: {}", full.display()))?;
+    if bytes.is_empty() {
+        anyhow::bail!("Image file is empty.");
+    }
+    if bytes.len() > 25 * 1024 * 1024 {
+        anyhow::bail!("Image is too large (max 25 MB).");
+    }
+
+    let (data_url, vision_mime) = prepare_vision_payload(&bytes, mime);
+    let prompt = "Describe this image briefly for a coding agent: subject, visible text (verbatim), UI layout, and anything actionable. Max ~120 words.";
+
+    let settings = crate::config::Settings::load().unwrap_or_default();
+    let hosted_base = crate::license::hosted_chat_base_url();
+    let license = crate::license::LicenseStatus::load().unwrap_or_default();
+    let local_key = crate::config::load_provider_api_key("commandcode")
+        .ok()
+        .filter(|k| !k.trim().is_empty());
+    let openrouter_key = crate::config::load_provider_api_key("openrouter")
+        .ok()
+        .filter(|k| !k.trim().is_empty());
+
+    let website_session = crate::config::load_website_session()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let paid_hosted = crate::license::should_use_hosted(&license);
+    // Command Code vision works for signed-in FREE users (Hormachuelos v4 key)
+    // and for paid plans. OpenRouter vision needs a paid hosted wallet.
+    let session_auth = !website_session.is_empty();
+    let hosted_vision = HostedVisionContext {
+        base_url: &hosted_base,
+        license: &license,
+        website_session: &website_session,
+    };
+
+    let mut errors: Vec<String> = Vec::new();
+
+    // 1) Paid: fast Gemini Flash via OpenRouter (short timeout).
+    if paid_hosted {
+        match describe_image_hosted_openai(
+            &hosted_vision,
+            "openrouter",
+            "google/gemini-2.0-flash-001",
+            prompt,
+            &data_url,
+            12,
+        ) {
+            Ok(description) => return Ok(description),
+            Err(err) => errors.push(format!("openrouter/gemini: {err}")),
+        }
+    }
+
+    // 2) Command Code Grok — primary path for FREE / Hormachuelos v4 (VISION).
+    // Allowed even when the account's chat allowlist is DeepSeek-only: this is
+    // the shared vision helper, not a user-selectable chat provider.
+    if paid_hosted || session_auth {
+        match describe_image_hosted_openai(
+            &hosted_vision,
+            "commandcode",
+            "xai/grok-4.5",
+            prompt,
+            &data_url,
+            18,
+        ) {
+            Ok(description) => return Ok(description),
+            Err(err) => errors.push(format!("commandcode/grok: {err}")),
+        }
+    }
+
+    // 3) Hosted DeepSeek when the user is on DeepSeek (or has a DeepSeek key).
+    let deepseek_key = crate::config::load_provider_api_key("deepseek")
+        .ok()
+        .filter(|k| !k.trim().is_empty());
+    let prefer_deepseek = settings.provider == "deepseek" || deepseek_key.is_some();
+    if prefer_deepseek && (paid_hosted || session_auth) {
+        match describe_image_hosted_openai(
+            &hosted_vision,
+            "deepseek",
+            "deepseek-v4-flash",
+            prompt,
+            &data_url,
+            18,
+        ) {
+            Ok(description) => return Ok(description),
+            Err(err) => errors.push(format!("hosted deepseek: {err}")),
+        }
+    }
+
+    // 4) Local OpenRouter BYOK.
+    if let Some(key) = openrouter_key.as_deref() {
+        match describe_image_direct_openai(
+            "https://openrouter.ai/api/v1",
+            key,
+            "google/gemini-2.0-flash-001",
+            prompt,
+            &data_url,
+            12,
+        ) {
+            Ok(description) => return Ok(description),
+            Err(err) => errors.push(format!("local openrouter: {err}")),
+        }
+    }
+
+    // 5) Local DeepSeek BYOK.
+    if let Some(key) = deepseek_key.as_deref() {
+        match describe_image_direct_openai(
+            "https://api.deepseek.com",
+            key,
+            "deepseek-chat",
+            prompt,
+            &data_url,
+            18,
+        ) {
+            Ok(description) => return Ok(description),
+            Err(err) => errors.push(format!("local deepseek: {err}")),
+        }
+    }
+
+    // 6) Direct Command Code gateway (local BYOK key).
+    if let Some(key) = local_key.as_deref() {
+        match describe_image_commandcode_direct(&settings, key, prompt, &data_url, &vision_mime, 18)
+        {
+            Ok(description) => return Ok(description),
+            Err(err) => errors.push(format!("local commandcode: {err}")),
+        }
+    }
+
+    if errors.is_empty() {
+        anyhow::bail!(
+            "No vision provider is available for image viewing. Sign in to Hormachuelos (FREE includes vision for Hormachuelos v4), or save an OpenRouter / Command Code key in Settings."
+        );
+    }
+    anyhow::bail!("Vision endpoint failed ({}).", errors.join(" · "))
+}
+
+/// Shrink large screenshots before the vision round-trip so Gemini/Grok respond
+/// quickly. Falls back to the original bytes when decode/re-encode fails.
+fn prepare_vision_payload(bytes: &[u8], mime: &str) -> (String, String) {
+    use base64::Engine as _;
+    use image::imageops::FilterType;
+    use image::{GenericImageView, ImageEncoder, ImageFormat};
+
+    const MAX_EDGE: u32 = 1280;
+    const TARGET_JPEG_QUALITY: u8 = 72;
+
+    let fallback = || {
+        (
+            format!(
+                "data:{mime};base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(bytes)
+            ),
+            mime.to_string(),
+        )
+    };
+
+    let Ok(img) = image::load_from_memory(bytes) else {
+        return fallback();
+    };
+    let (width, height) = img.dimensions();
+    let needs_resize = width > MAX_EDGE || height > MAX_EDGE;
+    // Already small enough — skip re-encode cost.
+    if !needs_resize && bytes.len() <= 450_000 {
+        return fallback();
+    }
+
+    let resized = if needs_resize {
+        img.resize(MAX_EDGE, MAX_EDGE, FilterType::Triangle)
+    } else {
+        img
+    };
+
+    let mut encoded = Vec::new();
+    {
+        let mut cursor = std::io::Cursor::new(&mut encoded);
+        let encoder =
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, TARGET_JPEG_QUALITY);
+        let rgb = resized.to_rgb8();
+        if encoder
+            .write_image(
+                rgb.as_raw(),
+                rgb.width(),
+                rgb.height(),
+                image::ExtendedColorType::Rgb8,
+            )
+            .is_err()
+        {
+            encoded.clear();
+            let mut cursor = std::io::Cursor::new(&mut encoded);
+            if resized.write_to(&mut cursor, ImageFormat::Png).is_err() {
+                return fallback();
+            }
+            return (
+                format!(
+                    "data:image/png;base64,{}",
+                    base64::engine::general_purpose::STANDARD.encode(&encoded)
+                ),
+                "image/png".into(),
+            );
+        }
+    }
+
+    // Keep the original when re-encoding somehow got larger.
+    if encoded.len() >= bytes.len() && bytes.len() <= 900_000 {
+        return fallback();
+    }
+
+    (
+        format!(
+            "data:image/jpeg;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&encoded)
+        ),
+        "image/jpeg".into(),
+    )
+}
+
+struct HostedVisionContext<'a> {
+    base_url: &'a str,
+    license: &'a crate::license::LicenseStatus,
+    website_session: &'a str,
+}
+
+fn describe_image_hosted_openai(
+    context: &HostedVisionContext<'_>,
+    provider: &str,
+    model: &str,
+    prompt: &str,
+    data_url: &str,
+    timeout_secs: u64,
+) -> Result<String> {
+    let client = http_client(timeout_secs)?;
+    let body = json!({
+        "model": model,
+        "messages": [{
+            "role": "user",
+            "content": [
+                { "type": "text", "text": prompt },
+                { "type": "image_url", "image_url": { "url": data_url } },
+            ],
+        }],
+        "max_tokens": 320,
+        "stream": false,
+    });
+    let mut request = client
+        .post(format!("{}/chat/completions", context.base_url))
+        .header("Content-Type", "application/json")
+        .header("X-Horma-Provider", provider)
+        // Marks this as the desktop view_image helper so admin chat-provider
+        // allowlists do not block the shared Vision backend (Command Code).
+        .header("X-Horma-Vision-Assist", "1");
+    if !context.license.license_key.trim().is_empty() {
+        request = request.header(
+            "Authorization",
+            format!("Bearer {}", context.license.license_key),
+        );
+    } else if !context.website_session.is_empty() {
+        request = request
+            .header(
+                "Authorization",
+                format!("Bearer {}", context.website_session),
+            )
+            .header("X-Horma-Session", context.website_session);
+    } else {
+        anyhow::bail!("no hosted auth");
+    }
+    let response = request
+        .json(&body)
+        .send()
+        .with_context(|| format!("Vision request via {provider} failed"))?;
+    let status = response.status();
+    let text = response.text().unwrap_or_default();
+    if !status.is_success() {
+        let snippet = text.chars().take(160).collect::<String>();
+        anyhow::bail!("HTTP {status} {snippet}");
+    }
+    extract_openai_vision_text(&text).ok_or_else(|| anyhow::anyhow!("empty vision response"))
+}
+
+fn describe_image_direct_openai(
+    base: &str,
+    api_key: &str,
+    model: &str,
+    prompt: &str,
+    data_url: &str,
+    timeout_secs: u64,
+) -> Result<String> {
+    let client = http_client(timeout_secs)?;
+    let body = json!({
+        "model": model,
+        "messages": [{
+            "role": "user",
+            "content": [
+                { "type": "text", "text": prompt },
+                { "type": "image_url", "image_url": { "url": data_url } },
+            ],
+        }],
+        "max_tokens": 320,
+        "stream": false,
+    });
+    let response = client
+        .post(format!("{}/chat/completions", base.trim_end_matches('/')))
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {api_key}"))
+        .json(&body)
+        .send()
+        .with_context(|| "Direct vision request failed")?;
+    let status = response.status();
+    let text = response.text().unwrap_or_default();
+    if !status.is_success() {
+        let snippet = text.chars().take(160).collect::<String>();
+        anyhow::bail!("HTTP {status} {snippet}");
+    }
+    extract_openai_vision_text(&text).ok_or_else(|| anyhow::anyhow!("empty vision response"))
+}
+
+fn describe_image_commandcode_direct(
+    settings: &crate::config::Settings,
+    key: &str,
+    prompt: &str,
+    data_url: &str,
+    mime: &str,
+    timeout_secs: u64,
+) -> Result<String> {
+    let base = settings
+        .base_url
+        .clone()
+        .filter(|u| u.contains("api.commandcode.ai"))
+        .unwrap_or_else(|| crate::config::COMMANDCODE_API_BASE_URL.to_string());
+    let client = http_client(timeout_secs)?;
+    let body = json!({
+        "config": {
+            "workingDir": "/",
+            "date": chrono::Utc::now().format("%Y-%m-%d").to_string(),
+            "environment": std::env::consts::OS,
+            "structure": [],
+            "isGitRepo": false,
+            "currentBranch": "",
+            "mainBranch": "",
+            "gitStatus": "",
+            "recentCommits": [],
+        },
+        "memory": "",
+        "params": {
+            "model": "xai/grok-4.5",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": prompt },
+                    { "type": "image", "image": data_url, "mimeType": mime },
+                ],
+            }],
+            "tools": [],
+            "system": "",
+            "max_tokens": 320,
+            "stream": false,
+        },
+    });
+    let response = client
+        .post(format!("{}/alpha/generate", base.trim_end_matches('/')))
+        .header("Content-Type", "application/json")
+        .header("User-Agent", "cli")
+        .header("x-command-code-version", "1.14.1")
+        .header("x-cli-environment", "production")
+        .header("x-taste-learning", "false")
+        .header("x-co-flag", "false")
+        .header("x-session-id", uuid::Uuid::new_v4().to_string())
+        .header("Authorization", format!("Bearer {key}"))
+        .json(&body)
+        .send()
+        .with_context(|| "Vision request to the Command Code gateway failed.")?;
+    if !response.status().is_success() {
+        anyhow::bail!("HTTP {}", response.status());
+    }
+    let text = response.text().unwrap_or_default();
+    let mut description = String::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Ok(event) = serde_json::from_str::<Value>(line) {
+            if event.get("type").and_then(Value::as_str) == Some("text-delta") {
+                if let Some(delta) = event.get("text").and_then(Value::as_str) {
+                    description.push_str(delta);
+                }
+            }
+            if event.get("type").and_then(Value::as_str) == Some("error") {
+                let message = event
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown vision error");
+                anyhow::bail!("{message}");
+            }
+        }
+    }
+    let description = description.trim().to_string();
+    if description.is_empty() {
+        anyhow::bail!("empty vision response");
+    }
+    Ok(description)
+}
+
+fn extract_openai_vision_text(raw: &str) -> Option<String> {
+    let parsed: Value = serde_json::from_str(raw).ok()?;
+    parsed
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Extract `[Attached image: …]` paths from a user prompt.
+pub fn attached_image_paths(prompt: &str) -> Vec<String> {
+    let re = regex::Regex::new(r"(?i)\[Attached image:\s*(.+?)\]").ok();
+    let Some(re) = re else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for cap in re.captures_iter(prompt) {
+        let path = cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
+        if !path.is_empty() && !out.iter().any(|p: &String| p == path) {
+            out.push(path.to_string());
+        }
+    }
+    out
+}
+
 pub fn execute(
     name: &str,
     args: &Value,
@@ -2034,6 +2573,13 @@ pub fn execute(
                 "modified": meta.modified().ok().map(|t| t.elapsed().ok().map(|d| d.as_secs()).unwrap_or(0)).unwrap_or(0),
             });
             Ok(serde_json::to_string_pretty(&info)?)
+        }
+        "view_image" => {
+            let p = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("missing path"))?;
+            view_image_file(root, p)
         }
         "done" => {
             let summary = args
@@ -2689,6 +3235,56 @@ mod security_tests {
         )
         .unwrap();
         assert!(globbed.contains("inside.txt"));
+    }
+
+    #[test]
+    fn view_image_resolves_project_and_paste_paths_only() {
+        let tree = TempTree::new();
+        // Project-relative image path resolves inside the project.
+        let canonical_root = tree.root.canonicalize().unwrap();
+        let relative = resolve_image_read_path(&tree.root, "inside.txt").unwrap();
+        assert!(relative.starts_with(&canonical_root));
+        // Absolute path inside the app paste temp dir is allowed.
+        let paste_dir = std::env::temp_dir().join("hormachuelos-paste");
+        std::fs::create_dir_all(&paste_dir).unwrap();
+        let pasted = paste_dir.join("paste-test.png");
+        std::fs::write(&pasted, b"fake-png").unwrap();
+        let resolved = resolve_image_read_path(&tree.root, &pasted.to_string_lossy()).unwrap();
+        assert!(resolved.starts_with(paste_dir.canonicalize().unwrap()));
+        // An arbitrary absolute path outside the project is rejected.
+        let outside_img = tree.outside.join("shot.png");
+        std::fs::write(&outside_img, b"x").unwrap();
+        assert!(resolve_image_read_path(&tree.root, &outside_img.to_string_lossy()).is_err());
+    }
+
+    #[test]
+    fn prepare_vision_payload_downscales_large_png() {
+        // Pseudo-noise PNG compresses poorly, so JPEG downscale should win.
+        let mut img = image::RgbImage::new(1600, 1200);
+        for (i, pixel) in img.pixels_mut().enumerate() {
+            let n = (i % 251) as u8;
+            *pixel = image::Rgb([n, n.wrapping_mul(3), n.wrapping_mul(7)]);
+        }
+        let mut png_bytes = Vec::new();
+        {
+            let mut cursor = std::io::Cursor::new(&mut png_bytes);
+            image::DynamicImage::ImageRgb8(img)
+                .write_to(&mut cursor, image::ImageFormat::Png)
+                .unwrap();
+        }
+        assert!(png_bytes.len() > 500_000, "fixture should be large");
+        let (data_url, mime) = prepare_vision_payload(&png_bytes, "image/png");
+        assert_eq!(mime, "image/jpeg");
+        assert!(data_url.starts_with("data:image/jpeg;base64,"));
+        let b64 = data_url.split(',').nth(1).unwrap();
+        use base64::Engine as _;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .unwrap();
+        assert!(decoded.len() < png_bytes.len() / 2);
+        let out = image::load_from_memory(&decoded).unwrap();
+        assert!(out.width() <= 1280);
+        assert!(out.height() <= 1280);
     }
 
     #[test]

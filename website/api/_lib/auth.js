@@ -18,8 +18,9 @@ import {
   listOrdersForAccount,
   updateAccount,
   updateDeviceLink,
+  updateLicense,
 } from "./supabase.js";
-import { planBudget } from "./plans.js";
+import { normalizePlan, planBudget } from "./plans.js";
 import { sendVerificationEmail } from "./resend.js";
 
 const SITE_URL = () => process.env.PUBLIC_SITE_URL || "https://hormachuelos.vercel.app";
@@ -82,21 +83,31 @@ export async function publicAccountWithUsage(row) {
       planRemainingPct: 100,
     };
   }
-  const expired = new Date(license.expires_at).getTime() < Date.now();
-  const active = Boolean(license.active) && !expired;
-  const budget = Number(license.token_budget) || planBudget(license.plan);
+  const accountPlan = base.plan ? normalizePlan(base.plan) : "";
+  const licensePlan = license.plan ? normalizePlan(license.plan) : "";
+  // Website account plan wins — admin edits accounts.plan; keep license in sync.
+  if (accountPlan && licensePlan && accountPlan !== licensePlan && license.id) {
+    try {
+      license = await updateLicense(license.id, { plan: accountPlan });
+    } catch {
+      /* still return account plan below */
+    }
+  }
+  const plan = accountPlan || licensePlan || "free";
+  const active = Boolean(license.active);
+  const budget = Number(license.token_budget) || planBudget(plan);
   const used = Number(license.tokens_used) || 0;
   const remaining = Math.max(0, budget - used);
   const planRemainingPct =
     budget > 0 ? Math.max(0, Math.min(100, Math.round((remaining / budget) * 100))) : 0;
   return {
     ...base,
-    plan: expired ? "expired" : license.plan || base.plan || "free",
+    plan,
     licenseKey: license.key || base.licenseKey,
     tokenBudget: budget,
     tokensUsed: used,
     licenseActive: active,
-    expiresAt: String(license.expires_at || "").slice(0, 10),
+    expiresAt: license.expires_at ? String(license.expires_at).slice(0, 10) : "",
     planRemainingPct,
   };
 }
@@ -196,8 +207,13 @@ export async function accountFromRequest(req) {
   const raw = (() => {
     const h = req.headers.authorization || req.headers.Authorization || "";
     const m = String(h).match(/^Bearer\s+(.+)$/i);
-    if (m) return m[1].trim();
-    return String(req.headers["x-horma-session"] || "").trim();
+    const bearer = m ? m[1].trim() : "";
+    // A desktop catalog request may carry a paid license in Authorization and
+    // a website session in X-Horma-Session. Keep the normal bearer session
+    // precedence, but use the explicit session header when Authorization is a
+    // HORMA license rather than accidentally treating it as an account token.
+    if (bearer && !bearer.toUpperCase().startsWith("HORMA-")) return bearer;
+    return String(req.headers["x-horma-session"] || "").trim() || bearer;
   })();
   if (!raw || raw.toUpperCase().startsWith("HORMA-")) return null;
   const session = await getSessionByTokenHash(hashToken(raw));

@@ -2,13 +2,14 @@ import {
   api,
   onComputerUseStatus,
   type ComputerUseStatus,
+  type HostedProviderCatalogEntry,
   type IntegrationStatus,
   type Settings,
 } from "../ipc";
 import { clear, div, el, escapeHtml, displayPlanLabel } from "./util";
 import { icon, logo } from "./icons";
 
-type ProviderDef = {
+export type ProviderDef = {
   id: string;
   label: string;
   logoKey:
@@ -18,7 +19,8 @@ type ProviderDef = {
     | "ollama"
     | "openai"
     | "grok"
-    | "hormachuelos";
+    | "hormachuelos"
+    | "commandcode";
   logoSrc: string;
   defaultModel: string;
   defaultBaseUrl: string;
@@ -27,12 +29,29 @@ type ProviderDef = {
   models: string[];
   /** Hide compatibility entries from provider pickers. */
   hidden?: boolean;
+  /** True when aliases and credentials are administered by the hosted service. */
+  hostedManaged?: boolean;
 };
 
 export const PROVIDERS: ProviderDef[] = [
   {
-    // Cursor Agent SDK — branded as OpenAI in the UI and pinned to the
-    // application model identity expected by the SDK integration.
+    // BYOK xAI remains available for existing installs, but is hidden from the
+    // provider picker. Public OpenAI branding routes through the Cursor alias.
+    id: "xai",
+    label: "xAI",
+    logoKey: "grok",
+    logoSrc: "./logos/grok.png",
+    defaultModel: "grok-4.5",
+    defaultBaseUrl: "https://api.x.ai/v1",
+    keyUrl: "https://console.x.ai/",
+    keyRequired: true,
+    // Stable built-in alias. The desktop sends the real model id below.
+    models: ["grok-4.5"],
+    hidden: true,
+  },
+  {
+    // Public OpenAI alias over the Cursor SDK. Sol/Luna are display names for
+    // the pinned Cursor model ids; credentials remain Cursor `crsr_…` keys.
     id: "cursor",
     label: "OpenAI",
     logoKey: "openai",
@@ -41,8 +60,6 @@ export const PROVIDERS: ProviderDef[] = [
     defaultBaseUrl: "https://api.cursor.com/v1",
     keyUrl: "https://cursor.com/dashboard?tab=integrations",
     keyRequired: true,
-    // These are Cursor SDK model IDs. The UI presents the product aliases
-    // below without altering the model ID sent to Cursor.
     models: ["grok-4.5", "composer-2.5"],
   },
   {
@@ -61,16 +78,16 @@ export const PROVIDERS: ProviderDef[] = [
   },
   {
     id: "hormachuelos_free",
-    label: "HORMACHUELOS FREE",
+    label: "Hormachuelos",
     logoKey: "hormachuelos",
-    logoSrc: "./logos/hormachuelos-free.svg",
+    logoSrc: "./logos/hormachuelos-free.png",
     defaultModel: "hormachuelos-v1",
     defaultBaseUrl: "https://hormachuelos.vercel.app/api/v1",
     keyUrl: "",
     keyRequired: false,
     // The signed-in desktop refreshes this catalog from the hosted service.
     // These are safe offline fallbacks, not credentials.
-    models: ["hormachuelos-v1", "hormachuelos-v2"],
+    models: ["hormachuelos-v1", "hormachuelos-v2", "hormachuelos-v3", "hormachuelos-v4"],
   },
   {
     id: "ollama",
@@ -108,21 +125,13 @@ export const PROVIDERS: ProviderDef[] = [
     label: "OpenRouter",
     logoKey: "openrouter",
     logoSrc: "./logos/openrouter.svg",
-    defaultModel: "meta-llama/llama-3.3-70b-instruct:free",
+    defaultModel: "openrouter/free",
     defaultBaseUrl: "https://openrouter.ai/api/v1",
     keyUrl: "https://openrouter.ai/keys",
-    keyRequired: true,
-    models: [
-      "meta-llama/llama-3.3-70b-instruct:free",
-      "meta-llama/llama-3.2-3b-instruct:free",
-      "openai/gpt-oss-120b:free",
-      "openai/gpt-oss-20b:free",
-      "qwen/qwen3-coder:free",
-      "qwen/qwen3-next-80b-a3b-instruct:free",
-      "nousresearch/hermes-3-llama-3.1-405b:free",
-      "google/gemma-4-31b-it:free",
-      "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
-    ],
+    // Free Models Router uses the Hormachuelos hosted OpenRouter key when a
+    // plan is active. A local key is optional BYOK only.
+    keyRequired: false,
+    models: ["openrouter/free"],
   },
   {
     id: "glm",
@@ -143,8 +152,235 @@ export const PROVIDERS: ProviderDef[] = [
       "nemotron-3-ultra-free",
       "big-pickle",
     ],
+    hidden: true,
+  },
+  {
+    id: "commandcode",
+    label: "HORMACHUELOS NEW MODELS",
+    logoKey: "commandcode",
+    logoSrc: "./logos/commandcode.svg",
+    defaultModel: "deepseek/deepseek-v4-flash",
+    // Hosted through the shared server-side key on paid plans; direct BYOK
+    // with a local key also works (agent.rs picks the native gateway).
+    defaultBaseUrl: "https://hormachuelos.vercel.app/api/v1",
+    keyUrl: "https://commandcode.ai",
+    // Clients on a paid Hormachuelos plan use the shared server-side key
+    // through the hosted proxy. A local BYOK key is optional.
+    keyRequired: false,
+    hostedManaged: true,
+    // DeepSeek V4 Flash moved to HORMACHUELOS FREE as Hormachuelos v4 (VISION).
+    // Keep the provider definition for admin/BYOK compatibility, but hide it
+    // from the desktop picker.
+    hidden: true,
+    // The gateway accepts the same model ids as `cmd --list-models`.
+    models: [
+      "gpt-5.6-luna",
+      "moonshotai/Kimi-K3",
+      "thinkingmachines/inkling",
+      "thinkingmachines/inkling-small",
+      "deepseek/deepseek-v4-pro",
+      "deepseek/deepseek-v4-flash",
+      "moonshotai/Kimi-K2.7-Code",
+      "moonshotai/Kimi-K2.7-Code-Highspeed",
+      "moonshotai/Kimi-K2.6",
+      "moonshotai/Kimi-K2.5",
+      "zai-org/GLM-5.2",
+      "zai-org/GLM-5.2-Fast",
+      "zai-org/GLM-5.1",
+      "zai-org/GLM-5",
+      "MiniMaxAI/MiniMax-M3",
+      "MiniMaxAI/MiniMax-M2.7",
+      "MiniMaxAI/MiniMax-M2.5",
+      "xiaomi/mimo-v2.5-pro",
+      "xiaomi/mimo-v2.5",
+      "Qwen/Qwen3.6-Max-Preview",
+      "Qwen/Qwen3.6-Plus",
+      "Qwen/Qwen3.7-Max",
+      "Qwen/Qwen3.7-Plus",
+      "Qwen/Qwen3.8-Max",
+      "Qwen/Qwen3.7-Flash",
+      "stepfun/Step-3.7-Flash",
+      "stepfun/Step-3.5-Flash",
+      "tencent/hy3-paid",
+      "xai/grok-4.5",
+      "meta/muse-spark-1.2",
+      "meta/muse-spark-1.2-contributor",
+      "nvidia/nemotron-3-ultra-550b-a55b",
+      "poolside/laguna-s-2.1-free",
+    ],
   },
 ];
+
+const HOSTED_PROXY_BASE_URL = "https://hormachuelos.vercel.app/api/v1";
+const BUILTIN_PROVIDERS: ProviderDef[] = PROVIDERS.map((provider) => ({
+  ...provider,
+  models: [...provider.models],
+}));
+const HOSTED_PROVIDER_CATALOG = new Map<string, HostedProviderCatalogEntry>();
+const HOSTED_MODEL_DISPLAY_NAMES = new Map<string, string>();
+/** When true, the server allowlist is exclusive — no builtin provider/model fallbacks. */
+let hostedCatalogRestricted = false;
+
+export function isHostedCatalogRestricted(): boolean {
+  return hostedCatalogRestricted;
+}
+
+function hostedModelNameKey(providerId: string, modelId: string): string {
+  return `${providerId}\u0000${modelId}`;
+}
+
+function isHostedProviderAlias(value: string): boolean {
+  const id = String(value || "").trim().toLowerCase();
+  return /^[a-z][a-z0-9_-]{0,48}$/.test(id) && id !== "cursor" && id !== "ollama";
+}
+
+function uniqueModels(models: readonly string[]): string[] {
+  return [...new Set(models.map((model) => model.trim()).filter(Boolean))];
+}
+
+function fallbackHostedProvider(id: string): ProviderDef {
+  const label = id
+    .split(/[-_]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ") || "Hosted provider";
+  return {
+    id,
+    label,
+    logoKey: "hormachuelos",
+    logoSrc: "./logos/hormachuelos-free.png",
+    defaultModel: "",
+    defaultBaseUrl: HOSTED_PROXY_BASE_URL,
+    keyUrl: "",
+    keyRequired: false,
+    models: [],
+    hostedManaged: true,
+  };
+}
+
+function providerFromHostedCatalog(entry: HostedProviderCatalogEntry): ProviderDef | null {
+  const id = String(entry?.id || "").trim().toLowerCase();
+  if (!isHostedProviderAlias(id)) return null;
+  const label = String(entry?.label || "").trim();
+  if (!label || label.length > 120 || /[\u0000-\u001f\u007f]/.test(label)) return null;
+  const models = uniqueModels(
+    Array.isArray(entry.models)
+      ? entry.models
+          .map((model) => String(model?.id || "").trim())
+          .filter((model) => model.length <= 200 && !/[\u0000-\u001f\u007f]/.test(model))
+      : [],
+  );
+  if (!models.length) return null;
+  const builtin = BUILTIN_PROVIDERS.find((provider) => provider.id === id);
+  if (!builtin) {
+    return {
+      ...fallbackHostedProvider(id),
+      label,
+      defaultModel: models[0],
+      models,
+    };
+  }
+  // HORMACHUELOS FREE deliberately keeps its installed V1/V2 fallback aliases
+  // visible while newer aliases come from the server — unless this account is
+  // under an admin allowlist, in which case the server list is exclusive.
+  const approvedModels = hostedCatalogRestricted
+    ? models
+    : id === "hormachuelos_free"
+      ? uniqueModels([...builtin.models, ...models])
+      : id === "openrouter"
+        ? ["openrouter/free"]
+        : models;
+  return {
+    ...builtin,
+    label,
+    // Keep intentionally hidden built-ins out of the picker (xAI, OpenCode).
+    hidden: Boolean(builtin.hidden),
+    hostedManaged: true,
+    defaultModel: id === "openrouter" ? "openrouter/free" : (approvedModels[0] || builtin.defaultModel),
+    defaultBaseUrl: HOSTED_PROXY_BASE_URL,
+    keyUrl: "",
+    keyRequired: false,
+    models: approvedModels,
+  };
+}
+
+function rebuildProviderCatalog() {
+  const managed = new Map<string, ProviderDef>();
+  for (const entry of HOSTED_PROVIDER_CATALOG.values()) {
+    const provider = providerFromHostedCatalog(entry);
+    if (provider) managed.set(provider.id, provider);
+  }
+
+  // Admin allowlists are exclusive: only the providers returned by the hosted
+  // catalog may appear. Local BYOK / Ollama / Cursor are also locked out so a
+  // prohibited model cannot be selected outside the allowlist.
+  if (hostedCatalogRestricted && managed.size > 0) {
+    const providers = [...managed.values()].map((provider) => ({
+      ...provider,
+      hidden: false,
+      models: [...provider.models],
+    }));
+    PROVIDERS.splice(0, PROVIDERS.length, ...providers);
+    return;
+  }
+
+  const providers = BUILTIN_PROVIDERS.map((provider) => managed.get(provider.id) || {
+    ...provider,
+    models: [...provider.models],
+  });
+  for (const provider of managed.values()) {
+    if (!BUILTIN_PROVIDERS.some((builtin) => builtin.id === provider.id)) providers.push(provider);
+  }
+  PROVIDERS.splice(0, PROVIDERS.length, ...providers);
+}
+
+/** Store a fresh, public-safe catalog after a successful hosted API request. */
+export function setHostedProviderCatalog(
+  entries: readonly HostedProviderCatalogEntry[],
+  options?: { restricted?: boolean },
+) {
+  hostedCatalogRestricted = Boolean(options?.restricted);
+  HOSTED_PROVIDER_CATALOG.clear();
+  HOSTED_MODEL_DISPLAY_NAMES.clear();
+  for (const entry of entries) {
+    const provider = providerFromHostedCatalog(entry);
+    if (!provider || HOSTED_PROVIDER_CATALOG.has(provider.id)) continue;
+    // When restricted, trust the server model list exactly. Otherwise keep the
+    // previous filter that drops unknown labels while preserving known aliases.
+    const models = entry.models
+      .map((model) => ({ id: String(model?.id || "").trim(), label: String(model?.label || "").trim() }))
+      .filter((model) =>
+        model.id.length > 0 &&
+        model.label.length > 0 &&
+        model.label.length <= 120 &&
+        !/[\u0000-\u001f\u007f]/.test(model.label) &&
+        (hostedCatalogRestricted || provider.models.includes(model.id)),
+      );
+    if (!models.length) continue;
+    HOSTED_PROVIDER_CATALOG.set(provider.id, {
+      id: provider.id,
+      label: provider.label,
+      models,
+    });
+    for (const model of models) {
+      HOSTED_MODEL_DISPLAY_NAMES.set(hostedModelNameKey(provider.id, model.id), model.label);
+    }
+  }
+  rebuildProviderCatalog();
+}
+
+/** Fetch current administrator-managed aliases without ever receiving API keys. */
+export async function refreshHostedProviderCatalog(): Promise<HostedProviderCatalogEntry[]> {
+  const raw = await api.listHostedProviderCatalog();
+  const payload = Array.isArray(raw)
+    ? { data: raw, restricted: false }
+    : {
+        data: Array.isArray(raw?.data) ? raw.data : [],
+        restricted: Boolean(raw?.restricted),
+      };
+  setHostedProviderCatalog(payload.data, { restricted: payload.restricted });
+  return payload.data;
+}
 
 /** Providers shown in pickers. */
 export function visibleProviders(): ProviderDef[] {
@@ -155,6 +391,8 @@ export function visibleProviders(): ProviderDef[] {
 const MODEL_DISPLAY_NAMES: Record<string, string> = {
   "hormachuelos-v1": "Hormachuelos v1",
   "hormachuelos-v2": "Hormachuelos v2",
+  "hormachuelos-v3": "Hormachuelos v3",
+  "hormachuelos-v4": "Hormachuelos v4 (VISION)",
   "deepseek-v4-flash": "DeepSeek V4 Flash",
   "deepseek-v4-pro": "DeepSeek V4 Pro",
   "grok-4.5": "GPT 5.6 Sol",
@@ -190,20 +428,55 @@ const MODEL_DISPLAY_NAMES: Record<string, string> = {
   "laguna-s-2.1-free": "Laguna S 2.1 Free",
   "nemotron-3-ultra-free": "Nemotron 3 Ultra Free",
   "big-pickle": "Big Pickle Free",
+  "openrouter/free": "Free Models Router",
+  "deepseek/deepseek-v4-flash": "DeepSeek V4 Flash",
+  "deepseek/deepseek-v4-pro": "DeepSeek V4 Pro",
+  "moonshotai/Kimi-K3": "Kimi K3",
+  "thinkingmachines/inkling-small": "Inkling Small",
+  "poolside/laguna-s-2.1-free": "Laguna S 2.1 Free",
 };
+
+/** Allowed OpenRouter model — Free Models Router only. */
+export function isOpenRouterFreeModel(modelId: string): boolean {
+  return String(modelId || "").trim().toLowerCase() === "openrouter/free";
+}
 
 /** Providers routed through the Cursor local SDK (not chat-completions). */
 export const CURSOR_SDK_PROVIDER_IDS = new Set(["cursor"]);
 
+/** Providers whose selected model supports an explicit reasoning-effort value. */
+export const REASONING_EFFORT_PROVIDER_IDS = new Set([
+  "cursor",
+  "xai",
+  "deepseek",
+  "glm",
+  "openrouter",
+  "commandcode",
+  "hormachuelos_free",
+  "openai",
+  "ollama",
+  "pollinations",
+]);
+
 /** Provider catalogs that are deliberately pinned (no live /models flood). */
-export const STATIC_MODEL_PROVIDER_IDS = new Set(["cursor", "glm"]);
+export const STATIC_MODEL_PROVIDER_IDS = new Set([
+  "cursor",
+  "xai",
+  "glm",
+  "openrouter",
+  "commandcode",
+]);
 
 export function isCursorSdkProvider(providerId: string): boolean {
   return CURSOR_SDK_PROVIDER_IDS.has(providerId);
 }
 
+export function usesReasoningEffort(providerId: string): boolean {
+  return REASONING_EFFORT_PROVIDER_IDS.has(providerId);
+}
+
 export function hasStaticModelCatalog(providerId: string): boolean {
-  return STATIC_MODEL_PROVIDER_IDS.has(providerId);
+  return STATIC_MODEL_PROVIDER_IDS.has(providerId) || Boolean(getProviderMeta(providerId)?.hostedManaged);
 }
 
 /**
@@ -213,9 +486,16 @@ export function hasStaticModelCatalog(providerId: string): boolean {
  * desktop picker.
  */
 export function mergeProviderModelCatalog(providerId: string, models: readonly string[]): string[] {
+  const hosted = HOSTED_PROVIDER_CATALOG.get(providerId);
+  if (hostedCatalogRestricted && hosted?.models?.length) {
+    return uniqueModels(hosted.models.map((model) => model.id));
+  }
+  const meta = getProviderMeta(providerId);
   const configured =
-    providerId === "hormachuelos_free"
-      ? PROVIDERS.find((provider) => provider.id === providerId)?.models ?? []
+    providerId === "hormachuelos_free" ||
+    providerId === "openrouter" ||
+    meta?.hostedManaged
+      ? meta?.models ?? []
       : [];
   return [...new Set([...configured, ...models].map((model) => model.trim()).filter(Boolean))];
 }
@@ -232,9 +512,17 @@ export const CURSOR_EFFORT_OPTIONS = [
   { id: "ultra", label: "Ultra" },
 ] as const;
 
+/** DeepSeek V4 accepts low / high / max on its OpenAI-compatible endpoint. */
+export const DEEPSEEK_EFFORT_OPTIONS = [
+  { id: "light", label: "Low" },
+  { id: "high", label: "High" },
+  { id: "ultra", label: "Max" },
+] as const;
+
 export type EffortId = (typeof CURSOR_EFFORT_OPTIONS)[number]["id"];
 
-export function effortOptionsForProvider(_providerId: string) {
+export function effortOptionsForProvider(providerId: string) {
+  if (providerId === "deepseek") return DEEPSEEK_EFFORT_OPTIONS;
   return CURSOR_EFFORT_OPTIONS;
 }
 
@@ -251,9 +539,14 @@ export function normalizeEffort(value: string | null | undefined): EffortId {
 
 /** Normalize effort to the values accepted consistently by Rust and the UI. */
 export function normalizeEffortForProvider(
-  _providerId: string,
+  providerId: string,
   value: string | null | undefined,
 ): EffortId {
+  const v = (value || "").trim().toLowerCase();
+  if (providerId === "deepseek") {
+    // DeepSeek accepts light/high/ultra (→ low/high/max upstream).
+    if (v === "medium" || v === "xhigh") return v === "medium" ? "light" : "ultra";
+  }
   return normalizeEffort(value);
 }
 
@@ -298,9 +591,19 @@ export function uiProviderId(providerId: string, _modelId?: string): string {
 }
 
 /** Display name for a model id (chip / menus). Falls back to a short id. */
-export function displayModelName(id: string): string {
+export function displayModelName(id: string, providerId?: string): string {
   const raw = (id || "").trim();
   if (!raw) return raw;
+  if (providerId) {
+    const hostedName = HOSTED_MODEL_DISPLAY_NAMES.get(hostedModelNameKey(providerId, raw));
+    if (hostedName) return hostedName;
+  }
+  if (
+    (providerId === "openrouter" || !providerId) &&
+    (raw === "openrouter/free" || raw.toLowerCase() === "free")
+  ) {
+    return "Free Models Router";
+  }
   if (MODEL_DISPLAY_NAMES[raw]) return MODEL_DISPLAY_NAMES[raw];
   const short = raw.includes("/") ? raw.split("/").pop()! : raw;
   if (MODEL_DISPLAY_NAMES[short]) return MODEL_DISPLAY_NAMES[short];
@@ -309,7 +612,7 @@ export function displayModelName(id: string): string {
 
 /** UI-facing provider label. */
 export function displayProviderName(providerId: string): string {
-  const meta = PROVIDERS.find((p) => p.id === providerId);
+  const meta = getProviderMeta(providerId);
   if (meta) return meta.label;
   const id = (providerId || "").trim();
   if (!id) return "Unknown";
@@ -343,16 +646,18 @@ function isKnownProviderBaseUrl(value: string): boolean {
 }
 
 export function getProviderMeta(id: string) {
-  return PROVIDERS.find((p) => p.id === id);
+  const normalized = String(id || "").trim().toLowerCase();
+  return PROVIDERS.find((p) => p.id === normalized) ||
+    (isHostedProviderAlias(normalized) ? fallbackHostedProvider(normalized) : undefined);
 }
 
 /** Default settings matching the Rust Default impl. */
 export function defaultSettings(): Settings {
-  const cursor = PROVIDERS.find((p) => p.id === "cursor") || PROVIDERS[0];
+  const openai = PROVIDERS.find((p) => p.id === "cursor") || PROVIDERS[0];
   return {
-    provider: cursor.id,
-    model: cursor.defaultModel,
-    base_url: cursor.defaultBaseUrl || null,
+    provider: openai.id,
+    model: openai.defaultModel,
+    base_url: openai.defaultBaseUrl || null,
     // Kept in the wire format for settings written by earlier releases.
     // The agent loop is now intentionally unbounded.
     max_iterations: 0,
@@ -362,6 +667,7 @@ export function defaultSettings(): Settings {
     capability_mode: "thinking",
     taglish: false,
     computer_use_enabled: false,
+    smart_agent_enabled: true,
     model_effort: "high",
   };
 }
@@ -377,6 +683,7 @@ export async function getSettingsSafe(): Promise<Settings> {
 
 /** Normalize provider settings while preserving user-entered custom model IDs. */
 export function normalizeSettings(s: Settings): Settings {
+  s.provider = String(s.provider || "").trim().toLowerCase();
   if (!s.permission_mode || !["plan", "auto", "research", "full"].includes(s.permission_mode)) {
     s.permission_mode = s.auto_approve ? "auto" : "plan";
   }
@@ -393,9 +700,12 @@ export function normalizeSettings(s: Settings): Settings {
   }
   s.taglish = !!s.taglish;
   s.computer_use_enabled = !!s.computer_use_enabled;
+  // Missing on older desktop settings means enabled: Smart Agent is a safe,
+  // provider-neutral orchestration layer and does not change credentials.
+  s.smart_agent_enabled = s.smart_agent_enabled !== false;
   s.model_effort = normalizeEffortForProvider(s.provider, s.model_effort);
-  // Older builds pointed the OpenAI label at Cursor. Migrate only that known
-  // endpoint; real OpenAI settings remain on the native OpenAI provider.
+  // Older builds pointed the OpenAI label at Cursor. Keep that path for a
+  // genuine Cursor key; an explicit xAI endpoint uses the native xAI route.
   if (s.provider === "openai" && s.base_url === "https://api.cursor.com/v1") {
     s.provider = "cursor";
     s.model =
@@ -404,12 +714,17 @@ export function normalizeSettings(s: Settings): Settings {
         : "grok-4.5";
     s.base_url = "https://api.cursor.com/v1";
   }
-  const meta = PROVIDERS.find((p) => p.id === s.provider);
+  if (s.provider === "openai" && s.base_url === "https://api.x.ai/v1") {
+    s.provider = "xai";
+    if (s.model === "gpt-5.6-sol" || !s.model.trim()) s.model = "grok-4.5";
+    s.base_url = "https://api.x.ai/v1";
+  }
+  const meta = getProviderMeta(s.provider);
   if (!meta) {
-    const cursor = PROVIDERS.find((p) => p.id === "cursor") || PROVIDERS[0];
-    s.provider = cursor.id;
-    s.model = cursor.defaultModel;
-    s.base_url = cursor.defaultBaseUrl || null;
+    const openai = PROVIDERS.find((p) => p.id === "cursor") || PROVIDERS[0];
+    s.provider = openai.id;
+    s.model = openai.defaultModel;
+    s.base_url = openai.defaultBaseUrl || null;
     return s;
   }
   if (!s.model.trim()) {
@@ -422,7 +737,15 @@ export function normalizeSettings(s: Settings): Settings {
     if (s.model === "gpt-5.6-luna") s.model = "composer-2.5";
     if (!meta.models.includes(s.model)) s.model = meta.defaultModel;
   }
+  if (s.provider === "xai") {
+    if (s.model === "gpt-5.6-sol" || !s.model.trim()) s.model = "grok-4.5";
+    s.base_url = meta.defaultBaseUrl;
+  }
   if (s.provider === "hormachuelos_free") {
+    if (!s.model.trim()) s.model = meta.defaultModel;
+    s.base_url = meta.defaultBaseUrl;
+  }
+  if (meta.hostedManaged && s.provider !== "hormachuelos_free" && s.provider !== "xai") {
     if (!s.model.trim()) s.model = meta.defaultModel;
     s.base_url = meta.defaultBaseUrl;
   }
@@ -449,10 +772,8 @@ export function normalizeSettings(s: Settings): Settings {
     }
   }
   if (s.provider === "openrouter") {
-    // Keep OpenRouter on free models only — never surface paid catalog IDs.
-    if (!String(s.model || "").includes(":free")) {
-      s.model = meta.defaultModel;
-    }
+    // Pin OpenRouter to Free Models Router only.
+    s.model = meta.defaultModel;
   }
   if (s.provider === "pollinations" && s.base_url === "https://text.pollinations.ai/openai") {
     s.base_url = meta.defaultBaseUrl;
@@ -523,6 +844,10 @@ export class SettingsModal {
   async open() {
     this.beginModalSession();
     try {
+      // Pull provider/model aliases before loading settings so a saved custom
+      // provider is recognized instead of being reset to a built-in choice.
+      await refreshHostedProviderCatalog().catch(() => []);
+      if (!this.modalSessionActive) return;
       this.settings = await getSettingsSafe();
     } catch (e) {
       if (!this.modalSessionActive) return;
@@ -541,7 +866,10 @@ export class SettingsModal {
     }).catch(() => null);
     if (!this.modalSessionActive) return;
     for (const p of PROVIDERS) {
-      if (p.keyRequired) {
+      if (p.id === "openrouter") {
+        // Optional BYOK — hosted plans do not need a local OpenRouter key.
+        this.keyStates[p.id] = await api.hasApiKey(p.id).catch(() => false);
+      } else if (p.keyRequired) {
         let has = await api.hasApiKey(p.id).catch(() => false);
         this.keyStates[p.id] = has;
       } else {
@@ -622,7 +950,7 @@ export class SettingsModal {
       // OpenRouter: keep free models only so the picker never floods with paid IDs.
       const discovered =
         providerId === "openrouter"
-          ? modelsRaw.filter((id) => id.includes(":free"))
+          ? ["openrouter/free"]
           : providerId === "glm"
             ? modelsRaw.filter(
                 (id) =>
@@ -740,7 +1068,7 @@ export class SettingsModal {
       });
       card.innerHTML =
         `<img class="provider-card-logo" src="${p.logoSrc}" alt="" width="22" height="22" draggable="false" />` +
-        `<div class="provider-card-meta"><span class="provider-card-name">${p.label}</span></div>`;
+        `<div class="provider-card-meta"><span class="provider-card-name">${escapeHtml(p.label)}</span></div>`;
       card.addEventListener("click", () => {
         const wasSelectedProvider = this.settings.provider === p.id;
         const currentBase = (this.settings.base_url || "").trim();
@@ -818,13 +1146,13 @@ export class SettingsModal {
         sel.disabled = true;
       } else {
         for (const m of models) {
-          const opt = el("option", { value: m }, [displayModelName(m)]);
+          const opt = el("option", { value: m }, [displayModelName(m, uiId)]);
           if (m === this.settings.model) opt.setAttribute("selected", "selected");
           sel.appendChild(opt);
         }
         if (!models.includes(this.settings.model) && this.settings.model) {
           const orphan = el("option", { value: this.settings.model }, [
-            displayModelName(this.settings.model),
+            displayModelName(this.settings.model, uiId),
           ]);
           orphan.setAttribute("selected", "selected");
           sel.appendChild(orphan);
@@ -853,6 +1181,12 @@ export class SettingsModal {
       this.modelDiscoveryMessages[discoveryProvider.id] ||
       (uiIdForKeys === "hormachuelos_free"
         ? "Hormachuelos models are included for signed-in users. No provider key is stored on this computer."
+        : uiIdForKeys === "openrouter"
+        ? "Free Models Router only. An active Hormachuelos plan uses the hosted OpenRouter key — a local key is optional."
+        : uiIdForKeys === "xai" && !this.keyStates[uiIdForKeys]
+        ? "Paste an xAI key for BYOK, or use a signed-in paid plan with hosted Grok enabled by your administrator."
+        : discoveryProvider.hostedManaged
+        ? "Model aliases are managed securely by your administrator and require an active hosted plan. No provider key is stored on this computer."
         : uiIdForKeys === "glm"
         ? "Free OpenCode models only. Get a key at opencode.ai/auth."
         : uiIdForKeys === "ollama"
@@ -866,7 +1200,7 @@ export class SettingsModal {
     body.appendChild(this.field("Base URL (optional)", () => {
       const activeProvider = PROVIDERS.find((provider) => provider.id === this.settings.provider)!;
       const inp = el("input", { class: "field", type: "text", value: this.settings.base_url || "", placeholder: activeProvider.defaultBaseUrl }) as HTMLInputElement;
-      if (activeProvider.id === "hormachuelos_free") {
+      if (activeProvider.id === "hormachuelos_free" || activeProvider.hostedManaged) {
         inp.readOnly = true;
         inp.setAttribute("aria-readonly", "true");
       }
@@ -878,20 +1212,30 @@ export class SettingsModal {
     body.appendChild(this.section("API Key"));
     const activeProvider = PROVIDERS.find((p) => p.id === this.settings.provider)!;
     const keyRow = el("div", { class: "set-row" });
-    if (activeProvider.keyRequired) {
+    const showKeyField = activeProvider.keyRequired || activeProvider.id === "openrouter";
+    if (showKeyField) {
       const keyLabel = el("label", { class: "label" });
       const providerKeyId = this.nextFieldId();
       keyLabel.setAttribute("for", providerKeyId);
       keyLabel.innerHTML =
         `<img class="provider-card-logo sm" src="${activeProvider.logoSrc}" alt="" width="14" height="14" draggable="false" />` +
-        `&nbsp;${activeProvider.label} API key`;
+        `&nbsp;${escapeHtml(activeProvider.label)} API key` +
+        (activeProvider.id === "openrouter" ? " (optional)" : "");
       keyRow.appendChild(keyLabel);
       const inputRow = el("div", { class: "set-key-row" });
       const keyInput = el("input", { id: providerKeyId, class: "field", type: "password", placeholder: "Paste API key", value: "", autocomplete: "off" }) as HTMLInputElement;
       inputRow.appendChild(keyInput);
       const saveBtn = el("button", { class: "btn sm" }, ["Save key"]);
       const statusEl = el("div", { class: `set-status ${this.keyStates[activeProvider.id] ? "set" : "unset"}` });
-      statusEl.textContent = this.keyStates[activeProvider.id] ? "Key saved in OS keychain" : "No key set — paste a provider key above";
+      statusEl.textContent = this.keyStates[activeProvider.id]
+        ? "Key saved in OS keychain"
+        : activeProvider.id === "xai"
+          ? "No local xAI key — a signed-in paid plan can use hosted Grok"
+          : activeProvider.id === "openrouter"
+            ? "No local key needed — Free Models Router uses your Hormachuelos plan"
+            : activeProvider.id === "cursor"
+              ? "No local Cursor key needed — an active Hormachuelos plan uses hosted models"
+              : "No key set — paste a provider key above";
       saveBtn.addEventListener("click", async () => {
         const v = keyInput.value.trim();
         if (!v) return;
@@ -918,7 +1262,7 @@ export class SettingsModal {
           testBtn.setAttribute("disabled", "disabled");
           testBtn.textContent = "Testing…";
           statusEl.className = "set-status unset";
-          statusEl.textContent = `Testing ${displayModelName(this.settings.model)}…`;
+          statusEl.textContent = `Testing ${displayModelName(this.settings.model, activeProvider.id)}…`;
           try {
             const result = await api.testProviderConnection(
               activeProvider.id,
@@ -945,13 +1289,21 @@ export class SettingsModal {
         keyRow.appendChild(clearBtn2);
       }
       if (activeProvider.keyUrl) {
-        keyRow.appendChild(el("div", { class: "set-hint" }, [`Get a key at ${activeProvider.keyUrl}`]));
+        keyRow.appendChild(el("div", { class: "set-hint" }, [
+          activeProvider.id === "openrouter"
+            ? `Optional BYOK at ${activeProvider.keyUrl}. With a Hormachuelos plan, Free Models Router works without a local key.`
+            : activeProvider.id === "cursor"
+              ? `Optional Cursor key at ${activeProvider.keyUrl}. With a Hormachuelos plan, OpenAI works without a local key (uses Hormachuelos v3).`
+              : `Get a key at ${activeProvider.keyUrl}`,
+        ]));
       }
     } else {
       const note = el("div", { class: "set-hint", style: "padding:8px 10px;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--fg-2)" });
       note.textContent = activeProvider.id === "hormachuelos_free"
         ? "Included for signed-in Hormachuelos users. Model credentials are protected by the hosted service and are never bundled with the app."
-        : `${activeProvider.label} does not require an API key. Just pick a model and start building.`;
+        : activeProvider.hostedManaged
+          ? "This provider and its model aliases are managed in the Hormachuelos admin dashboard. Its upstream key stays on the hosted service; sign in with an active hosted plan to use it."
+          : `${activeProvider.label} does not require an API key. Just pick a model and start building.`;
       keyRow.appendChild(note);
     }
     body.appendChild(keyRow);
@@ -963,6 +1315,21 @@ export class SettingsModal {
       inp.addEventListener("input", () => (this.settings.command_timeout_secs = parseInt(inp.value) || 120));
       return inp;
     }));
+
+    body.appendChild(this.field("Smart Agent", () => {
+      const wrap = el("label", { class: "set-check", style: "display:flex;align-items:center;gap:8px;cursor:pointer" });
+      const inp = el("input", { type: "checkbox" }) as HTMLInputElement;
+      inp.checked = this.settings.smart_agent_enabled !== false;
+      inp.addEventListener("change", () => {
+        this.settings.smart_agent_enabled = inp.checked;
+      });
+      wrap.appendChild(inp);
+      wrap.appendChild(document.createTextNode("Keep task plans, automatic recovery, and a final verification check"));
+      return wrap;
+    }));
+    body.appendChild(el("div", { class: "set-hint", style: "margin-top:-6px;margin-bottom:12px" }, [
+      "For build, fix, app, website, software, APK, and release work: keeps the same session moving and checks evidence before the AI says it is done. It never changes your selected provider, model, or API key.",
+    ]));
 
     body.appendChild(this.field("Permission mode", () => {
       const sel = el("select", { class: "field" }) as HTMLSelectElement;
@@ -1023,33 +1390,13 @@ export class SettingsModal {
         const planPct = lic.tokenBudget
           ? Math.max(0, Math.round(((lic.tokenBudget - lic.tokensUsed) / lic.tokenBudget) * 100))
           : 100;
-        const b4 = Math.max(0, Number(lic.window4hBudget) || 0);
         const u4 = Math.max(0, Number(lic.window4hUsed) || 0);
-        const bw = Math.max(0, Number(lic.windowWeekBudget) || 0);
         const uw = Math.max(0, Number(lic.windowWeekUsed) || 0);
-        const p4 = b4 ? Math.max(0, Math.round(((b4 - u4) / b4) * 100)) : 100;
-        const pw = bw ? Math.max(0, Math.round(((bw - uw) / bw) * 100)) : 100;
-        const fmtReset = (iso?: string) => {
-          if (!iso) return "";
-          const t = Date.parse(iso);
-          if (!Number.isFinite(t)) return "";
-          const ms = Math.max(0, t - Date.now());
-          const mins = Math.ceil(ms / 60_000);
-          if (mins < 60) return `${mins}m`;
-          const h = Math.floor(mins / 60);
-          if (h < 48) return `${h}h`;
-          return `${Math.floor(h / 24)}d`;
-        };
-        const r4 = fmtReset(lic.window4hResetsAt);
-        const rw = fmtReset(lic.windowWeekResetsAt);
         const planLabel = displayPlanLabel(lic.plan || "plan");
-        const exp = lic.expiresAt ? ` · expires ${lic.expiresAt}` : "";
         licenseStatus.textContent =
-          `${planLabel}${exp} · Current ${p4}%` +
-          (r4 ? ` (resets ${r4})` : "") +
-          ` · Weekly ${pw}%` +
-          (rw ? ` (resets ${rw})` : "") +
-          ` · Period ${planPct}%`;
+          `${planLabel} · Plan wallet ${planPct}% remaining` +
+          ` · Recent activity: ${u4.toLocaleString()} tokens / 4h, ${uw.toLocaleString()} tokens / 7d` +
+          " · Only the plan wallet controls access.";
         topUpBtn.onclick = () => {
           window.open(lic.topUpUrl || "https://hormachuelos.com/#/pricing", "_blank", "noopener");
         };

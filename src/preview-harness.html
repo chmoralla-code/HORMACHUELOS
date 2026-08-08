@@ -29,7 +29,7 @@
     </div>
     <script type="module">
       import { api } from "./ipc.ts";
-      import { SitePreview } from "./components/site-preview.ts";
+      import { SitePreview, mergePreviewSessionState } from "./components/site-preview.ts";
       import { getProviderMeta, visibleProviders } from "./components/settings.ts";
 
       api.readProjectFile = async (relativePath) => ({
@@ -60,9 +60,28 @@
         size: 512,
         language: "html",
       });
+      // Browser tests do not have the Windows-only bounded preview capture
+      // command. Mirror its successful result so the Design-mode flow can be
+      // exercised end-to-end without granting the harness screen access.
+      window.__previewCaptureRequests = [];
+      api.capturePreviewSelection = async (region) => {
+        window.__previewCaptureRequests.push(region);
+        return "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADElEQVR42mP8z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
+      };
+      api.savePastedImage = async (dataBase64, mime) => {
+        window.__previewSavedImages = window.__previewSavedImages || [];
+        window.__previewSavedImages.push({ dataBase64, mime });
+        return "C:\\preview-fixture\\design-feature-reference.png";
+      };
 
       const preview = new SitePreview(document.getElementById("preview-test-host"));
       window.__preview = preview;
+      window.__previewPrompts = [];
+      preview.setDescribeHandler((prompt) => {
+        window.__previewPrompts.push(prompt);
+        return "sent";
+      });
+      window.__mergePreviewSessionState = mergePreviewSessionState;
       document.body.dataset.providers = visibleProviders().map((provider) => provider.id).join(",");
       document.body.dataset.cursorModels = getProviderMeta("cursor")?.models.join(",") || "";
       document.body.dataset.hormachuelosFreeModels =

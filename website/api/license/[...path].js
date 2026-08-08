@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { corsHeaders, json, readJson, bearerToken } from "../_lib/http.js";
 import {
   getLicenseByKey,
+  getAccountByEmail,
   insertLicense,
   supabaseConfigured,
   updateLicense,
@@ -17,35 +18,39 @@ function actionOf(req) {
   return m ? m[1].toLowerCase() : "";
 }
 
-function issueSecretOk(req, body) {
+function issueSecretOk(req) {
   const expected = process.env.LICENSE_ISSUE_SECRET || "";
-  if (!expected) return true;
+  // License issuance is an internal server action. Never leave a public
+  // fallback that allows a browser to mint a paid license without payment.
+  if (!expected) return false;
   const header = req.headers["x-horma-issue-secret"] || "";
-  return header === expected || body?.issueSecret === expected;
+  return header === expected;
 }
 
-function toStatus(row) {
-  const expiresAt = String(row.expires_at || "").slice(0, 10);
-  const expired = new Date(row.expires_at).getTime() < Date.now();
-  const active = Boolean(row.active) && !expired;
-  const budget = Number(row.token_budget) || planBudget(row.plan);
+function toStatus(row, accountPlan = "") {
+  // Pay-as-you-go paid plans are gated by usage wallet only (no calendar expiry).
+  const plan = normalizePlan(accountPlan || row.plan || "free");
+  const active = Boolean(row.active);
+  const budget = Number(row.token_budget) || planBudget(plan);
   const used = Number(row.tokens_used) || 0;
   let message = active
-    ? `${row.plan} plan active - hosted models via Hormachuelos server.`
-    : expired
-      ? `License expired on ${expiresAt}.`
-      : "License inactive.";
+    ? `${plan} plan active - hosted models via Hormachuelos server.`
+    : "License inactive.";
   if (active && used >= budget) {
     message = "Hosted credits exhausted. Top up or use your own provider key.";
   }
   return {
     ok: active,
-    plan: expired ? "expired" : row.plan,
+    plan,
     active,
-    expiresAt,
+    expiresAt: "",
     email: row.email || "",
     tokenBudget: budget,
     tokensUsed: used,
+    // Keep the desktop's lock state tied to the same server-owned wallet
+    // values that decide a hosted request. Legacy desktop-only 4h/week
+    // counters are intentionally never returned as usage blocks.
+    blockedBy: active && budget > 0 && used >= budget ? "plan" : "",
     licenseKey: row.key,
     topUpUrl: "https://hormachuelos.vercel.app/#/pricing",
     message,
@@ -68,13 +73,13 @@ export default async function handler(req, res) {
   try {
     if (action === "issue" && req.method === "POST") {
       const body = await readJson(req);
-      if (!issueSecretOk(req, body)) return json(res, 401, { error: "Unauthorized" }, req);
+      if (!issueSecretOk(req)) return json(res, 401, { error: "Unauthorized" }, req);
       const plan = normalizePlan(body.planId || body.plan || "starter");
       const email = String(body.email || "").trim().toLowerCase();
-      const days = Number(body.days) > 0 ? Number(body.days) : 30;
       const prefix = licensePrefix(plan);
       const key = `${prefix}-${randomUUID().replace(/-/g, "").slice(0, 12).toUpperCase()}`;
-      const expires = new Date(Date.now() + days * 86400000);
+      // Far-future placeholder — pay-as-you-go ignores calendar expiry.
+      const expires = new Date("2099-12-31T00:00:00.000Z");
       const budget = planBudget(plan);
       const row = await insertLicense({
         key,
@@ -101,7 +106,7 @@ export default async function handler(req, res) {
           email: row.email,
           tokenBudget: Number(row.token_budget),
           tokensUsed: Number(row.tokens_used),
-          expiresAt: row.expires_at.slice(0, 10),
+          expiresAt: "",
           active: row.active,
           message: `${plan} plan issued. Paste this key in Hormachuelos > Settings.`,
         },
@@ -116,16 +121,21 @@ export default async function handler(req, res) {
         key = String(body.key || body.licenseKey || key || "").trim();
       }
       if (!key) return json(res, 400, { error: "Missing license key" }, req);
-      const row = await getLicenseByKey(key);
+      let row = await getLicenseByKey(key);
       if (!row) {
         return json(res, 404, { error: "Unknown license key", ok: false, active: false }, req);
       }
-      const expired = new Date(row.expires_at).getTime() < Date.now();
-      if (expired && row.active) {
-        await updateLicense(row.id, { active: false });
-        row.active = false;
+      let accountPlan = "";
+      if (row.email) {
+        const account = await getAccountByEmail(row.email);
+        if (account?.plan) {
+          accountPlan = normalizePlan(account.plan);
+          if (accountPlan && normalizePlan(row.plan || "") !== accountPlan) {
+            row = (await updateLicense(row.id, { plan: accountPlan })) || { ...row, plan: accountPlan };
+          }
+        }
       }
-      return json(res, 200, toStatus(row), req);
+      return json(res, 200, toStatus(row, accountPlan), req);
     }
 
     return json(res, 404, { error: `Unknown license action: ${action || "(empty)"}` }, req);

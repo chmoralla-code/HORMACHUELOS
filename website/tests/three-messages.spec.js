@@ -43,6 +43,21 @@ async function installMock(page) {
       permission_mode: "auto",
     };
 
+    const defaultLicense = {
+      plan: "pro",
+      active: true,
+      hosted: true,
+      licenseKey: "HORMA-MOCK-PLAN",
+      tokenBudget: 1_000_000,
+      tokensUsed: 10_000,
+      blockedBy: "",
+      topUpUrl: "https://hormachuelos.vercel.app/#/pricing",
+      message: "Pro plan active.",
+    };
+    function licenseSnapshot() {
+      return { ...defaultLicense, ...(window.__HORMA_LICENSE_FIXTURE__ || {}) };
+    }
+
     const tree = {
       nodes: [
         {
@@ -178,6 +193,9 @@ async function installMock(page) {
             return "0.1.5";
           case "get_website_session":
             return "message-test-session";
+          case "get_license_status":
+          case "apply_license_key":
+            return licenseSnapshot();
           case "get_settings":
             return { ...settings };
           case "save_settings":
@@ -196,7 +214,18 @@ async function installMock(page) {
               size: 14,
               language: "ts",
             };
+          case "plugin:dialog|open":
+            if (args.options?.title === "Attach images") {
+              window.__HORMA_LAST_DIALOG_OPTIONS__ = args.options;
+              return Array.isArray(window.__HORMA_IMAGE_PICKER_FIXTURE__)
+                ? window.__HORMA_IMAGE_PICKER_FIXTURE__
+                : null;
+            }
+            return null;
+          case "import_image_path":
+            return String(args.path || "");
           case "agent_run":
+            window.__HORMA_LAST_AGENT_PROMPT__ = args.prompt;
             await simulateAgent(args.prompt, args.sessionId);
             return null;
           case "agent_stop":
@@ -285,6 +314,59 @@ async function sendMessage(page, text) {
   const send = page.getByRole("button", { name: "Send message", exact: true });
   await send.click();
 }
+
+test("legacy burst blocks cannot lock a healthy plan wallet", async ({ page }) => {
+  await page.addInitScript(() => {
+    // Simulates a license.json left by an older desktop release: its legacy
+    // 4-hour marker says blocked and its cached counter says empty, even
+    // though the signed-in account's real wallet still has 90% remaining.
+    window.__HORMA_LICENSE_FIXTURE__ = {
+      tokenBudget: 1_000_000,
+      tokensUsed: 1_000_000,
+      blockedBy: "4h",
+      window4hUsed: 1_000_000,
+      window4hBudget: 200_000,
+      windowWeekUsed: 1_000_000,
+      windowWeekBudget: 500_000,
+    };
+  });
+  await installMock(page);
+  await page.route("https://hormachuelos.vercel.app/api/update?*", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ updateAvailable: false, forceUpdate: false, currentVersion: "0.1.5", latest: null }),
+    }),
+  );
+  await page.route("https://hormachuelos.vercel.app/api/auth/me", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        ok: true,
+        user: {
+          email: "usage-test@example.com",
+          plan: "pro",
+          licenseActive: true,
+          licenseKey: "HORMA-MOCK-PLAN",
+          tokenBudget: 1_000_000,
+          tokensUsed: 100_000,
+        },
+      }),
+    }),
+  );
+
+  await page.goto(APP, { waitUntil: "networkidle" });
+  await openProjectViaUI(page);
+
+  const input = page.locator("#forge-prompt, .composer-input, textarea").first();
+  await expect(input).toBeEnabled({ timeout: 15000 });
+  await expect(page.locator(".composer.usage-exhausted, #forge-dock.usage-exhausted")).toHaveCount(0);
+  await expect(page.locator("[data-sub-meta]")).toContainText("90% usage remaining");
+
+  await sendMessage(page, "Confirm the healthy wallet can still send this message.");
+  await expect(page.locator("#chat")).toContainText("Mock agent reply", { timeout: 10000 });
+});
 
 test("send three messages and get mock agent replies", async ({ page }) => {
   const consoleErrors = [];
@@ -427,4 +509,68 @@ test("send three messages and get mock agent replies", async ({ page }) => {
     (e) => !/unhandled invoke|Failed to load|favicon|vite/i.test(e) && !/mock/i.test(e),
   );
   expect(fatal, fatal.join("\n")).toEqual([]);
+});
+
+test("attaches every image selected together or pasted from Explorer", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__HORMA_IMAGE_PICKER_FIXTURE__ = [
+      "C:\\fixtures\\selected-one.png",
+      "C:\\fixtures\\selected-two.png",
+    ];
+  });
+  await installMock(page);
+  await page.route("https://hormachuelos.vercel.app/api/update?*", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ updateAvailable: false, forceUpdate: false, currentVersion: "0.1.5", latest: null }),
+    }),
+  );
+  await page.route("https://hormachuelos.vercel.app/api/auth/me", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ ok: true, user: { email: "images@example.com", plan: "free" } }),
+    }),
+  );
+  await page.goto(APP, { waitUntil: "networkidle" });
+  await openProjectViaUI(page);
+
+  const input = page.locator("#forge-prompt, .composer-input, textarea").first();
+  await expect(input).toBeEnabled({ timeout: 15000 });
+
+  await page.getByRole("button", { name: "Add modes and attachments" }).click();
+  await page.getByRole("menuitem", { name: "Image", exact: true }).click();
+  await expect(page.locator(".composer-attach-chip")).toHaveCount(2);
+  expect(await page.evaluate(() => window.__HORMA_LAST_DIALOG_OPTIONS__?.multiple)).toBe(true);
+
+  await sendMessage(page, "Compare both selected images.");
+  await expect
+    .poll(() => page.evaluate(() => String(window.__HORMA_LAST_AGENT_PROMPT__ || "")))
+    .toContain("selected-two.png");
+
+  await page.waitForFunction(
+    () => document.querySelector(".send-btn:not(.stop-btn)")?.getAttribute("aria-label") === "Send message",
+    { timeout: 10000 },
+  );
+  await page.evaluate(() => {
+    const input = document.querySelector("#forge-prompt");
+    if (!(input instanceof HTMLTextAreaElement)) throw new Error("Composer input not found");
+    const clipboard = new DataTransfer();
+    clipboard.setData(
+      "text/uri-list",
+      "file:///C:/fixtures/pasted-one.png\r\nfile:///C:/fixtures/pasted-two.png",
+    );
+    input.dispatchEvent(
+      new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: clipboard }),
+    );
+  });
+  await expect(page.locator(".composer-attach-chip")).toHaveCount(2);
+
+  await sendMessage(page, "Compare both Explorer-pasted images.");
+  await expect
+    .poll(() => page.evaluate(() => String(window.__HORMA_LAST_AGENT_PROMPT__ || "")))
+    .toContain("pasted-two.png");
+  const prompt = await page.evaluate(() => String(window.__HORMA_LAST_AGENT_PROMPT__ || ""));
+  expect(prompt.match(/\[Attached image:/g) || []).toHaveLength(2);
 });

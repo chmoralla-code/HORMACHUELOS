@@ -12,12 +12,12 @@ import {
   pollDeviceLink,
   publicAccount,
   publicAccountWithUsage,
-  recordOrder,
   startDeviceLink,
   startEmailVerification,
   verifyEmailCode,
 } from "../_lib/auth.js";
 import { resendConfigured } from "../_lib/resend.js";
+import { listAccountPaymentOrders } from "../_lib/payments.js";
 
 function actionOf(req) {
   const q = req.query?.path;
@@ -192,9 +192,12 @@ export default async function handler(req, res) {
       if (!account) return json(res, 401, { error: "Not signed in" }, req);
 
       if (req.method === "GET") {
-        const [orders, user] = await Promise.all([
+        const [orders, user, paymentRequests] = await Promise.all([
           ordersFor(account.id),
           publicAccountWithUsage(account),
+          // Keep ordinary account sign-in available while a staged deployment
+          // is waiting for the payment migration to be applied.
+          listAccountPaymentOrders(account.id).catch(() => []),
         ]);
         return json(
           res,
@@ -214,6 +217,7 @@ export default async function handler(req, res) {
               demo: o.demo,
               at: o.created_at ? new Date(o.created_at).getTime() : Date.now(),
             })),
+            paymentRequests,
           },
           req,
         );
@@ -221,13 +225,11 @@ export default async function handler(req, res) {
 
       if (req.method === "PATCH") {
         const body = await readJson(req);
-        if (body.order) await recordOrder(account, body.order);
+        // A browser must never be able to grant itself a paid plan, credits,
+        // license key, or order record. Those changes now happen only after a
+        // verified payment request or an authenticated admin decision.
         const updated = await patchAccountProfile(account.id, {
           name: body.name,
-          plan: body.plan,
-          period: body.period,
-          credits: body.credits,
-          licenseKey: body.licenseKey,
         });
         return json(res, 200, { ok: true, user: await publicAccountWithUsage(updated || account) }, req);
       }

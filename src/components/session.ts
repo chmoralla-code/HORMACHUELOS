@@ -1,5 +1,7 @@
 // Session storage and types — persisted to localStorage per project.
 
+import { normalizeAssistantMarkdown } from "./util";
+
 export type SessionMessage =
   | { type: "user"; text: string; at?: number }
   | { type: "thinking"; iteration: number; text: string; at?: number }
@@ -11,6 +13,51 @@ export type SessionMessage =
   | { type: "end"; reason: string; at?: number; workMs?: number }
   | { type: "cancelled"; at?: number; workMs?: number };
 
+/**
+ * The preview workspace belongs to a conversation, rather than to the whole
+ * project.  Only file-relative paths are kept here; live iframe DOM is always
+ * recreated when that session becomes visible again.
+ */
+export interface SessionPreviewTab {
+  entryPath: string;
+  title: string;
+  history: string[];
+  historyIndex: number;
+}
+
+export interface SessionPreviewState {
+  version: 1;
+  projectRoot: string;
+  tabs: SessionPreviewTab[];
+  activeTabIndex: number;
+  designMode: boolean;
+  androidMode: boolean;
+  softwareMode: boolean;
+}
+
+export type SmartAgentStepState = "pending" | "active" | "completed" | "paused";
+
+export interface SmartAgentTaskStep {
+  id: string;
+  label: string;
+  state: SmartAgentStepState;
+}
+
+/**
+ * Per-session orchestration state. Unlike a project preview, this reflects the
+ * current task in one conversation and must never leak into another session.
+ */
+export interface SmartAgentTaskState {
+  version: 1;
+  title: string;
+  summary: string;
+  steps: SmartAgentTaskStep[];
+  activeStep: number;
+  status: "working" | "completed" | "paused";
+  detail: string;
+  updatedAt: number;
+}
+
 export interface Session {
   id: string;
   title: string;
@@ -19,6 +66,33 @@ export interface Session {
   createdAt: number;
   /** Cumulative tokens eaten in this session (all runs). */
   sessionTokens?: number;
+  /** Per-session build preview, restored only while this session is selected. */
+  preview?: SessionPreviewState;
+  /** Per-session Smart Agent plan and its latest progress. */
+  smartAgent?: SmartAgentTaskState;
+  /**
+   * Model chosen for this conversation. The composer is shared UI, but each
+   * session remembers its own provider/model so switching sessions restores it.
+   */
+  preferredProvider?: string;
+  preferredModel?: string;
+  preferredEffort?: string;
+  /**
+   * Cursor SDK agent id for this conversation only. Never reused across
+   * sessions in the same project — keeps chat memory isolated.
+   */
+  cursorAgentId?: string;
+}
+
+/** Keep a background session's saved reply as tidy as the live chat renderer. */
+function normalizeLatestAssistantMessage(messages: SessionMessage[]): void {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.type !== "assistant") continue;
+    const normalized = normalizeAssistantMarkdown(message.text);
+    if (normalized) message.text = normalized;
+    return;
+  }
 }
 
 /**
@@ -47,6 +121,10 @@ const PREFIXED_CREDENTIAL =
   /\b(?:gh[pousr]_[a-z0-9_]{16,}|github_pat_[a-z0-9_]{16,}|glpat-[a-z0-9_-]{16,}|vercel_[a-z0-9_-]{16,}|sk-[a-z0-9_-]{16,}|eyJ[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}\.[a-z0-9_-]{8,})\b/gi;
 const CONTEXTUAL_CREDENTIAL =
   /\b((?:access[\s_-]*)?token|api[\s_-]*key|client[\s_-]*secret|secret|password|bearer)\b(\s*(?:is|=|:)?\s*["']?)[a-z0-9._~+/=-]{12,}["']?/gi;
+const SESSION_PREVIEW_MAX_TABS = 12;
+const SESSION_PREVIEW_MAX_HISTORY = 32;
+const SESSION_PREVIEW_PATH_MAX = 768;
+const SESSION_PREVIEW_ROOT_MAX = 2_048;
 
 /** Keep credentials out of local chat history and provider prompts. */
 export function redactChatCredentials(text: string): string {
@@ -135,6 +213,134 @@ function redactSessionMessage(message: SessionMessage): SessionMessage {
   }
 }
 
+/** Keep persisted preview entries relative to their project and bounded in size. */
+function sanitizePreviewPath(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const raw = value.trim().replace(/\\/g, "/");
+  if (!raw || raw.length > SESSION_PREVIEW_PATH_MAX || raw.includes("\0")) return null;
+  // A live dev server (localhost) can be previewed directly in the iframe.
+  if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(raw)) return raw;
+  if (raw.startsWith("/") || /^[a-z]:/i.test(raw)) return null;
+  const parts: string[] = [];
+  for (const part of raw.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      if (!parts.length) return null;
+      parts.pop();
+      continue;
+    }
+    if (part.includes(":")) return null;
+    parts.push(part);
+  }
+  return parts.length ? parts.join("/") : null;
+}
+
+function sanitizeSessionPreview(value: unknown): SessionPreviewState | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  const projectRoot = typeof raw.projectRoot === "string" ? raw.projectRoot.trim() : "";
+  if (!projectRoot || projectRoot.length > SESSION_PREVIEW_ROOT_MAX || projectRoot.includes("\0")) {
+    return undefined;
+  }
+
+  const tabs: SessionPreviewTab[] = [];
+  const seenEntries = new Set<string>();
+  const rawTabs = Array.isArray(raw.tabs) ? raw.tabs.slice(0, SESSION_PREVIEW_MAX_TABS) : [];
+  for (const candidate of rawTabs) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+    const tab = candidate as Record<string, unknown>;
+    const rawHistory = Array.isArray(tab.history)
+      ? tab.history.slice(0, SESSION_PREVIEW_MAX_HISTORY)
+      : [];
+    const history = rawHistory
+      .map(sanitizePreviewPath)
+      .filter((path): path is string => Boolean(path));
+    const entryPath = sanitizePreviewPath(tab.entryPath) || history[0];
+    if (!entryPath || seenEntries.has(entryPath)) continue;
+    seenEntries.add(entryPath);
+    if (!history.length) history.push(entryPath);
+    const requestedIndex = Math.floor(Number(tab.historyIndex) || 0);
+    const historyIndex = Math.max(0, Math.min(history.length - 1, requestedIndex));
+    const title = typeof tab.title === "string" && tab.title.trim()
+      ? redactChatCredentials(tab.title.trim()).slice(0, 160)
+      : entryPath.split("/").pop() || entryPath;
+    tabs.push({
+      entryPath: history[historyIndex] || entryPath,
+      title,
+      history,
+      historyIndex,
+    });
+  }
+
+  const requestedActive = Math.floor(Number(raw.activeTabIndex) || 0);
+  return {
+    version: 1,
+    projectRoot,
+    tabs,
+    activeTabIndex: tabs.length
+      ? Math.max(0, Math.min(tabs.length - 1, requestedActive))
+      : 0,
+    designMode: raw.designMode === true,
+    androidMode: raw.androidMode === true,
+    softwareMode: raw.softwareMode === true,
+  };
+}
+
+const SMART_AGENT_MAX_STEPS = 8;
+const SMART_AGENT_MAX_TEXT = 300;
+const SMART_AGENT_STEP_IDS = new Set([
+  "scope",
+  "inspect",
+  "implement",
+  "validate",
+  "debug",
+  "deliver",
+]);
+
+function clipSmartAgentText(value: unknown, fallback = ""): string {
+  if (typeof value !== "string") return fallback;
+  const text = redactChatCredentials(value.trim()).replace(/\s+/g, " ");
+  return text.slice(0, SMART_AGENT_MAX_TEXT) || fallback;
+}
+
+/** Bound and sanitize persisted Smart Agent state before restoring it into the UI. */
+export function sanitizeSmartAgentTaskState(value: unknown): SmartAgentTaskState | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  const rawSteps = Array.isArray(raw.steps) ? raw.steps.slice(0, SMART_AGENT_MAX_STEPS) : [];
+  const steps: SmartAgentTaskStep[] = [];
+  const seen = new Set<string>();
+  for (const candidate of rawSteps) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+    const step = candidate as Record<string, unknown>;
+    const id = typeof step.id === "string" ? step.id.trim().toLowerCase() : "";
+    if (!SMART_AGENT_STEP_IDS.has(id) || seen.has(id)) continue;
+    const label = clipSmartAgentText(step.label, id);
+    const requested = typeof step.state === "string" ? step.state : "pending";
+    const state: SmartAgentStepState =
+      requested === "active" || requested === "completed" || requested === "paused"
+        ? requested
+        : "pending";
+    seen.add(id);
+    steps.push({ id, label, state });
+  }
+  if (!steps.length) return undefined;
+  const requestedStatus = typeof raw.status === "string" ? raw.status : "working";
+  const status: SmartAgentTaskState["status"] =
+    requestedStatus === "completed" || requestedStatus === "paused" ? requestedStatus : "working";
+  const requestedStep = Math.floor(Number(raw.activeStep) || 0);
+  return {
+    version: 1,
+    title: clipSmartAgentText(raw.title, "Smart Agent"),
+    summary: clipSmartAgentText(raw.summary),
+    steps,
+    activeStep: Math.max(0, Math.min(steps.length - 1, requestedStep)),
+    status,
+    detail: clipSmartAgentText(raw.detail),
+    updatedAt: Math.max(0, Math.floor(Number(raw.updatedAt) || 0)),
+  };
+}
+
 type ProjectUsageMap = Record<string, number>;
 
 function loadProjectUsageMap(): ProjectUsageMap {
@@ -218,11 +424,30 @@ export function loadSessions(projectId: string): Session[] {
 }
 
 function safeSessionForStorage(session: Session): Session {
+  const preview = sanitizeSessionPreview(session.preview);
+  const smartAgent = sanitizeSmartAgentTaskState(session.smartAgent);
+  const preferredProvider = sanitizeSessionModelId(session.preferredProvider, 64);
+  const preferredModel = sanitizeSessionModelId(session.preferredModel, 200);
+  const preferredEffort = sanitizeSessionModelId(session.preferredEffort, 32);
+  const cursorAgentId = sanitizeSessionModelId(session.cursorAgentId, 128);
   return {
     ...session,
     title: redactChatCredentials(session.title),
     messages: session.messages.map(redactSessionMessage),
+    preview,
+    smartAgent,
+    preferredProvider,
+    preferredModel,
+    preferredEffort,
+    cursorAgentId,
   };
+}
+
+function sanitizeSessionModelId(value: unknown, max: number): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  if (!text || text.length > max || /[\u0000-\u001f\u007f]/.test(text)) return undefined;
+  return text;
 }
 
 /** Write one or more sessions with a single parse/stringify/localStorage cycle. */
@@ -340,7 +565,11 @@ export function newSessionId(): string {
 
 /** Derive a short title from the first user message. */
 export function sessionTitle(prompt: string): string {
-  const trimmed = prompt.trim().replace(/\s+/g, " ");
+  const cleaned = prompt
+    .replace(/\[Attached image:\s*.+?\]/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const trimmed = cleaned || "Image chat";
   return trimmed.length > 48 ? trimmed.slice(0, 48) + "…" : trimmed;
 }
 
@@ -353,10 +582,14 @@ export type LlmHistoryTurn = {
   name?: string;
 };
 
-/** Soft ceiling for history payload — keep as much as practical for long sessions. */
-const HISTORY_MAX_CHARS = 140_000;
-const TOOL_RESULT_MAX = 2_400;
-const ASSISTANT_MAX = 12_000;
+/**
+ * Keep follow-up requests responsive. The backend applies a final compact
+ * history window too, but limiting the IPC payload here prevents old command
+ * output from making desktop sessions slow before the provider is contacted.
+ */
+const HISTORY_MAX_CHARS = 24_000;
+const TOOL_RESULT_MAX = 1_800;
+const ASSISTANT_MAX = 3_000;
 
 function clip(text: string, max: number): string {
   const t = (text || "").trim();
@@ -578,12 +811,15 @@ export function recordAgentEvent(
         features: (e.payload.features || []).map(redactChatCredentials),
         at,
       });
+      normalizeLatestAssistantMessage(messages);
       break;
     case "end":
       messages.push({ type: "end", reason: e.payload.reason, at });
+      normalizeLatestAssistantMessage(messages);
       break;
     case "cancelled":
       messages.push({ type: "cancelled", at });
+      normalizeLatestAssistantMessage(messages);
       break;
     case "question":
       messages.push({

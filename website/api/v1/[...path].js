@@ -4,18 +4,32 @@ import {
   getLicenseByKey,
   getLicenseByEmail,
   getHormachuelosFreeLicenseByEmail,
+  getAccountByEmail,
   insertLicense,
   insertUsageEvent,
   supabaseConfigured,
   updateLicense,
 } from "../_lib/supabase.js";
 import { billableTokens } from "../_lib/plans.js";
-import { resolveHostedModel, resolveUpstream } from "../_lib/providers.js";
+import { resolveHostedModel, resolveUpstream, isCommandCodeUpstream, resolveHormachuelosV4Route, HORMACHUELOS_V4_ALIAS, HORMACHUELOS_V4_DISPLAY_NAME } from "../_lib/providers.js";
+import { COMMANDCODE_PROVIDER, publicHostedProviderCatalog } from "../_lib/hosted-model-configs.js";
+import {
+  buildCommandCodeRequest,
+  commandCodeGenerateUrl,
+  commandCodeHeaders,
+  relayCommandCodeStream,
+} from "../_lib/commandcode-proxy.js";
 import { accountFromRequest } from "../_lib/auth.js";
+import {
+  accountAccessDeniedMessage,
+  accountAccessFromRow,
+  filterCatalogByAccountAccess,
+} from "../_lib/user-access.js";
 
 export const config = {
   api: { bodyParser: false },
-  maxDuration: 60,
+  // Long continue/session turns need more than the hobby default; Pro allows 300s.
+  maxDuration: 300,
 };
 
 const HORMACHUELOS_FREE_PROVIDER = "hormachuelos_free";
@@ -151,12 +165,102 @@ async function authenticatedFreeEntitlement(req) {
   return freeEntitlementFor(account);
 }
 
+/** Resolve optional per-account provider/model allowlists for this request. */
+async function resolveAccountAccess(req, license) {
+  const sessionAccount = await accountFromRequest(req);
+  if (sessionAccount) return accountAccessFromRow(sessionAccount);
+  const email = String(license?.email || "").trim().toLowerCase();
+  if (!email) return accountAccessFromRow(null);
+  try {
+    const account = await getAccountByEmail(email);
+    return accountAccessFromRow(account);
+  } catch {
+    return accountAccessFromRow(null);
+  }
+}
+
+/**
+ * Return the provider/model aliases that this desktop installation may use.
+ * This is intentionally a catalog only: it never contains upstream model ids,
+ * base URLs, or any server credential. HORMACHUELOS FREE aliases use the
+ * signed-in account path; all other managed provider aliases require a paid
+ * Hormachuelos license just like the existing hosted proxy.
+ */
+async function handleCatalog(req, res) {
+  if (req.method !== "GET") return json(res, 405, { error: "Method not allowed" }, req);
+
+  const accountEntitlement = await authenticatedFreeEntitlement(req);
+  const licenseKey = bearerToken(req);
+  const bearerLicense = licenseKey ? await getLicenseByKey(licenseKey) : null;
+  const paidAccess = isUsablePaidLicense(accountEntitlement) || isUsablePaidLicense(bearerLicense);
+
+  if (!accountEntitlement && !paidAccess) {
+    return json(res, 401, { error: "Sign in or activate a hosted plan to load model aliases." }, req);
+  }
+
+  const catalog = await publicHostedProviderCatalog();
+  const available = [];
+  for (const provider of catalog) {
+    if (provider.id === COMMANDCODE_PROVIDER) continue;
+    if (provider.id === HORMACHUELOS_FREE_PROVIDER) {
+      if (!accountEntitlement && !paidAccess) continue;
+      const models = Array.isArray(provider.models) ? [...provider.models] : [];
+      if (!models.some((model) => model.id === HORMACHUELOS_V4_ALIAS)) {
+        const v4 = await resolveHormachuelosV4Route();
+        if (v4) {
+          models.push({ id: HORMACHUELOS_V4_ALIAS, label: HORMACHUELOS_V4_DISPLAY_NAME });
+        }
+      }
+      available.push({ ...provider, models });
+      continue;
+    }
+    if (paidAccess) available.push(provider);
+  }
+  // Offline / empty managed catalog: still advertise FREE V4 when Command Code is configured.
+  if (
+    !available.some((provider) => provider.id === HORMACHUELOS_FREE_PROVIDER) &&
+    (accountEntitlement || paidAccess)
+  ) {
+    const v4 = await resolveHormachuelosV4Route();
+    if (v4) {
+      available.unshift({
+        id: HORMACHUELOS_FREE_PROVIDER,
+        label: "HORMACHUELOS FREE",
+        models: [{ id: HORMACHUELOS_V4_ALIAS, label: HORMACHUELOS_V4_DISPLAY_NAME }],
+      });
+    }
+  }
+
+  const access = await resolveAccountAccess(req, accountEntitlement || bearerLicense);
+  const filtered = filterCatalogByAccountAccess(available, access);
+  return json(
+    res,
+    200,
+    {
+      object: "list",
+      data: filtered,
+      // Desktop must treat this catalog as exclusive when true (no builtin
+      // provider/model fallbacks that would ignore the admin allowlist).
+      restricted: Boolean(access?.restricted),
+    },
+    req,
+  );
+}
+
 async function handleModels(req, res) {
   if (req.method !== "GET") return json(res, 405, { error: "Method not allowed" }, req);
   const provider = String(req.headers["x-horma-provider"] || "openrouter").toLowerCase();
+  let license = null;
   if (provider === HORMACHUELOS_FREE_PROVIDER) {
-    const freeLicense = await authenticatedFreeEntitlement(req);
-    if (!freeLicense) return json(res, 401, { error: "Sign in to use HORMACHUELOS FREE." }, req);
+    license = await authenticatedFreeEntitlement(req);
+    if (!license) {
+      const licenseKey = bearerToken(req);
+      const paid = licenseKey ? await getLicenseByKey(licenseKey) : null;
+      if (!isUsablePaidLicense(paid)) {
+        return json(res, 401, { error: "Sign in to use HORMACHUELOS FREE." }, req);
+      }
+      license = paid;
+    }
     const upstream = await resolveUpstream(provider);
     if (upstream.error) {
       return json(res, 503, { error: "HORMACHUELOS FREE is temporarily unavailable." }, req);
@@ -164,18 +268,38 @@ async function handleModels(req, res) {
     const modelIds = upstream.modelRoutes?.length
       ? upstream.modelRoutes.map((route) => route.alias)
       : Object.keys(upstream.modelAliases || {});
+    const access = await resolveAccountAccess(req, license);
+    const allowed = modelIds.filter((id) => !accountAccessDeniedMessage(access, provider, id));
     return json(res, 200, {
       object: "list",
-      data: modelIds.map((id) => ({ id, object: "model", owned_by: "hormachuelos" })),
+      data: allowed.map((id) => ({ id, object: "model", owned_by: "hormachuelos" })),
     }, req);
   }
   const licenseKey = bearerToken(req);
   if (!licenseKey) return json(res, 401, { error: "Missing license key" }, req);
-  const license = await getLicenseByKey(licenseKey);
+  license = await getLicenseByKey(licenseKey);
   if (!license?.active) return json(res, 403, { error: "Invalid license" }, req);
 
   const upstream = await resolveUpstream(provider);
   if (upstream.error) return json(res, 400, { error: upstream.error }, req);
+
+  // Managed providers deliberately expose only their configured aliases.
+  // Do not proxy the upstream /models catalogue: it could reveal models that
+  // the desktop is intentionally not permitted to invoke using a shared key.
+  const configuredModelIds = upstream.modelRoutes?.length
+    ? upstream.modelRoutes.map((route) => route.alias)
+    : Object.keys(upstream.modelAliases || {});
+  if (configuredModelIds.length) {
+    const access = await resolveAccountAccess(req, license);
+    if (access?.restricted && !(access.providers || []).includes(provider)) {
+      return json(res, 200, { object: "list", data: [] }, req);
+    }
+    const allowed = configuredModelIds.filter((id) => !accountAccessDeniedMessage(access, provider, id));
+    return json(res, 200, {
+      object: "list",
+      data: allowed.map((id) => ({ id, object: "model", owned_by: provider })),
+    }, req);
+  }
 
   const upstreamRes = await fetch(`${upstream.base}/models`, {
     headers: {
@@ -208,28 +332,59 @@ async function handleChat(req, res) {
   let license;
   if (isHormachuelosFree) {
     license = await authenticatedFreeEntitlement(req);
-    if (!license) return json(res, 401, { error: "Sign in to use HORMACHUELOS FREE." }, req);
-  } else {
-    const licenseKey = bearerToken(req);
-    if (!licenseKey) {
-      return json(res, 401, { error: "Missing license key (Authorization: Bearer HORMA-…)" }, req);
+    if (!license) {
+      // Paid plan holders can use Hormachuelos aliases with their HORMA license key
+      // (same Bearer used for other hosted providers) without a separate free meter.
+      const licenseKey = bearerToken(req);
+      const paid = licenseKey ? await getLicenseByKey(licenseKey) : null;
+      if (!isUsablePaidLicense(paid)) {
+        return json(res, 401, { error: "Sign in to use HORMACHUELOS FREE." }, req);
+      }
+      license = paid;
     }
-    license = await getLicenseByKey(licenseKey);
+  } else {
+    // Paid providers normally require a HORMA- license key as Bearer. A
+    // signed-in website account (device-link session) is also accepted for
+    // hosted-managed providers: the account's linked license resolves the plan.
+    //
+    // Command Code is an exception: FREE / signed-in accounts may use it for
+    // vision (and Hormachuelos v4's shared key) without a paid wallet.
+    let licenseKey = bearerToken(req);
+    license = licenseKey ? await getLicenseByKey(licenseKey) : null;
+    const allowCommandCodeFree = providerHint === "commandcode";
+    if (
+      (!license || !license.active || license.plan === HORMACHUELOS_FREE_PROVIDER) &&
+      allowCommandCodeFree
+    ) {
+      const account = await accountFromRequest(req);
+      if (account) {
+        license = await authenticatedFreeEntitlement(req);
+      }
+    }
+    const freeOkForCommandCode =
+      allowCommandCodeFree &&
+      license &&
+      license.active &&
+      license.plan === HORMACHUELOS_FREE_PROVIDER;
     if (
       !license ||
       !license.active ||
-      license.plan === HORMACHUELOS_FREE_PROVIDER
+      (license.plan === HORMACHUELOS_FREE_PROVIDER && !freeOkForCommandCode)
     ) {
       return json(res, 403, { error: "Invalid or inactive license" }, req);
     }
   }
-  if (new Date(license.expires_at).getTime() < Date.now()) {
-    return json(res, 403, { error: "License expired" }, req);
-  }
+  // Paid plans are pay-as-you-go (usage wallet). Free entitlement still has its own period check above.
   const budget = Number(license.token_budget) || 0;
   const used = Number(license.tokens_used) || 0;
   if (budget > 0 && used >= budget) {
-    return json(res, 402, { error: "Hosted credits exhausted" }, req);
+    return json(res, 402, {
+      error: "Hosted credits exhausted",
+      code: "usage_exhausted",
+      blockedBy: "plan",
+      tokenBudget: budget,
+      tokensUsed: used,
+    }, req);
   }
 
   const upstream = await resolveUpstream(providerHint);
@@ -245,6 +400,12 @@ async function handleChat(req, res) {
   }
 
   const requestedModel = body.model || (isHormachuelosFree ? HORMACHUELOS_FREE_MODEL : "deepseek/deepseek-chat");
+  const access = await resolveAccountAccess(req, license);
+  const visionAssist = String(req.headers["x-horma-vision-assist"] || "").trim() === "1";
+  const accessDenied = accountAccessDeniedMessage(access, providerHint, requestedModel, {
+    visionAssist,
+  });
+  if (accessDenied) return json(res, 403, { error: accessDenied, code: "provider_restricted" }, req);
   const modelResolution = resolveHostedModel(upstream, requestedModel);
   if (modelResolution.error) return json(res, 400, { error: modelResolution.error }, req);
   const model = modelResolution.requestedModel;
@@ -259,6 +420,33 @@ async function handleChat(req, res) {
   }
 
   async function requestUpstream(route) {
+    // Command Code is not OpenAI-compatible: translate the OpenAI-style body
+    // into the /alpha/generate envelope and send the gateway's required
+    // headers. Detect by upstream host so FREE aliases (Hormachuelos v4) can
+    // reuse the existing Command Code credential without a second provider.
+    const useCommandCode = isCommandCodeUpstream(route.baseUrl) || providerHint === "commandcode";
+    if (useCommandCode) {
+      const ccBody = buildCommandCodeRequest({
+        model: route.upstreamModel,
+        messages: forwardBody.messages,
+        tools: forwardBody.tools,
+        system: forwardBody.system,
+        maxTokens: forwardBody.max_tokens || forwardBody.max_completion_tokens,
+        temperature: forwardBody.temperature,
+        reasoningEffort: forwardBody.reasoning_effort,
+      });
+      const response = await fetch(commandCodeGenerateUrl(route.baseUrl), {
+        method: "POST",
+        headers: commandCodeHeaders(route.apiKey),
+        body: JSON.stringify(ccBody),
+      });
+      return {
+        response,
+        errorText: response.ok ? "" : await response.text(),
+        route,
+        isCommandCodeRoute: true,
+      };
+    }
     const routeBody = { ...forwardBody, model: route.upstreamModel };
     const response = await fetch(`${route.baseUrl}/chat/completions`, {
       method: "POST",
@@ -274,16 +462,25 @@ async function handleChat(req, res) {
       response,
       errorText: response.ok ? "" : await response.text(),
       route,
+      isCommandCodeRoute: false,
     };
   }
 
-  const primaryRoute = {
+  let primaryRoute = {
     upstreamModel: modelResolution.upstreamModel,
     baseUrl: modelResolution.base || upstream.base,
     apiKey: modelResolution.apiKey || upstream.apiKey,
     headers: modelResolution.headers || {},
   };
   let upstreamAttempt = await requestUpstream(primaryRoute);
+  // One quick retry on transient gateway failures before switching routes.
+  if (
+    !upstreamAttempt.response.ok &&
+    [502, 503, 504].includes(upstreamAttempt.response.status)
+  ) {
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    upstreamAttempt = await requestUpstream(primaryRoute);
+  }
   if (
     isHormachuelosFree &&
     shouldUseHostedFallback(upstreamAttempt.response, upstreamAttempt.errorText)
@@ -309,6 +506,59 @@ async function handleChat(req, res) {
   const upstreamRes = upstreamAttempt.response;
 
   if (!stream) {
+    // Command Code always streams NDJSON upstream; translate the streamed
+    // events into a single OpenAI-style JSON response for non-stream clients.
+    if (upstreamAttempt.isCommandCodeRoute) {
+      if (!upstreamRes.ok) {
+        return json(
+          res,
+          upstreamRes.status,
+          { error: "Upstream error", detail: (upstreamAttempt.errorText || "").slice(0, 800) },
+          req,
+        );
+      }
+      let textOut = "";
+      let usageRaw = 0;
+      const toolCalls = [];
+      await relayCommandCodeStream({
+        reader: upstreamRes.body.getReader(),
+        onSse: (line) => {
+          try {
+            const parsed = JSON.parse(line.replace(/^data: /, "").trim());
+            const delta = parsed?.choices?.[0]?.delta;
+            if (delta?.content) textOut += delta.content;
+            if (Array.isArray(delta?.tool_calls)) {
+              for (const tc of delta.tool_calls) {
+                toolCalls.push({
+                  id: tc.id || "call",
+                  type: "function",
+                  function: { name: tc.function?.name || "", arguments: tc.function?.arguments || "{}" },
+                });
+              }
+            }
+            const usage = parsed?.usage?.total_tokens;
+            if (usage) usageRaw = Math.max(usageRaw, usage);
+          } catch { /* ignore */ }
+        },
+      });
+      const data = {
+        id: `chatcmpl-horma-cc-${Date.now()}`,
+        object: "chat.completion",
+        model,
+        choices: [{
+          index: 0,
+          message: { role: "assistant", content: textOut, tool_calls: toolCalls.length ? toolCalls : undefined },
+          finish_reason: toolCalls.length ? "tool_calls" : "stop",
+        }],
+        usage: { total_tokens: usageRaw },
+      };
+      await recordUsage(license, providerHint, model, usageRaw || 500);
+      for (const [k, v] of Object.entries(corsHeaders(req))) res.setHeader(k, v);
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/json");
+      res.setHeader("X-Horma-Tokens-Used", String(license.tokens_used));
+      return res.end(JSON.stringify(data));
+    }
     const text = upstreamRes.ok ? await upstreamRes.text() : upstreamAttempt.errorText;
     let data;
     try {
@@ -376,6 +626,17 @@ async function handleChat(req, res) {
   res.setHeader("Connection", "keep-alive");
   res.setHeader("X-Accel-Buffering", "no");
 
+  // Command Code streams NDJSON events; translate them into OpenAI SSE so the
+  // desktop client can consume the stream exactly like any other provider.
+  if (upstreamAttempt.isCommandCodeRoute) {
+    const usageRaw = await relayCommandCodeStream({
+      reader: upstreamRes.body.getReader(),
+      onSse: (line) => res.write(line),
+    });
+    await recordUsage(license, providerHint, model, usageRaw || 800);
+    return res.end();
+  }
+
   const reader = upstreamRes.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -422,6 +683,7 @@ export default async function handler(req, res) {
   try {
     const parts = pathParts(req);
     const joined = parts.join("/");
+    if (joined === "catalog" || parts[0] === "catalog") return handleCatalog(req, res);
     if (joined === "models" || parts[0] === "models") return handleModels(req, res);
     if (joined === "chat/completions" || (parts[0] === "chat" && parts[1] === "completions")) {
       return handleChat(req, res);

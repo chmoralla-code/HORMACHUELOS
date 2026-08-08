@@ -1,0 +1,168 @@
+/* Compact Smart Agent strip above chat — short step words only. */
+.smart-agent-status {
+  position: absolute;
+  z-index: 12;
+  top: 8px;
+  right: 0;
+  left: 0;
+  width: min(520px, calc(100% - 24px));
+  margin: 0 auto;
+  pointer-events: none;
+}
+
+.stage:has(.smart-agent-status:not([hidden])) .chat {
+  padding-top: 56px;
+  scroll-padding-top: 56px;
+}
+
+.smart-agent-card {
+  padding: 6px 10px;
+  border: 1px solid rgba(110, 175, 255, 0.18);
+  border-radius: 999px;
+  background: rgba(18, 22, 30, 0.78);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.14);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: nowrap;
+}
+
+.smart-agent-card.smart-agent-completed {
+  border-color: rgba(120, 210, 160, 0.22);
+}
+
+.smart-agent-card.smart-agent-paused {
+  border-color: rgba(235, 184, 100, 0.22);
+}
+
+.smart-agent-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.smart-agent-title {
+  color: var(--text-muted);
+  font-family: var(--font-display);
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.smart-agent-badge {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border: 1px solid rgba(125, 185, 255, 0.2);
+  border-radius: 999px;
+  color: rgba(180, 215, 255, 0.9);
+  background: rgba(70, 125, 230, 0.1);
+  font-family: var(--font-mono);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.smart-agent-badge.completed {
+  border-color: rgba(120, 210, 160, 0.22);
+  color: rgba(175, 235, 195, 0.9);
+  background: rgba(70, 170, 120, 0.1);
+}
+
+.smart-agent-badge.paused {
+  border-color: rgba(235, 184, 100, 0.22);
+  color: rgba(245, 210, 150, 0.9);
+  background: rgba(185, 125, 55, 0.1);
+}
+
+.smart-agent-steps {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.smart-agent-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  padding: 2px 5px;
+  border-radius: 999px;
+  color: var(--text-faint);
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+
+.smart-agent-step-mark {
+  display: inline-grid;
+  place-items: center;
+  width: 10px;
+  height: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 8px;
+  line-height: 1;
+}
+
+.smart-agent-step.completed { color: rgba(190, 235, 205, 0.88); }
+.smart-agent-step.completed .smart-agent-step-mark {
+  border-color: rgba(120, 210, 160, 0.34);
+  color: rgba(190, 245, 210, 0.95);
+  background: rgba(70, 170, 120, 0.12);
+}
+
+.smart-agent-step.active {
+  color: rgba(205, 225, 255, 0.96);
+  background: rgba(70, 125, 230, 0.12);
+}
+.smart-agent-step.active .smart-agent-step-mark {
+  border-color: rgba(120, 185, 255, 0.5);
+  color: #d7ebff;
+  background: rgba(70, 125, 230, 0.18);
+}
+
+.smart-agent-step.paused { color: rgba(245, 210, 150, 0.9); }
+.smart-agent-step.paused .smart-agent-step-mark {
+  border-color: rgba(235, 184, 100, 0.4);
+  color: rgba(255, 222, 170, 0.95);
+  background: rgba(185, 125, 55, 0.14);
+}
+
+/* Summary/detail intentionally unused in the compact strip. */
+.smart-agent-summary,
+.smart-agent-detail,
+.smart-agent-spark {
+  display: none;
+}
+
+@media (max-width: 640px) {
+  .smart-agent-status {
+    width: calc(100% - 16px);
+    top: 6px;
+  }
+  .stage:has(.smart-agent-status:not([hidden])) .chat {
+    padding-top: 50px;
+    scroll-padding-top: 50px;
+  }
+  .smart-agent-title { display: none; }
+  .smart-agent-card { padding: 5px 8px; gap: 6px; }
+  .smart-agent-step { padding: 2px 4px; font-size: 8px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .smart-agent-step.active .smart-agent-step-mark { box-shadow: none; }
+}

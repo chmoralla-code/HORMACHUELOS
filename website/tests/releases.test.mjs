@@ -21,6 +21,8 @@ test("bundled release supersedes an older database release", () => {
   });
   assert.equal(release.version, builtin.version);
   assert.equal(release.msiUrl, builtin.msiUrl);
+  assert.match(release.msiUrl, /^https:\/\/hormachuelos\.vercel\.app\/downloads\/Hormachuelos_\d+\.\d+\.\d+_x64_en-US\.msi$/);
+  assert.match(release.exeUrl, /^https:\/\/hormachuelos\.vercel\.app\/downloads\/Hormachuelos_\d+\.\d+\.\d+_x64-setup\.exe$/);
   assert.match(release.msiSha256, /^[a-f0-9]{64}$/);
   assert.match(release.exeSha256, /^[a-f0-9]{64}$/);
 });
@@ -45,5 +47,11 @@ test("database releases remain authoritative at the same or newer version", () =
 test("bundled release never exposes a credential", () => {
   const release = builtinLatestRelease();
   assert.match(release.version, /^\d+\.\d+\.\d+$/);
-  assert.equal(JSON.stringify(release).includes("sk-"), false);
+  // A SHA-256 checksum is allowed to contain the characters `sk-` in the
+  // middle by chance. Detect a real credential-shaped token instead of
+  // rejecting a valid installer checksum through a substring collision.
+  assert.doesNotMatch(
+    JSON.stringify(release),
+    /(?:^|[^A-Za-z0-9_-])sk-[A-Za-z0-9_-]{16,}/,
+  );
 });

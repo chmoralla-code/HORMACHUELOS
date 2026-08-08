@@ -2,11 +2,19 @@ import { api, onAgentEvent, onComputerUseFx, onComputerUseStatus, type AgentEven
 import { Sidebar } from "./components/sidebar";
 import { Chat } from "./components/chat";
 import { ConsolePanel } from "./components/console";
-import { SettingsModal, displayModelName, displayProviderName, getProviderMeta, getSettingsSafe } from "./components/settings";
+import { displayModelName, displayProviderName, getProviderMeta, getSettingsSafe, isHostedCatalogRestricted, visibleProviders } from "./components/settings";
 import { ModelBar } from "./components/modelbar";
 import { ProjectPicker } from "./components/picker";
 import { WorkspacePanel } from "./components/workspace";
-import { SitePreview, isPreviewableBuild, pickPreviewEntry } from "./components/site-preview";
+import { SmartAgentPanel, applySmartAgentEvent } from "./components/smart-agent";
+import { ClientSuccessCenter, composeProjectMissionPrompt } from "./components/client-success-center";
+import {
+  SitePreview,
+  isExternalPreviewUrl,
+  isPreviewableBuild,
+  mergePreviewSessionState,
+  pickPreviewEntry,
+} from "./components/site-preview";
 import { mountComputerUseHud, updateComputerUseHud, clearComputerUseHud } from "./components/computer-use-hud";
 import {
   ensureWebsiteSession,
@@ -40,10 +48,11 @@ import { icon } from "./components/icons";
 let sidebar: Sidebar;
 let chat: Chat;
 let consolePanel: ConsolePanel;
-let settingsModal: SettingsModal;
 let modelBar: ModelBar;
 let workspacePanel: WorkspacePanel;
 let sitePreview: SitePreview;
+let smartAgentPanel: SmartAgentPanel | null = null;
+let clientSuccessCenter: ClientSuccessCenter | null = null;
 let currentProjectPath: string | null = null;
 let sessions: Session[] = [];
 let activeSessionId: string | null = null;
@@ -51,8 +60,15 @@ let activeSessionId: string | null = null;
 const sessionRegistry = new Map<string, Session>();
 /** Session ids with an in-flight agent run (multiple can run at once). */
 const runningSessions = new Set<string>();
+/** Exact provider/model profile captured when each in-flight run starts. */
+const runModelProfiles = new Map<
+  string,
+  { provider: string; model: string; effort?: string }
+>();
 /** Each run keeps its original workspace even when the visible project changes. */
 const runProjectPaths = new Map<string, string>();
+/** The user's prompt for each in-flight run — used to gate auto-opening the preview. */
+const runPrompts = new Map<string, string>();
 /** Files created/edited during a run — used to auto-open the build preview. */
 const runTouchedFiles = new Map<string, Set<string>>();
 /** Snapshot of project files at run start (relative paths). */
@@ -191,6 +207,8 @@ function htmlPathFromOpenArgs(
     (typeof args.url === "string" && args.url) ||
     "";
   if (!raw) return null;
+  // A live dev server (localhost) can be previewed directly in the iframe.
+  if (isExternalPreviewUrl(raw)) return raw.trim();
   const rel = toProjectRelPath(raw.replace(/^file:\/\/\/?/i, ""), projectRoot);
   if (/\.html?$/i.test(rel) || /\.html?$/i.test(raw)) return rel;
   return null;
@@ -202,35 +220,122 @@ async function openBuildPreview(opts: {
   title?: string;
   sessionId?: string;
   projectRoot?: string | null;
+  /** When false, open a blank preview shell (no auto-picked HTML). Default true. */
+  autoPickEntry?: boolean;
 }) {
   if (!currentProjectPath || !sitePreview) return;
   if (opts.projectRoot && !sameProjectPath(opts.projectRoot, currentProjectPath)) return;
+  const projectRoot = opts.projectRoot || currentProjectPath;
+  const targetSessionId = opts.sessionId || activeSessionId || undefined;
   if (opts.sessionId) {
-    if (previewOpenedForRun.has(opts.sessionId) && sitePreview.isOpen) return;
+    const storedPreview = sessionForId(opts.sessionId)?.preview;
+    const targetAlreadyOpen = opts.sessionId === activeSessionId
+      ? sitePreview.isOpen
+      : Boolean(storedPreview && sameProjectPath(storedPreview.projectRoot, projectRoot));
+    if (previewOpenedForRun.has(opts.sessionId) && targetAlreadyOpen) return;
     previewOpenedForRun.add(opts.sessionId);
   }
   let files = opts.files || [];
   if (!files.length) {
-    files = [...(await snapshotProjectFiles(opts.projectRoot || currentProjectPath))];
+    files = [...(await snapshotProjectFiles(projectRoot))];
   }
-  const entry = opts.entryPath || pickPreviewEntry(files);
+  const autoPick = opts.autoPickEntry !== false;
+  const entry = opts.entryPath || (autoPick ? pickPreviewEntry(files) : null);
+  const targetSession = sessionForId(targetSessionId);
+
+  // A background agent may finish a game or app while the user is reading a
+  // different session. Store its preview on its own session, but never mount it
+  // into the currently visible session's iframe panel.
+  if (targetSessionId && targetSessionId !== activeSessionId) {
+    if (!targetSession || !sameProjectPath(targetSession.projectId, projectRoot)) return;
+    targetSession.preview = mergePreviewSessionState(targetSession.preview, {
+      projectRoot,
+      files,
+      entryPath: entry,
+      title: opts.title || "Build preview",
+    });
+    sessionRegistry.set(targetSession.id, targetSession);
+    saveSession(targetSession);
+    return;
+  }
+
   await sitePreview.open({
-    projectRoot: currentProjectPath,
+    projectRoot,
     files,
     entryPath: entry,
     title: opts.title || "Build preview",
+    autoPickEntry: autoPick,
   });
+  // The component emits this itself for regular UI actions. Persist here too so
+  // an automatically opened preview is durable even if a view transition raced it.
+  if (targetSessionId && targetSessionId === activeSessionId) {
+    persistPreviewForSession(targetSessionId, sitePreview.captureSessionState());
+  }
+}
+
+/**
+ * A build only auto-opens the preview when the user's own request points at
+ * something previewable (a website, page, app, game, UI, etc.). Plain code
+ * tasks ("fix this bug", "add a function") must never pop the preview open.
+ */
+function promptAsksForPreview(prompt: string | undefined): boolean {
+  const text = (prompt || "").toLowerCase();
+  if (!text) return false;
+  const previewIntent = [
+    "website",
+    "web site",
+    "webpage",
+    "web page",
+    "site",
+    "landing",
+    "homepage",
+    "home page",
+    "page",
+    "preview",
+    "html",
+    "css",
+    "frontend",
+    "front-end",
+    "ui",
+    "interface",
+    "dashboard",
+    "portfolio",
+    "game",
+    "app",
+    "application",
+    "screen",
+    "form",
+    "design",
+    "template",
+    "mockup",
+    "blog",
+    "store",
+    "shop",
+    "ecommerce",
+    "e-commerce",
+    "pos",
+    "booking",
+    "crm",
+    "landing page",
+  ];
+  return previewIntent.some((word) => text.includes(word));
 }
 
 async function maybeOpenBuildPreview(sessionId: string | undefined, reason: string) {
   if (!sessionId || reason === "cancelled" || !currentProjectPath) return;
+  // Only auto-open when the user explicitly asked for something previewable.
+  if (!promptAsksForPreview(runPrompts.get(sessionId))) return;
   const runProjectPath = runProjectPaths.get(sessionId);
   if (runProjectPath && !sameProjectPath(runProjectPath, currentProjectPath)) {
     runTouchedFiles.delete(sessionId);
     runBaselineFiles.delete(sessionId);
     return;
   }
-  if (previewOpenedForRun.has(sessionId) && sitePreview?.isOpen) {
+  const storedPreview = sessionForId(sessionId)?.preview;
+  const sessionPreviewOpen = sessionId === activeSessionId
+    ? sitePreview?.isOpen
+    : Boolean(storedPreview && sameProjectPath(storedPreview.projectRoot, runProjectPath || currentProjectPath));
+  if (previewOpenedForRun.has(sessionId) && sessionPreviewOpen) {
     runTouchedFiles.delete(sessionId);
     runBaselineFiles.delete(sessionId);
     return;
@@ -265,6 +370,19 @@ async function maybeOpenBuildPreview(sessionId: string | undefined, reason: stri
   });
 }
 
+/**
+ * `end` only means that an agent turn stopped. It may be an ordinary prose
+ * answer, a timeout, an error, a cancellation, or a continuation safety
+ * guard. The audible cue is reserved for a real completion handshake.
+ */
+function isVerifiedAgentCompletion(e: AgentEvent): boolean {
+  return e.kind === "done" || (e.kind === "end" && e.payload.reason === "completed");
+}
+
+function isTerminalAgentEvent(e: AgentEvent): boolean {
+  return e.kind === "done" || e.kind === "end" || e.kind === "cancelled";
+}
+
 function refreshSidebar() {
   const runningProjectPaths = new Set(
     [...runningSessions]
@@ -276,16 +394,178 @@ function refreshSidebar() {
 }
 
 function updateGlobalRunStatus() {
+  syncActiveSessionModelLock();
   const n = runningSessions.size;
   if (n === 0) sidebar.setStatus("Ready", false);
   else if (n === 1) sidebar.setStatus("Running", true);
   else sidebar.setStatus(`${n} runs`, true);
 }
 
+/**
+ * The model selector is shared UI, but each session remembers its own
+ * provider/model. While the selected session is busy, lock to the model that
+ * started that run. Idle sessions restore their preferred model on switch.
+ */
+function syncActiveSessionModelLock() {
+  if (typeof modelBar === "undefined" || typeof chat === "undefined") return;
+  const profile = activeSessionId ? runModelProfiles.get(activeSessionId) || null : null;
+  modelBar.setActiveSessionRunProfile(profile);
+  if (profile) {
+    chat.setReplyProfile({
+      provider: profile.provider,
+      model: profile.model,
+      effort: profile.effort,
+    });
+  } else if (modelBar.settings) {
+    chat.setReplyProfile({
+      provider: modelBar.settings.provider,
+      model: modelBar.settings.model,
+      effort: modelBar.settings.model_effort,
+    });
+  }
+}
+
+/** Save the composer's current model onto the active idle session. */
+let sessionModelRestoreGeneration = 0;
+let sessionModelRestoring = false;
+
+function persistActiveSessionModelPreference() {
+  if (typeof modelBar === "undefined") return;
+  const session = sessionForId(activeSessionId);
+  if (!session) return;
+  // A busy session already recorded its run profile; don't overwrite with a
+  // different session's restored settings while that run is still locked.
+  if (runningSessions.has(session.id) && runModelProfiles.has(session.id)) return;
+  // Skip while a session switch is still restoring the composer — the UI may
+  // still show the previous conversation's model for a tick.
+  if (sessionModelRestoring) return;
+  const profile = modelBar.currentProfile();
+  if (!profile) return;
+  const changed =
+    session.preferredProvider !== profile.provider ||
+    session.preferredModel !== profile.model ||
+    session.preferredEffort !== profile.effort;
+  session.preferredProvider = profile.provider;
+  session.preferredModel = profile.model;
+  session.preferredEffort = profile.effort;
+  sessionRegistry.set(session.id, session);
+  if (changed) saveSession(session);
+}
+
+/** Restore the active session's remembered model into the shared composer. */
+async function restoreActiveSessionModelPreference() {
+  if (typeof modelBar === "undefined") return;
+  const session = sessionForId(activeSessionId);
+  if (!session) {
+    syncActiveSessionModelLock();
+    return;
+  }
+  if (runningSessions.has(session.id) && runModelProfiles.has(session.id)) {
+    syncActiveSessionModelLock();
+    return;
+  }
+  const expectedSessionId = session.id;
+  const generation = ++sessionModelRestoreGeneration;
+  sessionModelRestoring = true;
+  try {
+    const provider = String(session.preferredProvider || "").trim();
+    const model = String(session.preferredModel || "").trim();
+    if (provider && model) {
+      await modelBar.applySessionProfile({
+        provider,
+        model,
+        effort: session.preferredEffort,
+      });
+    } else {
+      // First visit / older session: seed preference from the current composer.
+      const profile = modelBar.currentProfile();
+      if (profile) {
+        session.preferredProvider = profile.provider;
+        session.preferredModel = profile.model;
+        session.preferredEffort = profile.effort;
+        sessionRegistry.set(session.id, session);
+        saveSession(session);
+      }
+    }
+  } finally {
+    if (generation === sessionModelRestoreGeneration) {
+      sessionModelRestoring = false;
+    }
+  }
+  if (generation !== sessionModelRestoreGeneration || activeSessionId !== expectedSessionId) {
+    return;
+  }
+  syncActiveSessionModelLock();
+}
+
+function sessionForId(id: string | null | undefined): Session | undefined {
+  if (!id) return undefined;
+  return sessionRegistry.get(id) || sessions.find((session) => session.id === id);
+}
+
+/** Keep the visible Smart Agent ledger scoped to the currently selected session. */
+function syncSmartAgentPanel() {
+  smartAgentPanel?.setSession(activeSessionId, sessionForId(activeSessionId)?.smartAgent);
+}
+
+function syncVisiblePreviewIntoSession(session: Session) {
+  if (!sitePreview || sitePreview.isRestoring) return;
+  const preview = sitePreview.captureSessionState();
+  if (preview && sameProjectPath(preview.projectRoot, session.projectId)) {
+    session.preview = preview;
+  } else {
+    delete session.preview;
+  }
+}
+
+function persistPreviewForSession(
+  sessionId: string | null | undefined,
+  preview: ReturnType<SitePreview["captureSessionState"]>,
+) {
+  const session = sessionForId(sessionId);
+  if (!session) return;
+  if (preview && !sameProjectPath(preview.projectRoot, session.projectId)) return;
+  if (preview) session.preview = preview;
+  else delete session.preview;
+  sessionRegistry.set(session.id, session);
+  saveSession(session);
+}
+
+function restoreActiveSessionPreview() {
+  if (!sitePreview) return;
+  const sessionId = activeSessionId;
+  const session = sessionForId(sessionId);
+  const preview = session?.preview;
+  if (
+    !sessionId ||
+    !session ||
+    !currentProjectPath ||
+    !preview ||
+    !sameProjectPath(session.projectId, currentProjectPath) ||
+    !sameProjectPath(preview.projectRoot, currentProjectPath)
+  ) {
+    sitePreview.clearSessionView();
+    renderWorkspaceMenu();
+    return;
+  }
+  void sitePreview.restoreSessionState(preview).then(
+    () => {
+      if (activeSessionId === sessionId) renderWorkspaceMenu();
+    },
+    (error) => {
+      if (activeSessionId !== sessionId) return;
+      sitePreview.clearSessionView();
+      renderWorkspaceMenu();
+      reportError(`Could not restore this session's preview: ${String(error)}`);
+    },
+  );
+}
+
 function persistCurrentSession(deferred = false) {
   if (!activeSessionId || !currentProjectPath) return;
-  const s = sessions.find((x) => x.id === activeSessionId);
+  const s = sessionForId(activeSessionId);
   if (!s) return;
+  syncVisiblePreviewIntoSession(s);
   sessionRegistry.set(s.id, s);
   s.messages = chat.getMessages();
   if (deferred) scheduleSessionSave(s);
@@ -299,6 +579,7 @@ function prepareForAppUpdate() {
   if (activeSessionId && currentProjectPath) {
     const session = sessions.find((candidate) => candidate.id === activeSessionId);
     if (session) {
+      syncVisiblePreviewIntoSession(session);
       sessionRegistry.set(session.id, session);
       session.messages = chat.getMessages();
       saveSessionForUpdate(session);
@@ -311,13 +592,17 @@ function prepareForAppUpdate() {
 /** Active subscription token budget + burn (account-wide via license.json). */
 let activeTokenBudget = SESSION_TOKEN_BUDGET;
 let accountTokensUsed = 0;
-/** "" | "plan" | "4h" | "week" */
+/** "" | "plan" — legacy 4h/week values must never lock the composer. */
 let usageBlockedBy = "";
 /** Dev bypass — usage limits disabled in debug builds. */
 let usageLimitsDisabled = false;
 let planExpiresAt = "";
 let planName = "";
 let planActive = false;
+/** True after the signed-in website has supplied the current paid wallet. */
+let websiteUsageAuthoritative = false;
+/** Installed by init once browser-account sync is available. */
+let refreshAuthoritativeUsage: (() => void) | null = null;
 
 function remainingPct(used: number, budget: number): number {
   if (budget <= 0) return 100;
@@ -333,11 +618,25 @@ function applyLicenseSnapshot(lic: {
   tokensUsed?: number;
   blockedBy?: string;
   limitsDisabled?: boolean;
+  hosted?: boolean;
 }) {
+  // A local license mirror is useful while offline, but it can lag behind a
+  // top-up or usage from another computer. Once the signed-in website has
+  // supplied the account wallet, never let that cache overwrite it.
+  if (websiteUsageAuthoritative) {
+    usageLimitsDisabled = lic.limitsDisabled === true;
+    return;
+  }
   activeTokenBudget = Math.max(1, Math.floor(Number(lic.tokenBudget) || SESSION_TOKEN_BUDGET));
   accountTokensUsed = Math.max(0, Math.floor(Number(lic.tokensUsed) || 0));
   usageLimitsDisabled = lic.limitsDisabled === true;
-  usageBlockedBy = usageLimitsDisabled ? "" : String(lic.blockedBy || "");
+  const reportedBlock = String(lic.blockedBy || "").trim().toLowerCase();
+  const walletEmpty = accountTokensUsed >= activeTokenBudget;
+  // Older installations saved `4h` / `week` in blockedBy. Treat those as
+  // informational history only; a client is blocked exclusively when the
+  // authoritative snapshot says their actual plan wallet is empty.
+  usageBlockedBy =
+    !usageLimitsDisabled && reportedBlock === "plan" && walletEmpty ? "plan" : "";
   planExpiresAt = String(lic.expiresAt || "");
   planName = String(lic.plan || "free");
   planActive = lic.active !== false && planName.toLowerCase() !== "free";
@@ -367,16 +666,10 @@ function enqueueLicenseSync(opts: { haltIfExhausted?: boolean } = {}) {
   return licenseSyncTail;
 }
 
-/** Remaining capacity 0–100% for the plan period pool. */
-function usageRemainingPercent(): number {
-  return remainingPct(accountTokensUsed, activeTokenBudget);
-}
-
 /** True when plan period budget is exhausted. */
 function isUsageExhausted(): boolean {
   if (usageLimitsDisabled) return false;
-  if (usageBlockedBy) return true;
-  return usageRemainingPercent() <= 0;
+  return planActive && usageBlockedBy === "plan";
 }
 
 function usageBlockMessage(): string {
@@ -390,7 +683,7 @@ function syncUsageBar(_session?: Session | null) {
     percent: pct,
     poolLabel: "plan",
     resetsIn: "",
-    blockedBy: usageLimitsDisabled ? "" : usageBlockedBy || (pct <= 0 && planActive ? "plan" : ""),
+    blockedBy: usageLimitsDisabled ? "" : usageBlockedBy,
     planRemaining: pct,
     planExpiresAt,
     planName,
@@ -411,6 +704,7 @@ function applyWebsitePlanUsage(user: WebsiteAccount) {
   const used = Math.max(0, Math.floor(Number(user.tokensUsed) || 0));
   planName = plan || "free";
   planActive = active;
+  websiteUsageAuthoritative = active && budget > 0;
   planExpiresAt = String(user.expiresAt || "");
   if (active && budget > 0) {
     activeTokenBudget = budget;
@@ -459,6 +753,7 @@ function applyUsageToSession(
       tokensUsed?: number;
       blockedBy?: string;
       limitsDisabled?: boolean;
+      hosted?: boolean;
     } | null;
   },
 ) {
@@ -478,9 +773,10 @@ function applyUsageToSession(
 }
 
 function persistSessionById(id: string, deferred = false) {
-  const s = sessionRegistry.get(id) || sessions.find((x) => x.id === id);
+  const s = sessionForId(id);
   if (!s) return;
   if (id === activeSessionId) {
+    syncVisiblePreviewIntoSession(s);
     s.messages = chat.getMessages();
   }
   sessionRegistry.set(s.id, s);
@@ -495,6 +791,8 @@ function createNewSession() {
   }
   // Other sessions may keep running in the background
   persistCurrentSession();
+  persistActiveSessionModelPreference();
+  const profile = typeof modelBar !== "undefined" ? modelBar.currentProfile() : null;
   const s: Session = {
     id: newSessionId(),
     title: "New session",
@@ -502,10 +800,16 @@ function createNewSession() {
     messages: [],
     createdAt: Date.now(),
     sessionTokens: 0,
+    preferredProvider: profile?.provider,
+    preferredModel: profile?.model,
+    preferredEffort: profile?.effort,
+    // Fresh chat — never inherit another session's Cursor agent memory.
   };
   sessions.unshift(s);
   sessionRegistry.set(s.id, s);
   activeSessionId = s.id;
+  syncSmartAgentPanel();
+  restoreActiveSessionPreview();
   chat.startSession("");
   // Clear the empty user message that startSession pushes for a blank session
   chat.messages = [];
@@ -516,6 +820,7 @@ function createNewSession() {
   refreshSidebar();
   syncUsageBar();
   updateGlobalRunStatus();
+  void restoreActiveSessionModelPreference();
 }
 
 function switchSession(id: string) {
@@ -524,7 +829,10 @@ function switchSession(id: string) {
   if (!s) return;
   // Keep background runs alive — just switch the visible transcript
   persistCurrentSession();
+  persistActiveSessionModelPreference();
   activeSessionId = id;
+  syncSmartAgentPanel();
+  restoreActiveSessionPreview();
   if (s.messages.length === 0) {
     chat.messages = [];
     chat.renderEmpty();
@@ -532,6 +840,8 @@ function switchSession(id: string) {
     chat.loadSession(s.messages);
   }
   chat.setRunning(runningSessions.has(id));
+  // Restore this conversation's model (or lock to its in-flight run profile).
+  void restoreActiveSessionModelPreference();
   // Restore a tool-approval prompt if this run is waiting in the background
   const conf = pendingConfirms.get(id);
   if (conf) {
@@ -560,6 +870,8 @@ function removeSession(id: string) {
   if (runningSessions.has(id)) {
     api.agentStop(id).catch(() => {});
     runningSessions.delete(id);
+    runModelProfiles.delete(id);
+    runPrompts.delete(id);
   }
   deleteSession(id);
   sessionRegistry.delete(id);
@@ -572,11 +884,13 @@ function removeSession(id: string) {
       chat.messages = [];
       chat.renderEmpty();
       chat.setRunning(false);
+      sitePreview?.clearSessionView();
       refreshSidebar();
     }
   } else {
     refreshSidebar();
   }
+  syncSmartAgentPanel();
   updateGlobalRunStatus();
 }
 function removeAllSessions() {
@@ -649,12 +963,16 @@ function doRemoveAllSessions() {
   for (const id of ids.filter((id) => runningSessions.has(id))) {
     api.agentStop(id).catch(() => {});
     runningSessions.delete(id);
+    runModelProfiles.delete(id);
+    runPrompts.delete(id);
   }
   deleteAllSessions(currentProjectPath!);
   for (const id of ids) sessionRegistry.delete(id);
   // Keep project token usage — do not reset the meter to 100%
   sessions = [];
   activeSessionId = null;
+  syncSmartAgentPanel();
+  sitePreview?.clearSessionView();
   chat.messages = [];
   chat.renderEmpty();
   chat.setRunning(false);
@@ -668,6 +986,7 @@ function loadProjectSessions() {
   if (!currentProjectPath) {
     sessions = [];
     activeSessionId = null;
+    syncSmartAgentPanel();
     syncUsageBar();
     return;
   }
@@ -689,8 +1008,12 @@ function loadProjectSessions() {
   // Project switching is allowed during a run. Reflect only the selected
   // session's activity instead of leaving the previous project in the UI.
   chat.setRunning(!!activeSessionId && runningSessions.has(activeSessionId), { processQueue: false });
+  // Restore this project's active session model (or lock if that run is busy).
+  void restoreActiveSessionModelPreference();
   // Shared budget across every session in this project
   syncUsageBar();
+  syncSmartAgentPanel();
+  restoreActiveSessionPreview();
 }
 
 function showFatalError(msg: string) {
@@ -774,12 +1097,34 @@ function toggleLeftDrawer() {
 }
 
 function toggleRightDrawer() {
+  // The right sandwich collapses/uncollapses the whole right side: when the
+  // build preview is open, closing the right side also closes the preview.
+  // Reopening restores whichever right panel was visible before collapsing.
   const open = !isDrawerOpen(RIGHT_DRAWER_KEY, true);
   setDrawerOpen(RIGHT_DRAWER_KEY, open);
+  if (!open && sitePreview?.isOpen) {
+    rightSideWasPreview = true;
+    sitePreview.close();
+  } else if (open && !sitePreview?.isOpen && rightSideWasPreview) {
+    // Reopen the preview that was closed together with the right side.
+    if (currentProjectPath) {
+      void openBuildPreview({ title: "Build preview", autoPickEntry: false });
+    }
+  }
+  rightSideWasPreview = false;
   applyDrawers();
   syncDrawerButtons();
   renderWorkspaceMenu();
 }
+
+/** True when any right-side panel (inspector or preview) is visible. */
+function rightSideVisible(): boolean {
+  if (sitePreview?.isOpen) return true;
+  return isDrawerOpen(RIGHT_DRAWER_KEY, true);
+}
+
+/** Set when collapsing the right side while the preview was open. */
+let rightSideWasPreview = false;
 
 function syncDrawerButtons() {
   const leftOpen = isDrawerOpen(LEFT_DRAWER_KEY, true);
@@ -789,6 +1134,20 @@ function syncDrawerButtons() {
     leftBtn.setAttribute("aria-pressed", String(leftOpen));
     leftBtn.setAttribute("title", leftOpen ? "Hide left panel" : "Show left panel");
     leftBtn.setAttribute("aria-label", leftOpen ? "Hide left panel" : "Show left panel");
+  }
+  const rightVisible = rightSideVisible();
+  const rightBtn = document.getElementById("drawer-right-btn");
+  if (rightBtn) {
+    rightBtn.classList.toggle("active", rightVisible);
+    rightBtn.setAttribute("aria-pressed", String(rightVisible));
+    rightBtn.setAttribute(
+      "title",
+      rightVisible ? "Hide right panels" : "Show right panels",
+    );
+    rightBtn.setAttribute(
+      "aria-label",
+      rightVisible ? "Hide right panels" : "Show right panels",
+    );
   }
 }
 
@@ -820,13 +1179,12 @@ function renderWorkspaceMenu() {
 
   const hasProject = !!currentProjectPath;
   const previewOpen = !!sitePreview?.isOpen;
-  const rightOpen = isDrawerOpen(RIGHT_DRAWER_KEY, true);
   menu.appendChild(el("div", { class: "workspace-menu-title" }, ["Workspace"]));
 
   const appendAction = (
     action: string,
     label: string,
-    iconName: "folder" | "globe" | "panelRight",
+    iconName: "folder" | "globe" | "panelRight" | "spark",
     onClick: () => void,
     disabled = false,
   ) => {
@@ -856,7 +1214,7 @@ function renderWorkspaceMenu() {
     () => {
       if (!currentProjectPath) return;
       if (sitePreview?.isOpen) sitePreview.close();
-      else void openBuildPreview({ title: "Build preview" });
+      else void openBuildPreview({ title: "Build preview", autoPickEntry: false });
     },
     !hasProject,
   );
@@ -869,10 +1227,17 @@ function renderWorkspaceMenu() {
     },
     !hasProject,
   );
+  appendAction(
+    "client-success",
+    "Open Client Success Center",
+    "spark",
+    () => openClientSuccessCenter(),
+    !hasProject,
+  );
   menu.appendChild(el("div", { class: "workspace-menu-divider", role: "separator" }));
   appendAction(
     "inspector",
-    rightOpen ? "Hide project panel" : "Show project panel",
+    rightSideVisible() ? "Hide right panels" : "Show right panels",
     "panelRight",
     () => toggleRightDrawer(),
   );
@@ -945,6 +1310,11 @@ function bindDrawerButtons() {
     leftBtn.addEventListener("click", () => toggleLeftDrawer());
     (leftBtn as any).__bound = true;
   }
+  const rightBtn = document.getElementById("drawer-right-btn");
+  if (rightBtn && !(rightBtn as any).__bound) {
+    rightBtn.addEventListener("click", () => toggleRightDrawer());
+    (rightBtn as any).__bound = true;
+  }
   bindWorkspaceMenuButton();
   applyDrawers();
   syncDrawerButtons();
@@ -981,6 +1351,7 @@ async function createProject(path: string, templateId?: string) {
   activateProjectWorkspace(canonicalPath);
   sessions = [];
   activeSessionId = null;
+  sitePreview?.clearSessionView();
   chat.messages = [];
   chat.renderEmpty();
   chat.setRunning(false, { processQueue: false });
@@ -1010,28 +1381,50 @@ function openOpenProjectPicker() {
   void picker.render();
 }
 
-function openSettings(integrationId?: string) {
-  try {
-    settingsModal?.close();
-  } catch {
-    /* ignore stale modal */
-  }
-  settingsModal = new SettingsModal(async () => {
-    await refreshHeader();
-    await refreshProviderReadiness();
-  }, integrationId);
-  void settingsModal.open();
+function openSettings(_integrationId?: string) {
+  // Settings is hidden from the product UI.
 }
 
 async function refreshProviderReadiness(): Promise<boolean> {
   const settings = await getSettingsSafe();
   const provider = getProviderMeta(settings.provider);
-  let ready = !provider?.keyRequired;
-  if (provider?.keyRequired) {
-    ready = await api.hasApiKey(settings.provider).catch(() => false);
+  const label = displayProviderName(settings.provider);
+  if (!provider) {
+    chat?.setProviderReady(false, label);
+    return false;
   }
-  chat?.setProviderReady(ready, displayProviderName(settings.provider));
-  return ready;
+
+  // Keyless local providers, or hosted-managed aliases, are ready immediately.
+  if (provider.id === "ollama" || provider.hostedManaged || provider.id === "hormachuelos_free") {
+    chat?.setProviderReady(true, label);
+    return true;
+  }
+
+  if (await api.hasApiKey(settings.provider).catch(() => false)) {
+    chat?.setProviderReady(true, label);
+    return true;
+  }
+
+  // Active Hormachuelos plans unlock cloud providers (including OpenAI branding
+  // without a local Cursor key, and OpenRouter Free Models Router).
+  if (settings.provider !== "ollama") {
+    const lic = await api.getLicenseStatus().catch(() => null);
+    const hostedReady = Boolean(
+      lic?.hosted && lic.active && String(lic.licenseKey || "").trim(),
+    );
+    if (hostedReady) {
+      chat?.setProviderReady(true, label);
+      return true;
+    }
+  }
+
+  if (!provider.keyRequired && provider.id !== "openrouter" && provider.id !== "cursor") {
+    chat?.setProviderReady(true, label);
+    return true;
+  }
+
+  chat?.setProviderReady(false, label);
+  return false;
 }
 
 async function openGCashTopUp() {
@@ -1057,6 +1450,15 @@ async function exportClientPack() {
   }
 }
 
+function openClientSuccessCenter() {
+  if (!currentProjectPath) {
+    reportError("Open or create a project before using Client Success Center.");
+    openNewProjectPicker();
+    return;
+  }
+  clientSuccessCenter?.open();
+}
+
 async function sendPrompt(prompt: string) {
   if (!currentProjectPath) {
     reportError("Open or create a project before starting.");
@@ -1065,9 +1467,18 @@ async function sendPrompt(prompt: string) {
   }
   const projectRoot = currentProjectPath;
   if (!(await refreshProviderReadiness())) {
-    reportError("Connect the selected provider in Settings before sending a request.");
-    openSettings();
+    reportError("Connect the selected provider before sending a request.");
     return;
+  }
+  if (isHostedCatalogRestricted()) {
+    const allowed = visibleProviders();
+    const providerId = String(modelBar?.settings?.provider || "").trim();
+    const modelId = String(modelBar?.settings?.model || "").trim();
+    const provider = allowed.find((entry) => entry.id === providerId);
+    if (!provider || (provider.models.length > 0 && !provider.models.includes(modelId))) {
+      reportError("This AI provider or model is not enabled for your account.");
+      return;
+    }
   }
   if (!sameProjectPath(projectRoot, currentProjectPath)) {
     reportError("Project changed before the request started. Send it again from the active project.");
@@ -1087,6 +1498,9 @@ async function sendPrompt(prompt: string) {
   // model prompts, tool arguments, or results. The replacement keeps enough
   // intent for the backend to open the secure integration form.
   prompt = redactChatCredentials(prompt);
+  // The durable project brief guides the agent without polluting the user's
+  // visible chat bubble, session title, or the preview-detection prompt.
+  const agentPrompt = composeProjectMissionPrompt(projectRoot, prompt);
 
   let existing = activeSessionId ? sessions.find((x) => x.id === activeSessionId) : null;
   const hasMessages = existing && existing.messages.length > 0;
@@ -1116,10 +1530,28 @@ async function sendPrompt(prompt: string) {
   }
 
   const sessionId = activeSessionId!;
-  // Maximize memory: send prior turns in this session (user, AI, tools, decisions)
+  // Send compact memory from this session only (never other chats).
   const history = buildLlmHistory(chat.getMessages(), prompt);
+  if (modelBar.settings) {
+    const profile = {
+      provider: modelBar.settings.provider,
+      model: modelBar.settings.model,
+      effort: modelBar.settings.model_effort,
+    };
+    runModelProfiles.set(sessionId, profile);
+    const owning = sessionForId(sessionId);
+    if (owning) {
+      owning.preferredProvider = profile.provider;
+      owning.preferredModel = profile.model;
+      owning.preferredEffort = profile.effort;
+      sessionRegistry.set(owning.id, owning);
+      saveSession(owning);
+    }
+  }
   runningSessions.add(sessionId);
+  syncActiveSessionModelLock();
   runProjectPaths.set(sessionId, projectRoot);
+  runPrompts.set(sessionId, prompt);
   runTouchedFiles.set(sessionId, new Set());
   previewOpenedForRun.delete(sessionId);
   void snapshotProjectFiles(projectRoot).then((snap) => {
@@ -1137,9 +1569,45 @@ async function sendPrompt(prompt: string) {
   syncUsageBar();
   refreshSidebar();
   try {
-    await api.agentRun(prompt, sessionId, history, projectRoot);
+    const resumeAgentId = sessionForId(sessionId)?.cursorAgentId || null;
+    const nextAgentId = await api.agentRun(
+      agentPrompt,
+      sessionId,
+      history,
+      projectRoot,
+      resumeAgentId,
+    );
+    if (typeof nextAgentId === "string" && nextAgentId.trim()) {
+      const owning = sessionForId(sessionId);
+      if (owning && owning.cursorAgentId !== nextAgentId) {
+        owning.cursorAgentId = nextAgentId.trim();
+        sessionRegistry.set(owning.id, owning);
+        saveSession(owning);
+      }
+    } else if (nextAgentId === null || nextAgentId === "") {
+      // Run finished without a Cursor agent — fine for non-Cursor models.
+    }
   } catch (e: any) {
     const msg = String(e ?? "");
+    // Stale Cursor agent ids from before per-session stores break continue.
+    // Drop them so the next send creates a clean agent for this chat only.
+    if (
+      /agent not found|failed to resume|checkpoint|cursor bridge|sdk/i.test(msg) ||
+      /network_error|connection_failed|provider_timeout|provider_unavailable/i.test(msg)
+    ) {
+      const owning = sessionForId(sessionId);
+      if (owning?.cursorAgentId) {
+        owning.cursorAgentId = undefined;
+        sessionRegistry.set(owning.id, owning);
+        saveSession(owning);
+      }
+    }
+    // The hosted API returns this only when its own wallet check says empty.
+    // Refresh immediately so the drawer cannot keep showing an old, high
+    // percentage after a request made from another device has consumed usage.
+    if (/\busage_exhausted\b/i.test(msg)) {
+      refreshAuthoritativeUsage?.();
+    }
     // Don't dump "already running" into the transcript — queue handles that path
     const isBusy =
       /already running/i.test(msg) || /wait for it to finish/i.test(msg);
@@ -1162,6 +1630,12 @@ async function sendPrompt(prompt: string) {
     // Only drop the busy flag here — after backend finish_run. Early deletes on
     // cancelled/done events race a follow-up send ("session already running").
     runningSessions.delete(sessionId);
+    runModelProfiles.delete(sessionId);
+    if (activeSessionId === sessionId) {
+      void restoreActiveSessionModelPreference();
+    } else {
+      syncActiveSessionModelLock();
+    }
     const allowQueue = !isUsageExhausted();
     if (!allowQueue) {
       chat.clearPendingQueue();
@@ -1184,17 +1658,32 @@ async function sendPrompt(prompt: string) {
     syncUsageBar();
     refreshSidebar();
     runProjectPaths.delete(sessionId);
+    runPrompts.delete(sessionId);
   }
 }
 
 function handleAgentEvent(e: AgentEvent) {
   const sid = e.session_id;
   const isActive = !!sid && sid === activeSessionId;
+  const owningSession = sid ? sessionForId(sid) : undefined;
+  const smartStateChanged = owningSession ? applySmartAgentEvent(owningSession, e) : false;
+  if (smartStateChanged && isActive) syncSmartAgentPanel();
 
   // UI-only secure handoff. Inline chat form — never persist credentials to transcript.
   if (e.kind === "integration_auth") {
     if (isActive) {
       void chat.showIntegrationAuth(e.payload.service, e.payload.secure_entry);
+    }
+    return;
+  }
+
+  // Live reconnect / progress status — UI only, never persisted.
+  if (e.kind === "status") {
+    if (isActive) {
+      chat.handleEvent(e);
+      if (/reconnect/i.test(e.payload.message || "")) {
+        sidebar.setStatus("Reconnecting", true);
+      }
     }
     return;
   }
@@ -1238,6 +1727,7 @@ function handleAgentEvent(e: AgentEvent) {
     if (s) {
       recordAgentEvent(s.messages, e);
       if (
+        smartStateChanged ||
         e.kind === "text" ||
         e.kind === "tool_result" ||
         e.kind === "done" ||
@@ -1258,8 +1748,8 @@ function handleAgentEvent(e: AgentEvent) {
     }
     // Background run end events: do NOT remove from runningSessions here.
     // sendPrompt's finally owns that set (avoids "already running" races).
-    if (e.kind === "done" || e.kind === "end" || e.kind === "cancelled") {
-      speakDoneWorking();
+    if (isTerminalAgentEvent(e)) {
+      if (isVerifiedAgentCompletion(e)) speakDoneWorking();
       updateGlobalRunStatus();
       refreshSidebar();
       void maybeOpenBuildPreview(sid, e.kind);
@@ -1277,8 +1767,21 @@ function handleAgentEvent(e: AgentEvent) {
     return;
   }
 
-  chat.handleEvent(e);
-  workspacePanel.handleAgentEvent(e);
+  const isSmartAgentEvent = e.kind === "task_plan" || e.kind === "task_progress";
+  if (!isSmartAgentEvent) {
+    chat.handleEvent(e);
+    workspacePanel.handleAgentEvent(e);
+  }
+  // Clear Reconnecting sidebar once the model is producing work again.
+  if (
+    e.kind === "thinking" ||
+    e.kind === "reasoning" ||
+    e.kind === "text" ||
+    e.kind === "tool_call" ||
+    e.kind === "tool_preview"
+  ) {
+    updateGlobalRunStatus();
+  }
   if (e.kind === "tool_call") {
     trackRunTouchedFile(sid, e.payload.name, e.payload.arguments);
     const htmlOpen = htmlPathFromOpenArgs(
@@ -1302,19 +1805,19 @@ function handleAgentEvent(e: AgentEvent) {
       e.payload.content,
       !!e.payload.streamed,
     );
-  } else if (e.kind === "done" || e.kind === "end" || e.kind === "cancelled") {
+  } else if (isTerminalAgentEvent(e)) {
     // Keep runningSessions + chat.running true until sendPrompt's agentRun
     // await finishes. Early setRunning(false) / runningSessions.delete races
     // the next send (backend still in start_run → "already running").
     // chat.handleEvent already cleared pending + marked userCancelled.
-    speakDoneWorking();
+    if (isVerifiedAgentCompletion(e)) speakDoneWorking();
     updateGlobalRunStatus();
     syncUsageBar();
     refreshSidebar();
     void maybeOpenBuildPreview(sid, e.kind);
   }
   // Persist session after meaningful events
-  if (e.kind === "text" || e.kind === "tool_result" || e.kind === "done" || e.kind === "end" || e.kind === "cancelled" || e.kind === "reasoning") {
+  if (smartStateChanged || e.kind === "text" || e.kind === "tool_result" || e.kind === "done" || e.kind === "end" || e.kind === "cancelled" || e.kind === "reasoning") {
     persistCurrentSession(e.kind === "text" || e.kind === "reasoning");
   }
 }
@@ -1335,8 +1838,13 @@ async function init() {
   workspacePanel = new WorkspacePanel();
   consolePanel = new ConsolePanel();
   sitePreview = new SitePreview(document.getElementById("site-preview-slot"));
-  sitePreview.setDescribeHandler((prompt) => {
-    void sendPrompt(prompt);
+  smartAgentPanel = new SmartAgentPanel(document.getElementById("smart-agent-status")!);
+  syncSmartAgentPanel();
+  sitePreview.setStateChangeHandler((preview) => {
+    // The preview component only emits user-driven changes, never a restore of
+    // another session. Keep the serialized preview alongside the active chat.
+    persistPreviewForSession(activeSessionId, preview);
+    renderWorkspaceMenu();
   });
   chat = new Chat({
     onSend: sendPrompt,
@@ -1352,6 +1860,20 @@ async function init() {
     getSessionId: () => activeSessionId,
     onOpenSettings: openSettings,
   });
+  clientSuccessCenter = new ClientSuccessCenter(document.getElementById("modal-root")!, {
+    getProjectPath: () => currentProjectPath,
+    onRunRecipe: (prompt) => chat.submitPreviewPrompt(prompt),
+    onExportClientPack: async (handoffSummary) => {
+      if (!currentProjectPath) return null;
+      const result = await api.exportClientPack(undefined, handoffSummary);
+      reportError(`Client pack saved: ${result.zipPath} (${result.filesCount} files)`);
+      return result;
+    },
+  });
+  // Preview actions use Chat's normal send/queue rules. That means a Build
+  // choice always reaches the selected model, even when another task is still
+  // running, instead of being silently dropped by a direct agent_run call.
+  sitePreview.setDescribeHandler((prompt, imagePath) => chat.submitPreviewPrompt(prompt, imagePath));
   chat.setProjectReady(false);
   const HOSTED_SITE = "https://hormachuelos.vercel.app";
   let websiteUser: WebsiteAccount | null = null;
@@ -1363,23 +1885,32 @@ async function init() {
       try {
         const lic = await api.applyLicenseKey(user.licenseKey);
         applyLicenseSnapshot(lic);
-        // Keep website counters if activate returned older/empty numbers.
-        if (
-          user.licenseActive &&
-          Number(user.tokenBudget) > 0 &&
-          (Number(lic.tokenBudget) || 0) > 0
-        ) {
-          applyWebsitePlanUsage({
-            ...user,
-            tokenBudget: Number(lic.tokenBudget) || user.tokenBudget,
-            tokensUsed: Math.max(Number(lic.tokensUsed) || 0, Number(user.tokensUsed) || 0),
-            plan: lic.plan || user.plan,
-            licenseActive: lic.active,
-            expiresAt: lic.expiresAt || user.expiresAt,
-          });
-        } else {
-          syncUsageBar();
-        }
+        // Website account plan and wallet are the source of truth
+        // (including administrator edits and top-ups). Re-apply them after
+        // local activation so an older license.json cannot turn a healthy
+        // server balance into a false limit.
+        const mergedPlan = String(user.plan || lic.plan || "free");
+        applyWebsitePlanUsage({
+          ...user,
+          plan: mergedPlan,
+          tokenBudget:
+            Number(user.tokenBudget) > 0
+              ? Number(user.tokenBudget)
+              : Number(lic.tokenBudget) || user.tokenBudget,
+          tokensUsed:
+            Number.isFinite(Number(user.tokensUsed)) && Number(user.tokensUsed) >= 0
+              ? Number(user.tokensUsed)
+              : Number(lic.tokensUsed) || 0,
+          licenseActive:
+            user.licenseActive === true || (lic.active !== false && mergedPlan.toLowerCase() !== "free"),
+          expiresAt: user.expiresAt || lic.expiresAt || "",
+        });
+        sidebar?.setAccountStatus({
+          state: "synced",
+          email: user.email,
+          name: user.name,
+          plan: mergedPlan,
+        });
       } catch (e) {
         console.warn("license sync from website account failed", e);
         syncUsageBar();
@@ -1394,6 +1925,7 @@ async function init() {
     const token = await api.getWebsiteSession().catch(() => null);
     if (!token) {
       websiteUser = null;
+      websiteUsageAuthoritative = false;
       sidebar.setAccountStatus({
         state: "signed_out",
         detail: "Sign in on hormachuelos.vercel.app",
@@ -1415,6 +1947,7 @@ async function init() {
       if (isWebsiteSessionRejected(e)) {
         await api.clearWebsiteSession().catch(() => {});
         websiteUser = null;
+        websiteUsageAuthoritative = false;
         sidebar.setAccountStatus({
           state: "signed_out",
           detail: "Session expired — sign in again",
@@ -1428,6 +1961,10 @@ async function init() {
       return null;
     }
   }
+
+  refreshAuthoritativeUsage = () => {
+    void refreshWebsiteAccountStatus({ quiet: true });
+  };
 
   async function manageWebsiteAccount() {
     const current = await refreshWebsiteAccountStatus({ quiet: true });
@@ -1449,6 +1986,12 @@ async function init() {
       document.body.appendChild(gate);
     });
     await syncHostedPlan(websiteUser);
+    // A just-linked browser account may unlock administrator-managed provider
+    // aliases. Refresh the picker immediately instead of requiring a restart.
+    if (typeof modelBar !== "undefined") {
+      await modelBar.refresh().catch(() => {});
+      await refreshProviderReadiness().catch(() => false);
+    }
   }
 
   sidebar = new Sidebar({
@@ -1536,8 +2079,8 @@ async function init() {
   modelBar = new ModelBar(() => {
     refreshHeader().catch(() => {});
     void refreshProviderReadiness();
-    const s = modelBar.settings;
-    if (s) chat.setReplyProfile({ provider: s.provider, model: s.model, effort: s.model_effort });
+    persistActiveSessionModelPreference();
+    syncActiveSessionModelLock();
   });
   await modelBar.load().catch((e) => console.error("modelbar load failed", e));
   await refreshProviderReadiness().catch(() => false);
@@ -1554,6 +2097,9 @@ async function init() {
       effort: modelBar.settings.model_effort,
     });
   }
+  persistActiveSessionModelPreference();
+  await restoreActiveSessionModelPreference();
+  syncActiveSessionModelLock();
   window.addEventListener("horma:ultra-effort", () => {
     chat.applyUltraChrome();
   });
@@ -1561,6 +2107,10 @@ async function init() {
   window.addEventListener("horma:composer-insert", ((e: CustomEvent<{ text?: string }>) => {
     const text = e.detail?.text;
     if (typeof text === "string" && text) chat.insertComposerText(text);
+  }) as EventListener);
+  window.addEventListener("horma:composer-attach-image", ((e: CustomEvent<{ path?: string }>) => {
+    const path = e.detail?.path;
+    if (typeof path === "string" && path.trim()) chat.addComposerAttachment(path.trim());
   }) as EventListener);
   window.addEventListener("horma:open-settings", ((e: CustomEvent<{ integrationId?: string }>) => {
     openSettings(e.detail?.integrationId);

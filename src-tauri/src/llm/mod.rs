@@ -118,11 +118,20 @@ pub struct LlmResponse {
 }
 
 pub mod anthropic;
+pub mod commandcode;
 pub mod gemini;
 pub mod glm;
 pub mod openai;
 
+pub use openai::{
+    build_client, is_transient_provider_error, reconnect_attempt_limit, request_error,
+};
+
 pub fn provider_needs_key(provider: &str) -> bool {
+    if crate::config::is_custom_hosted_provider_alias(provider) {
+        // Dashboard-created aliases always use the server-side encrypted key.
+        return false;
+    }
     !matches!(
         provider.to_lowercase().as_str(),
         "ollama" | "hormachuelos_free"
@@ -138,9 +147,11 @@ pub fn provider_default_base_url(provider: &str) -> Option<&'static str> {
         "glm" => Some("https://opencode.ai/zen/v1"),
         "openai" => Some("https://api.openai.com/v1"),
         "cursor" => Some("https://api.cursor.com/v1"),
+        "xai" => Some(crate::config::XAI_API_BASE_URL),
         "hormachuelos_free" => Some("https://hormachuelos.vercel.app/api/v1"),
         "anthropic" => Some("https://api.anthropic.com"),
         "gemini" => Some("https://generativelanguage.googleapis.com"),
+        "commandcode" => Some(crate::config::COMMANDCODE_API_BASE_URL),
         _ => None,
     }
 }
@@ -175,6 +186,19 @@ pub fn build_provider(
     base_url: Option<&str>,
     model: &str,
 ) -> Result<Box<dyn LlmProvider>> {
+    build_provider_with_effort(provider, api_key, base_url, model, None)
+}
+
+/// Build a provider while forwarding the configured reasoning effort only to
+/// providers that support it. Keeping this separate preserves compatibility
+/// with existing callers such as connection tests.
+pub fn build_provider_with_effort(
+    provider: &str,
+    api_key: &str,
+    base_url: Option<&str>,
+    model: &str,
+    model_effort: Option<&str>,
+) -> Result<Box<dyn LlmProvider>> {
     let prov = provider.to_lowercase();
     let key = if api_key.is_empty() && !provider_needs_key(&prov) {
         "unused".to_string()
@@ -187,18 +211,47 @@ pub fn build_provider(
         .transpose()?;
     let base = validated_base.as_deref();
     match prov.as_str() {
-        "openai" | "cursor" | "hormachuelos_free" => {
-            Ok(Box::new(openai::OpenAi::new(&key, base, model, &prov)))
+        "openai" | "cursor" | "xai" | "hormachuelos_free" => {
+            Ok(Box::new(
+                openai::OpenAi::new(&key, base, model, &prov)
+                    .with_reasoning_effort(model_effort),
+            ))
         }
         "anthropic" => Ok(Box::new(anthropic::Anthropic::new(api_key, base, model))),
         "gemini" | "google" => Ok(Box::new(gemini::Gemini::new(api_key, base, model))),
+        "commandcode" => {
+            // Through the Hormachuelos hosted proxy the OpenAI-compatible
+            // chat/completions endpoint is used (the proxy translates to the
+            // Command Code gateway). Only a direct BYOK connection speaks the
+            // native /alpha/generate protocol.
+            let is_hosted_proxy = base.is_some_and(|url| url.contains("hormachuelos.vercel.app"));
+            if is_hosted_proxy {
+                Ok(Box::new(
+                    openai::OpenAi::new(&key, base, model, &prov)
+                        .with_reasoning_effort(model_effort),
+                ))
+            } else {
+                Ok(Box::new(commandcode::CommandCode::new(api_key, base, model)))
+            }
+        }
         "ollama" => Ok(Box::new(openai::OpenAi::new(&key, base, model, &prov))),
-        "openrouter" => Ok(Box::new(openai::OpenAi::new(&key, base, model, &prov))),
+        "openrouter" => Ok(Box::new(
+            openai::OpenAi::new(&key, base, model, &prov).with_reasoning_effort(model_effort),
+        )),
         "pollinations" => Ok(Box::new(openai::OpenAi::new(&key, base, model, &prov))),
-        "deepseek" => Ok(Box::new(openai::OpenAi::new(&key, base, model, &prov))),
-        "glm" => Ok(Box::new(openai::OpenAi::new(&key, base, model, &prov))),
+        "deepseek" => Ok(Box::new(
+            openai::OpenAi::new(&key, base, model, &prov).with_reasoning_effort(model_effort),
+        )),
+        "glm" => Ok(Box::new(
+            openai::OpenAi::new(&key, base, model, &prov).with_reasoning_effort(model_effort),
+        )),
+        other if crate::config::is_custom_hosted_provider_alias(other) => {
+            Ok(Box::new(
+                openai::OpenAi::new(&key, base, model, other).with_reasoning_effort(model_effort),
+            ))
+        }
         other => Err(anyhow!(
-            "Unknown provider: {other}. Use hormachuelos_free | deepseek | openrouter | glm | openai | cursor | anthropic | gemini | ollama | pollinations"
+            "Unknown provider: {other}. Use a built-in provider or a server-managed provider alias from the hosted catalog."
         )),
     }
 }
@@ -225,12 +278,14 @@ mod tests {
         for provider in [
             "openai",
             "cursor",
+            "xai",
             "anthropic",
             "gemini",
             "openrouter",
             "pollinations",
             "deepseek",
             "glm",
+            "commandcode",
         ] {
             assert!(
                 provider_default_base_url(provider).is_some(),
@@ -247,5 +302,6 @@ mod tests {
             Some("https://hormachuelos.vercel.app/api/v1")
         );
         assert!(!provider_needs_key("hormachuelos_free"));
+        assert!(!provider_needs_key("my-hosted-provider"));
     }
 }

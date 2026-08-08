@@ -10,6 +10,8 @@
     <link rel="stylesheet" href="/theme/globals.css" />
     <link rel="stylesheet" href="/app.css" />
     <link rel="stylesheet" href="/theme/workspace.css" />
+    <link rel="stylesheet" href="/theme/smart-agent.css" />
+    <link rel="stylesheet" href="/theme/client-success.css" />
   </head>
   <body>
     <a class="skip-link" href="#chat">Skip to chat</a>
@@ -32,7 +34,17 @@
           <div class="workspace-menu-anchor" id="workspace-menu-anchor">
             <button
               type="button"
-              class="drawer-btn workspace-menu-btn"
+              class="drawer-btn drawer-btn-right"
+              id="drawer-right-btn"
+              aria-pressed="true"
+              title="Hide right panels"
+              aria-label="Hide right panels"
+            >
+              <span class="drawer-btn-bars" aria-hidden="true"><i></i><i></i><i></i></span>
+            </button>
+            <button
+              type="button"
+              class="workspace-menu-btn workspace-menu-caret"
               id="workspace-menu-btn"
               aria-haspopup="menu"
               aria-expanded="false"
@@ -40,13 +52,14 @@
               title="Workspace menu"
               aria-label="Workspace menu"
             >
-              <span class="drawer-btn-bars" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span class="workspace-menu-caret-sym" aria-hidden="true">▾</span>
             </button>
             <div class="workspace-menu" id="workspace-menu" role="menu" aria-label="Workspace actions" hidden></div>
           </div>
         </header>
         <div class="workspace workbench">
           <section class="stage" aria-label="Build ledger">
+            <section class="smart-agent-status" id="smart-agent-status" aria-label="Smart Agent task progress" hidden></section>
             <main class="chat" id="chat" tabindex="-1" role="log" aria-live="polite"></main>
             <section class="file-viewer" id="file-viewer" aria-label="File preview" hidden></section>
             <section class="forge-dock" id="forge-dock" aria-label="Composer"></section>

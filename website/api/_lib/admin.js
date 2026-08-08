@@ -8,6 +8,11 @@ import {
   updateAccount,
   updateLicense,
 } from "./supabase.js";
+import {
+  accountAccessDbPatch,
+  accountAccessFromRow,
+  publicAccountAccess,
+} from "./user-access.js";
 
 const SESSION_HOURS = 12;
 
@@ -72,11 +77,18 @@ export function adminFromRequest(req) {
 }
 
 function mapUser(account, license) {
+  // Website accounts.plan is what admin sets — keep that as the plan label.
+  const plan = account.plan
+    ? normalizePlan(account.plan)
+    : license?.plan
+      ? normalizePlan(license.plan)
+      : null;
+  const access = publicAccountAccess(accountAccessFromRow(account));
   return {
     id: account.id,
     email: account.email,
     name: account.name || "",
-    plan: account.plan || license?.plan || null,
+    plan,
     period: account.period || null,
     credits: Number(account.credits) || 0,
     licenseKey: account.license_key || license?.key || null,
@@ -87,6 +99,9 @@ function mapUser(account, license) {
     expiresAt: license?.expires_at ? String(license.expires_at).slice(0, 10) : "",
     createdAt: account.created_at,
     updatedAt: account.updated_at,
+    restricted: access.restricted,
+    allowedProviders: access.allowedProviders,
+    allowedModels: access.allowedModels,
   };
 }
 
@@ -100,13 +115,24 @@ export async function listAdminUsers() {
       if (!byEmail.has(k)) byEmail.set(k, l);
     }
   }
-  return accounts.map((a) => {
-    const lic =
+  const users = [];
+  for (const a of accounts) {
+    let lic =
       (a.license_key && byKey.get(a.license_key)) ||
       byEmail.get(String(a.email).toLowerCase()) ||
       null;
-    return mapUser(a, lic);
-  });
+    // Keep license.plan aligned with the website account plan (admin source of truth).
+    if (lic?.id && a.plan && normalizePlan(a.plan) !== normalizePlan(lic.plan || "")) {
+      try {
+        lic = await updateLicense(lic.id, { plan: normalizePlan(a.plan) });
+        if (lic?.key) byKey.set(lic.key, lic);
+      } catch {
+        /* display account plan below even if heal fails */
+      }
+    }
+    users.push(mapUser(a, lic));
+  }
+  return users;
 }
 
 export async function updateAdminUser(id, patch) {
@@ -127,6 +153,7 @@ export async function updateAdminUser(id, patch) {
   if (patch.plan !== undefined) accountPatch.plan = nextPlan;
   if (patch.period !== undefined) accountPatch.period = patch.period || null;
   if (patch.credits !== undefined) accountPatch.credits = Math.max(0, Number(patch.credits) || 0);
+  Object.assign(accountPatch, accountAccessDbPatch(patch));
 
   let license =
     (account.license_key && (await getLicenseByKey(account.license_key))) || null;

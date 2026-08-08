@@ -1,6 +1,6 @@
 import { api, type Settings } from "../ipc";
-import { PROVIDERS, effortOptionsForProvider, displayModelName, getProviderMeta, getSettingsSafe, hasStaticModelCatalog, isCursorSdkProvider, isUltraEffort, mergeProviderModelCatalog, normalizeEffortForProvider, uiProviderId, visibleProviders } from "./settings";
-import { clear, el } from "./util";
+import { PROVIDERS, effortOptionsForProvider, displayModelName, getProviderMeta, getSettingsSafe, hasStaticModelCatalog, isHostedCatalogRestricted, isUltraEffort, mergeProviderModelCatalog, normalizeEffortForProvider, refreshHostedProviderCatalog, uiProviderId, usesReasoningEffort, visibleProviders } from "./settings";
+import { clear, el, escapeHtml } from "./util";
 import { icon, icons } from "./icons";
 
 export type PermissionMode = "plan" | "auto" | "research" | "full";
@@ -92,6 +92,14 @@ export class ModelBar {
   private providerSelectionGeneration = 0;
   /** Full model catalogs per provider (auto-fetched when key/connection is ready). */
   private discoveredModels: Record<string, string[]> = {};
+  /** Provider ids supplied by the most recent hosted alias catalog. */
+  private hostedCatalogProviderIds = new Set<string>();
+  /**
+   * The model that actually owns the visible in-flight run. Keeping this
+   * separate from global Settings lets a user work in another session without
+   * making a busy session look like it changed providers halfway through.
+   */
+  private activeRunProfile: { provider: string; model: string; effort?: string } | null = null;
 
   constructor(onChange: () => void) {
     this.onChange = onChange;
@@ -105,6 +113,7 @@ export class ModelBar {
   }
 
   async load() {
+    await this.refreshHostedModelCatalog();
     this.settings = await getSettingsSafe();
     this.normalizeMode();
     this.syncCapabilityDefault();
@@ -115,6 +124,7 @@ export class ModelBar {
 
   async refresh() {
     try {
+      await this.refreshHostedModelCatalog();
       this.settings = await getSettingsSafe();
       this.normalizeMode();
       this.syncCapabilityDefault();
@@ -126,9 +136,166 @@ export class ModelBar {
     }
   }
 
+  /** Lock provider/model/effort controls while the visible session is running. */
+  setActiveSessionRunProfile(profile: { provider: string; model: string; effort?: string } | null) {
+    const next = profile
+      ? {
+          provider: String(profile.provider || "").trim(),
+          model: String(profile.model || "").trim(),
+          effort: String(profile.effort || "").trim(),
+        }
+      : null;
+    const current = this.activeRunProfile;
+    if (
+      current?.provider === next?.provider &&
+      current?.model === next?.model &&
+      current?.effort === next?.effort
+    ) {
+      return;
+    }
+    this.activeRunProfile = next;
+    // Invalidate a slow provider-discovery selection that began before the
+    // session became busy. It must not save a different model mid-run.
+    this.providerSelectionGeneration += 1;
+    this.closeMenus();
+    if (typeof this.settings !== "undefined") this.renderProviderRail();
+  }
+
+  /** Current provider/model/effort shown to the user (locked run wins while busy). */
+  currentProfile(): { provider: string; model: string; effort: string } | null {
+    if (!this.settings) return null;
+    const locked = this.activeRunProfile;
+    return {
+      provider: locked?.provider || this.settings.provider,
+      model: locked?.model || this.settings.model,
+      effort: locked?.effort || this.settings.model_effort || "medium",
+    };
+  }
+
+  /**
+   * Restore another session's remembered model into the shared composer and
+   * settings file so the next agent_run uses that conversation's selection.
+   */
+  async applySessionProfile(profile: {
+    provider: string;
+    model: string;
+    effort?: string;
+  }): Promise<boolean> {
+    if (!this.settings) return false;
+    if (this.modelSelectionLocked()) return false;
+    const provider = String(profile.provider || "").trim();
+    const model = String(profile.model || "").trim();
+    if (!provider || !model) return false;
+    const effort = profile.effort
+      ? normalizeEffortForProvider(provider, profile.effort)
+      : normalizeEffortForProvider(provider, this.settings.model_effort);
+    const meta = getProviderMeta(provider);
+    const same =
+      this.settings.provider === provider &&
+      this.settings.model === model &&
+      this.settings.model_effort === effort;
+    if (same) {
+      this.renderProviderRail();
+      return true;
+    }
+    const selectionGeneration = ++this.providerSelectionGeneration;
+    this.settings.provider = provider;
+    this.settings.model = model;
+    this.settings.model_effort = effort;
+    if (meta?.defaultBaseUrl) {
+      this.settings.base_url = meta.defaultBaseUrl;
+    }
+    try {
+      await api.saveSettings(this.settings);
+      if (selectionGeneration !== this.providerSelectionGeneration) return false;
+      this.settings = await api.getSettings();
+      this.normalizeMode();
+      this.syncCapabilityDefault();
+      this.renderProviderRail();
+      void this.ensureModelsLoaded(this.settings.provider);
+      this.onChange();
+      return true;
+    } catch (e) {
+      console.error(e);
+      this.setStatus("Could not restore this session's model", true);
+      return false;
+    }
+  }
+
+  private modelSelectionLocked(): boolean {
+    return this.activeRunProfile !== null;
+  }
+
+  private modelLockMessage(): string {
+    return "Model is locked while this session is working. Stop or wait for it to finish before switching.";
+  }
+
+  private allowModelSelection(): boolean {
+    if (!this.modelSelectionLocked()) return true;
+    this.closeMenus();
+    this.setStatus(this.modelLockMessage());
+    return false;
+  }
+
+  /** Load administrator-managed aliases before rendering the provider picker. */
+  private async refreshHostedModelCatalog() {
+    try {
+      const catalog = await refreshHostedProviderCatalog();
+      const nextProviderIds = new Set(catalog.map((provider) => provider.id));
+      for (const providerId of this.hostedCatalogProviderIds) {
+        if (!nextProviderIds.has(providerId)) delete this.discoveredModels[providerId];
+      }
+      // Drop any previously discovered BYOK catalogs when this account is under
+      // an admin allowlist — otherwise prohibited providers stay selectable.
+      if (isHostedCatalogRestricted()) {
+        for (const providerId of Object.keys(this.discoveredModels)) {
+          if (!nextProviderIds.has(providerId)) delete this.discoveredModels[providerId];
+        }
+      }
+      for (const provider of catalog) {
+        const models = mergeProviderModelCatalog(
+          provider.id,
+          provider.models.map((model) => model.id),
+        );
+        if (models.length) this.discoveredModels[provider.id] = models;
+      }
+      this.hostedCatalogProviderIds = nextProviderIds;
+      await this.enforceHostedAllowlist();
+    } catch {
+      // Keep the last known picker and built-in providers when the account is
+      // offline, unsigned, or the hosted catalog is temporarily unavailable.
+    }
+  }
+
+  /** If admin restricted this account, force the picker onto an allowed model. */
+  private async enforceHostedAllowlist() {
+    if (!isHostedCatalogRestricted() || !this.settings) return;
+    const allowed = visibleProviders();
+    if (!allowed.length) return;
+    const currentOk = allowed.some((provider) => provider.id === this.settings!.provider);
+    if (!currentOk) {
+      const next = allowed[0]!;
+      this.settings.provider = next.id;
+      this.settings.model = next.defaultModel || next.models[0] || this.settings.model;
+      if (next.defaultBaseUrl) this.settings.base_url = next.defaultBaseUrl;
+      await api.saveSettings(this.settings).catch(() => {});
+      this.renderProviderRail();
+      this.onChange();
+      return;
+    }
+    const models = this.modelsForProvider(this.settings.provider);
+    if (models.length && !models.includes(this.settings.model)) {
+      this.settings.model = models[0]!;
+      await api.saveSettings(this.settings).catch(() => {});
+      this.renderProviderRail();
+      this.onChange();
+    }
+  }
+
   /** Load full model list from the provider API (no manual pick of which models appear). */
   private async ensureModelsLoaded(providerId: string) {
     if (this.discoveredModels[providerId]?.length) return;
+    if (isHostedCatalogRestricted() && !this.hostedCatalogProviderIds.has(providerId)) return;
     const meta = getProviderMeta(providerId);
     if (!meta) return;
     if (hasStaticModelCatalog(providerId)) return;
@@ -141,9 +308,7 @@ export class ModelBar {
           : meta.defaultBaseUrl || null,
       );
       const discovered =
-        providerId === "openrouter"
-          ? modelsRaw.filter((id) => id.includes(":free"))
-          : modelsRaw;
+        providerId === "openrouter" ? ["openrouter/free"] : modelsRaw;
       const models = mergeProviderModelCatalog(providerId, discovered);
       if (models.length) {
         this.discoveredModels[providerId] = models;
@@ -223,6 +388,7 @@ export class ModelBar {
   }
 
   private async saveEffort(id: string) {
+    if (!this.allowModelSelection()) return;
     const next = normalizeEffortForProvider(this.settings.provider, id);
     const prev = normalizeEffortForProvider(this.settings.provider, this.settings.model_effort);
     this.settings.model_effort = next;
@@ -317,8 +483,8 @@ export class ModelBar {
     }, 0);
   }
 
-  private shortModel(id: string): string {
-    return displayModelName(id);
+  private shortModel(id: string, providerId?: string): string {
+    return displayModelName(id, providerId);
   }
 
   private chipBtn(
@@ -338,7 +504,7 @@ export class ModelBar {
       "aria-label": aria,
       "aria-haspopup": "listbox",
       "aria-expanded": "false",
-      html: `${logo}<span class="chip-label">${label}</span><span class="chip-caret" aria-hidden="true">▾</span>`,
+      html: `${logo}<span class="chip-label">${escapeHtml(label)}</span><span class="chip-caret" aria-hidden="true">▾</span>`,
     }) as HTMLButtonElement;
   }
 
@@ -349,8 +515,11 @@ export class ModelBar {
     clear(this.providerRail);
 
     const mode = this.getMode();
+    const lockedProfile = this.activeRunProfile;
+    const displaySettings = lockedProfile || this.settings;
+    const modelIsLocked = this.modelSelectionLocked();
     const modeMeta = MODES.find((m) => m.id === mode) || MODES[0];
-    const uiProvId = uiProviderId(this.settings.provider, this.settings.model);
+    const uiProvId = uiProviderId(displaySettings.provider, displaySettings.model);
     const provider = PROVIDERS.find((p) => p.id === uiProvId) || visibleProviders()[0] || PROVIDERS[0];
     const meta = getProviderMeta(uiProvId) || provider;
 
@@ -417,15 +586,25 @@ export class ModelBar {
     // Model chip (shows provider logo + model display name)
     const modelWrap = el("div", { class: "chip-wrap" });
     const modelBtn = this.chipBtn(
-      this.shortModel(this.settings.model),
-      `${provider.label} · ${this.shortModel(this.settings.model)}`,
-      `Model: ${this.shortModel(this.settings.model)}`,
-      "chip-model",
+      this.shortModel(displaySettings.model, uiProvId),
+      modelIsLocked
+        ? `${provider.label} · ${this.shortModel(displaySettings.model, uiProvId)} · ${this.modelLockMessage()}`
+        : `${provider.label} · ${this.shortModel(displaySettings.model, uiProvId)}`,
+      modelIsLocked
+        ? `Model locked: ${this.shortModel(displaySettings.model, uiProvId)}`
+        : `Model: ${this.shortModel(displaySettings.model, uiProvId)}`,
+      "chip-model" + (modelIsLocked ? " chip-model-locked" : ""),
       provider.logoSrc,
     );
+    if (modelIsLocked) {
+      modelBtn.disabled = true;
+      modelBtn.setAttribute("aria-disabled", "true");
+      modelBtn.setAttribute("data-model-locked", "true");
+    }
     modelBtn.addEventListener("click", (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
+      if (!this.allowModelSelection()) return;
       if (modelBtn.classList.contains("menu-open")) {
         this.closeMenus();
         return;
@@ -443,7 +622,7 @@ export class ModelBar {
           "aria-selected": String(p.id === provider.id),
           html:
             `<img class="chip-menu-logo" src="${p.logoSrc}" alt="" width="16" height="16" draggable="false" />` +
-            `<span>${p.label}</span>`,
+            `<span>${escapeHtml(p.label)}</span>`,
         }) as HTMLButtonElement;
         item.addEventListener("click", (e) => {
           e.preventDefault();
@@ -468,11 +647,12 @@ export class ModelBar {
           type: "button",
           role: "option",
           "aria-selected": String(m === this.settings.model),
-          title: displayModelName(m),
-        }, [this.shortModel(m)]) as HTMLButtonElement;
+          title: displayModelName(m, uiProvId),
+        }, [this.shortModel(m, uiProvId)]) as HTMLButtonElement;
         item.addEventListener("click", async (e) => {
           e.preventDefault();
           e.stopPropagation();
+          if (!this.allowModelSelection()) return;
           this.closeMenus();
           this.settings.model = m;
           try {
@@ -493,10 +673,14 @@ export class ModelBar {
     modelWrap.appendChild(modelBtn);
     this.providerRail.appendChild(modelWrap);
 
-    // OpenAI (Cursor SDK) shows Effort instead of capability chips.
-    if (isCursorSdkProvider(provider.id)) {
+    // Cursor and native Grok expose an effort control. For Grok this maps to
+    // xAI's supported reasoning_effort values (low / medium / high).
+    if (usesReasoningEffort(provider.id)) {
       const effortOpts = effortOptionsForProvider(provider.id);
-      const effort = normalizeEffortForProvider(provider.id, this.settings.model_effort);
+      const effort = normalizeEffortForProvider(
+        provider.id,
+        lockedProfile?.effort || this.settings.model_effort,
+      );
       const effortMeta = effortOpts.find((e) => e.id === effort) || effortOpts[effortOpts.length - 1];
       const effortWrap = el("div", { class: "chip-wrap" });
       const isUltra = isUltraEffort(effort);
@@ -513,9 +697,16 @@ export class ModelBar {
           label.textContent = "Ultra";
         }
       }
+      if (modelIsLocked) {
+        effortBtn.disabled = true;
+        effortBtn.classList.add("chip-model-locked");
+        effortBtn.setAttribute("aria-disabled", "true");
+        effortBtn.title = this.modelLockMessage();
+      }
       effortBtn.addEventListener("click", (ev) => {
         ev.preventDefault();
         ev.stopPropagation();
+        if (!this.allowModelSelection()) return;
         if (effortBtn.classList.contains("menu-open")) {
           this.closeMenus();
           return;
@@ -581,6 +772,16 @@ export class ModelBar {
       });
       capWrap.appendChild(capBtn);
       this.providerRail.appendChild(capWrap);
+    }
+
+    if (modelIsLocked) {
+      this.providerRail.appendChild(
+        el("span", {
+          class: "chip-lock-note",
+          role: "status",
+          title: this.modelLockMessage(),
+        }, ["Model locked"]),
+      );
     }
 
     this.statusEl = el("span", { class: "mode-status chip-status" });
@@ -717,13 +918,24 @@ export class ModelBar {
 
   private async attachImage() {
     try {
-      const path = await api.openImagePicker();
-      if (!path) return;
-      this.insertComposer(`[Attached image: ${path}]\n`);
-      this.setStatus("Image attached");
+      const paths = await api.openImagePicker();
+      if (!paths.length) return;
+      let ok = 0;
+      for (const path of paths) {
+        try {
+          const imported = await api.importImagePath(path);
+          window.dispatchEvent(
+            new CustomEvent("horma:composer-attach-image", { detail: { path: imported } }),
+          );
+          ok += 1;
+        } catch (err) {
+          console.error(err);
+        }
+      }
+      this.setStatus(ok === 1 ? "Image attached" : ok > 1 ? `${ok} images attached` : "Could not attach images", ok === 0);
     } catch (e) {
       console.error(e);
-      this.setStatus("Could not attach image", true);
+      this.setStatus("Could not attach images", true);
     }
   }
 
@@ -741,6 +953,7 @@ export class ModelBar {
   }
 
   private async selectProvider(id: string) {
+    if (!this.allowModelSelection()) return;
     const p = PROVIDERS.find((x) => x.id === id);
     if (!p) return;
     const selectionGeneration = ++this.providerSelectionGeneration;
