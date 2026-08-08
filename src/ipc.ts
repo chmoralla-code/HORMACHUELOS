@@ -179,6 +179,18 @@ export const api = {
   /** Save a clipboard/drag-drop image to a temp file; returns absolute path. */
   savePastedImage: (dataBase64: string, mime?: string | null): Promise<string> =>
     invoke("save_pasted_image", { dataBase64, mime: mime ?? null }),
+  /**
+   * Capture only a user-selected rectangle inside the current preview. The
+   * native command is deliberately scoped to the calling app window; it cannot
+   * enumerate or capture arbitrary desktop windows.
+   */
+  capturePreviewSelection: (region: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    devicePixelRatio: number;
+  }): Promise<string> => invoke("capture_preview_selection", { region }),
   /** Copy an on-disk image into the paste dir (Explorer paste / file picker). */
   importImagePath: (path: string): Promise<string> =>
     invoke("import_image_path", { path }),

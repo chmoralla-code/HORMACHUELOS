@@ -7,6 +7,7 @@ import { ModelBar } from "./components/modelbar";
 import { ProjectPicker } from "./components/picker";
 import { WorkspacePanel } from "./components/workspace";
 import { SmartAgentPanel, applySmartAgentEvent } from "./components/smart-agent";
+import { ClientSuccessCenter, composeProjectMissionPrompt } from "./components/client-success-center";
 import {
   SitePreview,
   isExternalPreviewUrl,
@@ -51,6 +52,7 @@ let modelBar: ModelBar;
 let workspacePanel: WorkspacePanel;
 let sitePreview: SitePreview;
 let smartAgentPanel: SmartAgentPanel | null = null;
+let clientSuccessCenter: ClientSuccessCenter | null = null;
 let currentProjectPath: string | null = null;
 let sessions: Session[] = [];
 let activeSessionId: string | null = null;
@@ -1182,7 +1184,7 @@ function renderWorkspaceMenu() {
   const appendAction = (
     action: string,
     label: string,
-    iconName: "folder" | "globe" | "panelRight",
+    iconName: "folder" | "globe" | "panelRight" | "spark",
     onClick: () => void,
     disabled = false,
   ) => {
@@ -1223,6 +1225,13 @@ function renderWorkspaceMenu() {
     () => {
       if (currentProjectPath) void api.openProjectInExplorer();
     },
+    !hasProject,
+  );
+  appendAction(
+    "client-success",
+    "Open Client Success Center",
+    "spark",
+    () => openClientSuccessCenter(),
     !hasProject,
   );
   menu.appendChild(el("div", { class: "workspace-menu-divider", role: "separator" }));
@@ -1441,6 +1450,15 @@ async function exportClientPack() {
   }
 }
 
+function openClientSuccessCenter() {
+  if (!currentProjectPath) {
+    reportError("Open or create a project before using Client Success Center.");
+    openNewProjectPicker();
+    return;
+  }
+  clientSuccessCenter?.open();
+}
+
 async function sendPrompt(prompt: string) {
   if (!currentProjectPath) {
     reportError("Open or create a project before starting.");
@@ -1480,6 +1498,9 @@ async function sendPrompt(prompt: string) {
   // model prompts, tool arguments, or results. The replacement keeps enough
   // intent for the backend to open the secure integration form.
   prompt = redactChatCredentials(prompt);
+  // The durable project brief guides the agent without polluting the user's
+  // visible chat bubble, session title, or the preview-detection prompt.
+  const agentPrompt = composeProjectMissionPrompt(projectRoot, prompt);
 
   let existing = activeSessionId ? sessions.find((x) => x.id === activeSessionId) : null;
   const hasMessages = existing && existing.messages.length > 0;
@@ -1550,7 +1571,7 @@ async function sendPrompt(prompt: string) {
   try {
     const resumeAgentId = sessionForId(sessionId)?.cursorAgentId || null;
     const nextAgentId = await api.agentRun(
-      prompt,
+      agentPrompt,
       sessionId,
       history,
       projectRoot,
@@ -1838,6 +1859,16 @@ async function init() {
     },
     getSessionId: () => activeSessionId,
     onOpenSettings: openSettings,
+  });
+  clientSuccessCenter = new ClientSuccessCenter(document.getElementById("modal-root")!, {
+    getProjectPath: () => currentProjectPath,
+    onRunRecipe: (prompt) => chat.submitPreviewPrompt(prompt),
+    onExportClientPack: async (handoffSummary) => {
+      if (!currentProjectPath) return null;
+      const result = await api.exportClientPack(undefined, handoffSummary);
+      reportError(`Client pack saved: ${result.zipPath} (${result.filesCount} files)`);
+      return result;
+    },
   });
   // Preview actions use Chat's normal send/queue rules. That means a Build
   // choice always reaches the selected model, even when another task is still

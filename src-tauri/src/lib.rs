@@ -8,6 +8,7 @@ pub mod integration_chat;
 pub mod integrations;
 pub mod license;
 pub mod llm;
+pub mod preview_capture;
 pub mod smart_agent;
 pub mod state;
 pub mod templates;
@@ -1090,6 +1091,7 @@ pub fn run() {
             apply_license_key,
             record_license_usage,
             save_pasted_image,
+            preview_capture::capture_preview_selection,
             import_image_path,
             agent_run,
             agent_stop,

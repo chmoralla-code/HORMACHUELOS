@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.51";
-const BUILTIN_MSI_SHA256 = "5376df1e4e0fb44986712c32404842de1e51bfefa7eeab06c4fdd449ac38ba7f";
-const BUILTIN_EXE_SHA256 = "e4b71655360117bd8a45ebd17936e4d2c92d2c7c8d6fa1d203267e5740cf734c";
-const BUILTIN_RELEASE_NOTES = "Design mode now works with live localhost previews through visual area selection, while project previews retain exact element editing and screenshots.";
+const BUILTIN_RELEASE_VERSION = "0.1.52";
+const BUILTIN_MSI_SHA256 = "3e5e5d284703d43a8f66494b60df6a7fd4fb8fbdb60f521578f50b4c08c312e1";
+const BUILTIN_EXE_SHA256 = "8b01e6db950b2b604d091ac5a81ac490215c090b11540dcf840fe952c9e32f63";
+const BUILTIN_RELEASE_NOTES = "Client Success Center with persistent project outcomes, build-to-proof workflows, QA readiness, and tailored client delivery packs. Design mode now selects and captures exact live-preview features for AI edits.";
 
 /**
  * A deployment-bundled release keeps the download/update path available even

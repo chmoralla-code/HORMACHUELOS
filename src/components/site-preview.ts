@@ -13,6 +13,19 @@ export type PreviewOpenOptions = {
   autoPickEntry?: boolean;
 };
 
+type VisualFeatureTarget = {
+  /** CSS-pixel rectangle relative to the visible preview frame. */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** Stable visual context for the fallback prompt when capture is unavailable. */
+  xPercent: number;
+  yPercent: number;
+  widthPercent: number;
+  heightPercent: number;
+};
+
 type SelectedEl = {
   tag: string;
   text: string;
@@ -23,14 +36,11 @@ type SelectedEl = {
   /** data:image/… screenshot of the clicked control, captured on select. */
   shotDataUrl: string | null;
   /**
-   * Coordinates chosen from the parent preview overlay when the iframe is
-   * cross-origin.  A live localhost app cannot expose its DOM to the Tauri
-   * shell, so these are deliberately a visual pointer rather than a selector.
+   * A user-drawn feature box when a live iframe is cross-origin. Its DOM is
+   * intentionally inaccessible to the shell, but the visible feature can
+   * still be outlined and captured as an image reference for the model.
    */
-  visualTarget?: {
-    xPercent: number;
-    yPercent: number;
-  };
+  visualTarget?: VisualFeatureTarget;
 };
 
 /** Result returned by the chat shell after a preview action creates a prompt. */
@@ -591,6 +601,10 @@ export class SitePreview {
   private selected: SelectedEl | null = null;
   /** Parent-side selector used when an iframe's DOM is isolated by origin. */
   private visualDesignOverlay: HTMLElement | null = null;
+  /** Deduplicates a native visual-feature screenshot while it is being made. */
+  private visualCapture:
+    | { selection: SelectedEl; promise: Promise<string | null> }
+    | null = null;
   private onDescribe: PreviewDescribeHandler | null = null;
   private onStateChange: ((state: SessionPreviewState | null) => void) | null = null;
   private closing = false;
@@ -1162,10 +1176,10 @@ export class SitePreview {
     const tagEl = this.editBar.querySelector("#site-preview-edit-tag");
     if (!tagEl) return;
     if (target?.visualTarget) {
-      tagEl.textContent = "area";
-      const x = Math.round(target.visualTarget.xPercent);
-      const y = Math.round(target.visualTarget.yPercent);
-      this.editInput.placeholder = `Change the selected area (${x}% × ${y}%)…`;
+      tagEl.textContent = "feature";
+      const width = Math.max(1, Math.round(target.visualTarget.widthPercent));
+      const height = Math.max(1, Math.round(target.visualTarget.heightPercent));
+      this.editInput.placeholder = `Change the selected feature (${width}% × ${height}% reference)…`;
       return;
     }
     if (target) {
@@ -1177,7 +1191,7 @@ export class SitePreview {
     }
     tagEl.textContent = "element";
     this.editInput.placeholder = this.designMode
-      ? "Click an element or area, then describe the change"
+      ? "Click an element or drag around a live feature, then describe the change"
       : "Describe the change";
   }
 
@@ -1701,7 +1715,7 @@ export class SitePreview {
         ? "Software window"
         : "Desktop";
     if (this.designMode) {
-      return `${mode} · Design mode · click an element or visual area, then describe the change`;
+      return `${mode} · Design mode · click an element or drag around a live feature, then describe the change`;
     }
     return assetMode
       ? `${mode} · Ready (asset mode)`
@@ -1731,13 +1745,14 @@ export class SitePreview {
   private clearVisualDesignMode() {
     this.visualDesignOverlay?.remove();
     this.visualDesignOverlay = null;
+    this.visualCapture = null;
   }
 
   /**
    * Cross-origin frames (including live localhost dev servers in WebView2)
-   * cannot safely expose their DOM to the shell.  Keep Design mode useful by
-   * letting the user select a visible region, then give the agent stable
-   * coordinates and the project context in the generated prompt.
+   * cannot safely expose their DOM to the shell. Keep Design mode useful with
+   * a precise user-drawn feature box rather than pretending a point is a DOM
+   * selector. The selected box is captured as an image reference for the AI.
    */
   private enableVisualDesignMode(frame: HTMLIFrameElement) {
     this.clearVisualDesignMode();
@@ -1747,70 +1762,152 @@ export class SitePreview {
       class: "site-preview-visual-design-overlay",
       "data-testid": "design-visual-overlay",
       tabindex: "0",
-      "aria-label": "Select a visual target in the live preview",
+      "aria-label": "Drag around a feature in the live preview",
     });
     const hint = el("div", { class: "site-preview-visual-design-hint", "aria-hidden": "true" }, [
       el("span", { class: "site-preview-visual-design-hint-label" }, ["Live preview"]),
-      el("span", {}, ["Click a visible area to target it"]),
+      el("span", {}, ["Drag around the exact feature to edit"]),
     ]);
     const cursor = el("span", {
       class: "site-preview-visual-design-cursor",
       "aria-hidden": "true",
       hidden: "true",
     });
-    const marker = el("div", {
-      class: "site-preview-visual-design-marker",
+    const featureBox = el("div", {
+      class: "site-preview-visual-feature-selection",
+      "data-testid": "design-feature-selection",
       "aria-hidden": "true",
       hidden: "true",
     }, [
-      el("span", { class: "site-preview-visual-design-marker-dot" }),
-      el("span", { class: "site-preview-visual-design-marker-label" }, ["Selected area"]),
+      el("span", { class: "site-preview-visual-feature-corner is-top-left" }),
+      el("span", { class: "site-preview-visual-feature-corner is-top-right" }),
+      el("span", { class: "site-preview-visual-feature-corner is-bottom-left" }),
+      el("span", { class: "site-preview-visual-feature-corner is-bottom-right" }),
+      el("span", { class: "site-preview-visual-feature-label" }, ["Feature selected"]),
     ]);
-    overlay.append(hint, cursor, marker);
+    overlay.append(hint, cursor, featureBox);
 
-    const pointForEvent = (event: PointerEvent | MouseEvent) => {
+    type OverlayPoint = { x: number; y: number; width: number; height: number };
+    type DragStart = { pointerId: number; x: number; y: number };
+    let drag: DragStart | null = null;
+    const pointForEvent = (event: PointerEvent): OverlayPoint | null => {
       const rect = overlay.getBoundingClientRect();
       if (rect.width < 1 || rect.height < 1) return null;
-      const clamp = (value: number) => Math.max(0, Math.min(100, value));
+      const clamp = (value: number, max: number) => Math.max(0, Math.min(max, value));
       return {
-        xPercent: Math.round(clamp(((event.clientX - rect.left) / rect.width) * 100) * 10) / 10,
-        yPercent: Math.round(clamp(((event.clientY - rect.top) / rect.height) * 100) * 10) / 10,
+        x: clamp(event.clientX - rect.left, rect.width),
+        y: clamp(event.clientY - rect.top, rect.height),
+        width: rect.width,
+        height: rect.height,
       };
     };
-    const positionAt = (node: HTMLElement, point: { xPercent: number; yPercent: number }) => {
-      node.style.left = `${point.xPercent}%`;
-      node.style.top = `${point.yPercent}%`;
+    const targetFromPoints = (from: DragStart, to: OverlayPoint, useClickSize = false): VisualFeatureTarget => {
+      let left = Math.min(from.x, to.x);
+      let top = Math.min(from.y, to.y);
+      let width = Math.abs(to.x - from.x);
+      let height = Math.abs(to.y - from.y);
+      // A quick click still selects a useful, visible feature-sized box. A
+      // drag is preferred when the user needs exact boundaries.
+      if (useClickSize || (width < 12 && height < 12)) {
+        width = Math.min(88, Math.max(42, to.width * 0.14));
+        height = Math.min(58, Math.max(30, to.height * 0.1));
+        left = Math.max(0, Math.min(to.width - width, from.x - width / 2));
+        top = Math.max(0, Math.min(to.height - height, from.y - height / 2));
+      }
+      width = Math.max(12, Math.min(width, to.width - left));
+      height = Math.max(12, Math.min(height, to.height - top));
+      return {
+        x: Math.round(left),
+        y: Math.round(top),
+        width: Math.round(width),
+        height: Math.round(height),
+        xPercent: Math.round((left / to.width) * 1000) / 10,
+        yPercent: Math.round((top / to.height) * 1000) / 10,
+        widthPercent: Math.round((width / to.width) * 1000) / 10,
+        heightPercent: Math.round((height / to.height) * 1000) / 10,
+      };
+    };
+    const drawFeatureBox = (target: VisualFeatureTarget, active = false) => {
+      featureBox.hidden = false;
+      featureBox.style.left = `${target.x}px`;
+      featureBox.style.top = `${target.y}px`;
+      featureBox.style.width = `${target.width}px`;
+      featureBox.style.height = `${target.height}px`;
+      featureBox.classList.toggle("is-dragging", active);
+    };
+    const finishSelection = (target: VisualFeatureTarget) => {
+      const selection: SelectedEl = {
+        tag: "visual feature",
+        text: `${Math.round(target.widthPercent)}% × ${Math.round(target.heightPercent)}% feature reference`,
+        path: this.entryPath,
+        selector: `visual-feature(${target.xPercent}%,${target.yPercent}%,${target.widthPercent}%,${target.heightPercent}%)`,
+        element: null,
+        shotDataUrl: null,
+        visualTarget: target,
+      };
+      this.selected = selection;
+      drawFeatureBox(target);
+      overlay.dataset.selected = "true";
+      overlay.dataset.screenshot = "pending";
+      this.updateEditTargetUi(selection);
+      this.statusEl.textContent = "Feature selected · creating a visual reference for AI…";
+      this.editInput.focus();
+      void this.captureVisualFeatureShot(selection);
     };
 
     overlay.addEventListener("pointermove", (event) => {
       const point = pointForEvent(event);
       if (!point) return;
+      if (drag?.pointerId === event.pointerId) {
+        event.preventDefault();
+        cursor.hidden = true;
+        drawFeatureBox(targetFromPoints(drag, point), true);
+        return;
+      }
       cursor.hidden = false;
-      positionAt(cursor, point);
+      cursor.style.left = `${point.x}px`;
+      cursor.style.top = `${point.y}px`;
     });
     overlay.addEventListener("pointerleave", () => {
-      cursor.hidden = true;
+      if (!drag) cursor.hidden = true;
     });
-    overlay.addEventListener("click", (event) => {
+    overlay.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
       const point = pointForEvent(event);
       if (!point) return;
       event.preventDefault();
       event.stopPropagation();
-      this.selected = {
-        tag: "visual area",
-        text: `${Math.round(point.xPercent)}% across, ${Math.round(point.yPercent)}% down`,
-        path: this.entryPath,
-        selector: `visual-area(${point.xPercent}%, ${point.yPercent}%)`,
-        element: null,
-        shotDataUrl: null,
-        visualTarget: point,
-      };
-      marker.hidden = false;
-      positionAt(marker, point);
-      overlay.dataset.selected = "true";
-      this.updateEditTargetUi(this.selected);
-      this.statusEl.textContent = "Visual target selected · describe the change for AI.";
-      this.editInput.focus();
+      drag = { pointerId: event.pointerId, x: point.x, y: point.y };
+      overlay.dataset.dragging = "true";
+      cursor.hidden = true;
+      drawFeatureBox(targetFromPoints(drag, point, true), true);
+      try {
+        overlay.setPointerCapture(event.pointerId);
+      } catch {
+        /* Pointer capture is optional on older embedded WebViews. */
+      }
+    });
+    overlay.addEventListener("pointerup", (event) => {
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      const point = pointForEvent(event);
+      const started = drag;
+      drag = null;
+      delete overlay.dataset.dragging;
+      try {
+        overlay.releasePointerCapture(event.pointerId);
+      } catch {
+        /* No pointer capture to release. */
+      }
+      if (!point) return;
+      event.preventDefault();
+      event.stopPropagation();
+      finishSelection(targetFromPoints(started, point));
+    });
+    overlay.addEventListener("pointercancel", (event) => {
+      if (drag?.pointerId !== event.pointerId) return;
+      drag = null;
+      delete overlay.dataset.dragging;
+      featureBox.classList.remove("is-dragging");
     });
     overlay.addEventListener("keydown", (event) => {
       if (event.key !== "Escape") return;
@@ -1823,7 +1920,57 @@ export class SitePreview {
     this.selected = null;
     this.updateEditTargetUi(null);
     this.statusEl.textContent =
-      "Design mode · live preview is isolated, so click a visible area to target it.";
+      "Design mode · live preview is isolated, so drag around the exact feature to create an AI reference.";
+  }
+
+  /**
+   * A cross-origin iframe cannot be rasterized by browser JavaScript. This
+   * user-triggered, bounded native capture records only the selected preview
+   * box, after hiding Design-mode chrome so the image contains the feature
+   * rather than its temporary outline.
+   */
+  private async captureVisualFeatureShot(selection: SelectedEl): Promise<string | null> {
+    if (!selection.visualTarget) return null;
+    if (selection.shotDataUrl) return selection.shotDataUrl;
+    if (this.visualCapture?.selection === selection) return this.visualCapture.promise;
+    const overlay = this.visualDesignOverlay;
+    if (!overlay?.isConnected) return null;
+    const target = selection.visualTarget;
+    const promise = (async () => {
+      overlay.classList.add("is-capturing");
+      // Let WebView paint the temporary chrome-free frame before Windows reads
+      // its bounded preview surface.
+      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      try {
+        const host = this.frameHost.getBoundingClientRect();
+        if (host.width < 1 || host.height < 1) return null;
+        const raw = await api.capturePreviewSelection({
+          x: host.left + target.x,
+          y: host.top + target.y,
+          width: target.width,
+          height: target.height,
+          devicePixelRatio: window.devicePixelRatio || 1,
+        });
+        const shot = raw.startsWith("data:image/") ? raw : `data:image/png;base64,${raw}`;
+        if (this.selected === selection && this.visualDesignOverlay === overlay) {
+          selection.shotDataUrl = shot;
+          overlay.dataset.screenshot = "ready";
+          this.statusEl.textContent = "Feature selected · visual reference ready for AI.";
+        }
+        return shot;
+      } catch {
+        if (this.selected === selection && this.visualDesignOverlay === overlay) {
+          overlay.dataset.screenshot = "unavailable";
+          this.statusEl.textContent = "Feature selected · describe the change and the outlined reference will be sent to AI.";
+        }
+        return null;
+      } finally {
+        overlay.classList.remove("is-capturing");
+        if (this.visualCapture?.selection === selection) this.visualCapture = null;
+      }
+    })();
+    this.visualCapture = { selection, promise };
+    return promise;
   }
 
   private injectDesignMode(attempt = 0) {
@@ -2191,13 +2338,17 @@ When the task is complete, report the live public URL, GitHub repository URL, Ve
     const sel = this.selected;
     this.editInput.value = "";
     this.statusEl.textContent = sel?.visualTarget
-      ? "Preparing visual target for AI…"
+      ? "Preparing selected feature for AI…"
       : "Capturing selection for AI…";
 
     let shot = sel?.shotDataUrl || null;
-    if (!shot && sel?.element?.isConnected) {
-      shot = await this.captureSelectionShot(sel.element);
-      if (this.selected === sel) this.selected.shotDataUrl = shot;
+    if (!shot) {
+      if (sel?.visualTarget) {
+        shot = await this.captureVisualFeatureShot(sel);
+      } else if (sel?.element?.isConnected) {
+        shot = await this.captureSelectionShot(sel.element);
+        if (this.selected === sel) this.selected.shotDataUrl = shot;
+      }
     }
 
     let imagePath: string | null = null;
@@ -2212,9 +2363,9 @@ When the task is complete, report the live public URL, GitHub repository URL, Ve
 
     const previewLabel = sel?.path || this.entryPath || "the current preview";
     const prompt = imagePath
-      ? `In the preview (${previewLabel}), update the element shown in the attached screenshot (the control I clicked in Design mode).\n\nRequested change: ${text}`
+      ? `In the preview (${previewLabel}), update the specific feature shown in the attached screenshot. It is the exact visual reference selected in Design mode; the temporary blue outline is not part of the page. Preserve surrounding behavior and make the requested change only to that feature.\n\nRequested change: ${text}`
       : sel?.visualTarget
-        ? `In the live preview (${previewLabel}), apply this design change to the visual target at approximately ${Math.round(sel.visualTarget.xPercent)}% from the left and ${Math.round(sel.visualTarget.yPercent)}% from the top of the visible preview. The live preview is isolated by the browser, so these coordinates are a visual pointer rather than a DOM selector. Inspect the relevant project files and running preview yourself, preserve surrounding behavior, and make the requested change at that target.\n\nRequested change: ${text}`
+        ? `In the live preview (${previewLabel}), apply this design change to the feature inside the selected visual box (about ${Math.round(sel.visualTarget.widthPercent)}% wide × ${Math.round(sel.visualTarget.heightPercent)}% high, beginning ${Math.round(sel.visualTarget.xPercent)}% from the left and ${Math.round(sel.visualTarget.yPercent)}% from the top). The live preview is isolated by the browser, so this box is a user-selected visual reference rather than a DOM selector. Inspect the relevant project files and running preview yourself, preserve surrounding behavior, and make the requested change only to that feature.\n\nRequested change: ${text}`
       : sel
         ? `In the preview (${previewLabel}), update the clicked <${sel.tag}>${sel.text ? ` (“${sel.text}”)` : ""} element.\n\nRequested change: ${text}`
         : `In the preview (${previewLabel}), apply this design change:\n\n${text}`;
@@ -2236,7 +2387,7 @@ When the task is complete, report the live public URL, GitHub repository URL, Ve
               : imagePath
                 ? "Design change + screenshot sent to the active model."
                 : sel?.visualTarget
-                  ? "Visual design target sent to the active model."
-                : "Design change sent to the active model.";
+                  ? "Selected feature reference sent to the active model."
+                  : "Design change sent to the active model.";
   }
 }

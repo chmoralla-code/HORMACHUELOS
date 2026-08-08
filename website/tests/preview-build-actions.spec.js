@@ -37,11 +37,11 @@ test("Design mode keeps exact element selection for project-file previews", asyn
   await page.getByRole("button", { name: "Ask AI", exact: true }).click();
   const prompts = await page.evaluate(() => window.__previewPrompts || []);
   expect(prompts).toHaveLength(1);
-  expect(prompts[0]).toContain("update the clicked <button>");
+  expect(prompts[0]).toContain("specific feature shown in the attached screenshot");
   expect(prompts[0]).toContain("Use the primary color.");
 });
 
-test("Design mode targets a cross-origin live preview instead of disabling itself", async ({ page }) => {
+test("Design mode outlines and captures a selected cross-origin live-preview feature", async ({ page }) => {
   const consoleErrors = [];
   page.on("pageerror", (error) => consoleErrors.push(error.message));
   page.on("console", (message) => {
@@ -57,7 +57,13 @@ test("Design mode targets a cross-origin live preview instead of disabling itsel
     route.fulfill({
       status: 200,
       contentType: "text/html",
-      body: "<!doctype html><title>Live preview</title><main><button>Publish</button></main>",
+      body: `<!doctype html><title>Live preview</title>
+        <style>
+          body { margin: 0; font: 16px system-ui, sans-serif; background: #f7f9ff; }
+          main { padding: 92px 84px; }
+          button { padding: 16px 28px; border: 0; border-radius: 9px; background: #2d6cdf; color: white; font-weight: 700; }
+        </style>
+        <main><button>Publish</button></main>`,
     }),
   );
 
@@ -75,11 +81,17 @@ test("Design mode targets a cross-origin live preview instead of disabling itsel
   await expect(selector).toBeVisible();
   await expect(page.locator(".site-preview-status")).toContainText("live preview is isolated");
 
-  await selector.click({ position: { x: 180, y: 120 } });
-  await expect(page.locator(".site-preview-visual-design-marker")).toBeVisible();
-  await expect(page.locator("#site-preview-edit-tag")).toHaveText("area");
+  const box = await selector.boundingBox();
+  expect(box).not.toBeNull();
+  await page.mouse.move(box.x + 76, box.y + 82);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 218, box.y + 152, { steps: 8 });
+  await page.mouse.up();
+  await expect(page.getByTestId("design-feature-selection")).toBeVisible();
+  await expect(page.locator("#site-preview-edit-tag")).toHaveText("feature");
   await expect(page.locator(".site-preview-visual-design-hint")).toHaveCSS("opacity", "0");
-  await page.screenshot({ path: path.join(OUT, "preview-design-live-selector.png"), fullPage: true });
+  await expect(page.locator(".site-preview-status")).toContainText("visual reference ready");
+  await page.screenshot({ path: path.join(OUT, "preview-design-live-feature-selection.png"), fullPage: true });
 
   const description = page.getByRole("textbox", { name: "Describe the change" });
   await description.fill("Make this call to action more prominent.");
@@ -87,11 +99,15 @@ test("Design mode targets a cross-origin live preview instead of disabling itsel
 
   const prompts = await page.evaluate(() => window.__previewPrompts || []);
   expect(prompts).toHaveLength(1);
-  expect(prompts[0]).toContain("visual target at approximately");
+  expect(prompts[0]).toContain("specific feature shown in the attached screenshot");
   expect(prompts[0]).toContain("localhost:1421/dashboard");
   expect(prompts[0]).toContain("Make this call to action more prominent.");
-  expect(prompts[0]).not.toContain("attached screenshot");
-  await expect(page.locator(".site-preview-status")).toContainText("Visual design target sent");
+  expect(prompts[0]).not.toContain("visual target at approximately");
+  const captures = await page.evaluate(() => window.__previewCaptureRequests || []);
+  expect(captures).toHaveLength(1);
+  expect(captures[0].width).toBeGreaterThan(100);
+  expect(captures[0].height).toBeGreaterThan(40);
+  await expect(page.locator(".site-preview-status")).toContainText("Design change + screenshot sent");
 
   const fatal = consoleErrors.filter((entry) => !/favicon|vite|tauri/i.test(entry));
   expect(fatal, fatal.join("\n")).toEqual([]);
