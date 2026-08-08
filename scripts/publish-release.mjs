@@ -112,6 +112,8 @@ function bumpVersions(version, notes = "") {
   setLockfileVersion(join(ROOT, "website", "package-lock.json"), version);
 
   // Fallback download labels on the marketing site (API latest release is preferred).
+  // Installers are hosted on Supabase Storage; the static /downloads files are
+  // excluded from Vercel deploys, so the fallback URLs point at Storage.
   const appJs = join(ROOT, "website", "js", "app.js");
   if (existsSync(appJs)) {
     let src = readFileSync(appJs, "utf8");

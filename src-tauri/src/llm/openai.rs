@@ -209,6 +209,23 @@ fn extract_think_block(raw: &str) -> Option<(String, String)> {
     None
 }
 
+/// A stream that produced zero SSE events and whose body is not an ordinary
+/// completion response is a cut-off/error stream (proxy relay died before any
+/// event, or the upstream returned an error object instead of choices). Treat
+/// it as a resumable interruption instead of a hard "malformed JSON" error.
+fn is_cut_off_stream_body(body: &str) -> bool {
+    let body = body.trim();
+    if body.is_empty() || !body.starts_with('{') {
+        return true;
+    }
+    // `{"error": ...}` (possibly with `message`/`code`) is an upstream/gateway
+    // failure, not a usable completion — return it as a resumable interruption.
+    if let Ok(value) = serde_json::from_str::<Value>(body) {
+        return value.get("error").is_some() && value.get("choices").is_none();
+    }
+    true
+}
+
 fn parse_response(text: &str) -> Result<LlmResponse> {
     let value: Value = serde_json::from_str(text)
         .map_err(|_| anyhow!("invalid_response: The provider returned malformed JSON."))?;
@@ -986,7 +1003,17 @@ impl LlmProvider for OpenAi {
             // Some compatible endpoints ignore `stream: true` and return one
             // ordinary JSON response. Preserve support for those providers.
             if !accumulator.saw_event {
-                let parsed = parse_response(full_body.trim())?;
+                let body = full_body.trim();
+                if is_cut_off_stream_body(body) {
+                    return Ok(LlmResponse {
+                        text: None,
+                        tool_calls: Vec::new(),
+                        reasoning_content: None,
+                        stop_reason: "stream_interrupted".to_string(),
+                        usage_tokens: 0,
+                    });
+                }
+                let parsed = parse_response(body)?;
                 if let (Some(reasoning), Some(sink)) =
                     (parsed.reasoning_content.as_deref(), on_reasoning.as_ref())
                 {
@@ -1383,5 +1410,24 @@ mod tests {
         let response = accumulator.into_response().expect("object args ok");
         assert_eq!(response.tool_calls.len(), 1);
         assert_eq!(response.tool_calls[0].arguments, json!({ "path": "." }));
+    }
+
+    #[test]
+    fn cut_off_stream_bodies_are_interruptions_not_malformed_json() {
+        // Empty body — proxy relay died before any event.
+        assert!(is_cut_off_stream_body(""));
+        assert!(is_cut_off_stream_body("   \n  "));
+        // Non-JSON body (proxy error page / plain text) is also a cut-off.
+        assert!(is_cut_off_stream_body("upstream error"));
+        assert!(is_cut_off_stream_body("<html>gateway</html>"));
+        // A JSON error object (upstream/gateway failure) is not a usable
+        // completion — treat it as a resumable interruption.
+        assert!(is_cut_off_stream_body(r#"{"error":{"message":"boom"}}"#));
+        assert!(is_cut_off_stream_body(r#"{"error":"bad gateway"}"#));
+        // Ordinary JSON responses are still parsed, not treated as cut-offs.
+        assert!(!is_cut_off_stream_body(r#"{"choices":[]}"#));
+        assert!(!is_cut_off_stream_body(
+            r#"{"choices":[{"message":{"content":"hi"}}],"error":null}"#
+        ));
     }
 }

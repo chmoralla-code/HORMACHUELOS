@@ -11,23 +11,29 @@ const STORAGE_PAYMENT_REQUESTS = "horma:payment_requests";
 const STORAGE_DESKTOP_CODE = "horma:desktop_code";
 const STORAGE_DESKTOP_FLOW = "horma:desktop_flow";
 
-/** Public assets hosted on Supabase Storage (keeps Vercel deploy under size limits). */
+/**
+ * Desktop installer files are uploaded to Supabase Storage by the release
+ * pipeline (`npm run release`), which is also the source of truth for
+ * /api/update. The static /downloads files are excluded from Vercel deploys
+ * (see .vercelignore), so the fallback URLs must point at Supabase Storage to
+ * stay downloadable.
+ */
 const ASSET_BASE =
   "https://mketkzycxmtvgdbwzsvh.supabase.co/storage/v1/object/public/public-assets";
 
 /** Desktop installer files (uploaded to Supabase after `npm run desktop:build`). */
 const DESKTOP_DOWNLOADS = {
-  version: "0.1.46",
+  version: "0.1.47",
   windows: {
     msi: {
       label: "Windows installer (MSI)",
-      href: "/downloads/Hormachuelos_0.1.46_x64_en-US.msi",
-      file: "Hormachuelos_0.1.46_x64_en-US.msi",
+      href: `${ASSET_BASE}/downloads/Hormachuelos_0.1.47_x64_en-US.msi`,
+      file: "Hormachuelos_0.1.47_x64_en-US.msi",
     },
     setup: {
       label: "Windows setup (EXE)",
-      href: "/downloads/Hormachuelos_0.1.46_x64-setup.exe",
-      file: "Hormachuelos_0.1.46_x64-setup.exe",
+      href: `${ASSET_BASE}/downloads/Hormachuelos_0.1.47_x64-setup.exe`,
+      file: "Hormachuelos_0.1.47_x64-setup.exe",
     },
   },
 };
