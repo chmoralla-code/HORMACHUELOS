@@ -522,12 +522,7 @@ fn handle_event(
                 .message
                 .or(event.text)
                 .unwrap_or_else(|| "Working…".into());
-            emit(
-                app,
-                session_id,
-                "status",
-                json!({ "message": message }),
-            );
+            emit(app, session_id, "status", json!({ "message": message }));
         }
         _ => {}
     }

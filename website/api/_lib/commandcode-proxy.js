@@ -124,7 +124,7 @@ function buildConfig() {
 }
 
 /** Build the /alpha/generate request from an OpenAI-style chat request. */
-export function buildCommandCodeRequest({ model, messages, tools, system, maxTokens, temperature }) {
+export function buildCommandCodeRequest({ model, messages, tools, system, maxTokens, temperature, reasoningEffort }) {
   return {
     config: buildConfig(),
     memory: "",
@@ -137,6 +137,9 @@ export function buildCommandCodeRequest({ model, messages, tools, system, maxTok
       stream: true,
       ...(typeof temperature === "number" && Number.isFinite(temperature)
         ? { temperature }
+        : {}),
+      ...(typeof reasoningEffort === "string" && reasoningEffort.trim()
+        ? { reasoning_effort: reasoningEffort.trim() }
         : {}),
     },
   };

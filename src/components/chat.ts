@@ -649,13 +649,13 @@ export class Chat {
     const candidates = [...uriList.split(/\r?\n/), ...plain.split(/\r?\n/)]
       .map((line) => line.trim())
       .filter(Boolean);
-    for (const candidate of candidates) {
-      const path = this.pathFromClipboardText(candidate);
-      if (!path) continue;
-      e.preventDefault();
-      await this.attachImageFromDiskPath(path);
-      return;
-    }
+    const paths = [...new Set(candidates
+      .map((candidate) => this.pathFromClipboardText(candidate))
+      .filter((path): path is string => Boolean(path)))];
+    if (!paths.length) return;
+
+    e.preventDefault();
+    await this.attachImagePaths(paths);
   }
 
   private async handleComposerDrop(e: DragEvent) {
@@ -667,7 +667,25 @@ export class Chat {
     await this.attachImageFiles(files);
   }
 
-  private async attachImageFromDiskPath(path: string) {
+  private async attachImagePaths(paths: string[]) {
+    let attached = 0;
+    for (const path of paths) {
+      if (await this.attachImageFromDiskPath(path)) attached += 1;
+    }
+
+    if (!attached) {
+      const toast = document.getElementById("toast");
+      if (toast) {
+        toast.textContent = "Could not attach image files";
+        toast.hidden = false;
+        window.setTimeout(() => {
+          toast.hidden = true;
+        }, 4000);
+      }
+    }
+  }
+
+  private async attachImageFromDiskPath(path: string): Promise<boolean> {
     try {
       const imported = await api.importImagePath(path);
       const name = path.split(/[/\\]/).pop() || "image.png";
@@ -687,16 +705,10 @@ export class Chat {
       } catch {
         this.addComposerAttachment(imported);
       }
+      return true;
     } catch (err) {
       console.error(err);
-      const toast = document.getElementById("toast");
-      if (toast) {
-        toast.textContent = "Could not attach image file";
-        toast.hidden = false;
-        window.setTimeout(() => {
-          toast.hidden = true;
-        }, 4000);
-      }
+      return false;
     }
   }
 

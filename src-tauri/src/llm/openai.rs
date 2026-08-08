@@ -40,12 +40,34 @@ fn encode_message(message: &ChatMessage) -> Value {
     encoded
 }
 
-fn normalized_xai_reasoning_effort(value: Option<&str>) -> &'static str {
-    match value.unwrap_or("high").trim().to_ascii_lowercase().as_str() {
+/// Map the UI effort to the `reasoning_effort` value a provider accepts.
+///
+/// xAI (Grok) accepts low / medium / high.
+/// DeepSeek V4 (flash/pro) accepts low / high / max — UI xHigh/Ultra map to
+/// max so the strongest tier is actually honored, and light/medium map to
+/// low/high respectively.
+fn normalized_reasoning_effort(provider_kind: &str, value: Option<&str>) -> &'static str {
+    let normalized = value.unwrap_or("high").trim().to_ascii_lowercase();
+    let is_deepseek = provider_kind.eq_ignore_ascii_case("deepseek");
+    match normalized.as_str() {
         "light" | "low" => "low",
-        "medium" => "medium",
-        // xAI currently accepts low, medium, and high. UI-only xHigh/Ultra
-        // intentionally map to high rather than producing a 400 response.
+        "medium" => {
+            // DeepSeek V4 accepts low / high / max only.
+            if is_deepseek {
+                "high"
+            } else {
+                "medium"
+            }
+        }
+        "high" => "high",
+        // xAI caps at high (a 400 otherwise); DeepSeek supports max.
+        "xhigh" | "ultra" | "max" => {
+            if is_deepseek {
+                "max"
+            } else {
+                "high"
+            }
+        }
         _ => "high",
     }
 }
@@ -63,16 +85,28 @@ fn build_request_body(
     });
     let normalized_model = model.to_ascii_lowercase();
     let is_xai_grok = provider_kind.eq_ignore_ascii_case("xai") && normalized_model == "grok-4.5";
+    // Providers that honor an explicit reasoning-effort value.
+    let supports_reasoning_effort = is_xai_grok
+        || provider_kind.eq_ignore_ascii_case("deepseek")
+        || provider_kind.eq_ignore_ascii_case("glm")
+        || provider_kind.eq_ignore_ascii_case("openrouter")
+        || provider_kind.eq_ignore_ascii_case("commandcode")
+        || provider_kind.eq_ignore_ascii_case("hormachuelos_free")
+        || provider_kind.eq_ignore_ascii_case("openai")
+        || provider_kind.eq_ignore_ascii_case("cursor");
     let is_reasoning_model = normalized_model.starts_with("gpt-5")
         || normalized_model.starts_with("o1")
         || normalized_model.starts_with("o3")
         || normalized_model.starts_with("o4")
-        || is_xai_grok;
+        || is_xai_grok
+        || normalized_model.starts_with("deepseek-v4")
+        || normalized_model.starts_with("glm-5");
     if !is_reasoning_model {
         body["temperature"] = json!(0.2);
     }
-    if is_xai_grok {
-        body["reasoning_effort"] = json!(normalized_xai_reasoning_effort(reasoning_effort));
+    if supports_reasoning_effort {
+        body["reasoning_effort"] =
+            json!(normalized_reasoning_effort(provider_kind, reasoning_effort));
     }
     if !tools.is_empty() {
         body["tools"] = Value::Array(tools.to_vec());
@@ -885,9 +919,10 @@ impl OpenAi {
     }
 
     pub fn with_reasoning_effort(mut self, effort: Option<&str>) -> Self {
-        if self.provider_kind.eq_ignore_ascii_case("xai") {
-            self.reasoning_effort = Some(normalized_xai_reasoning_effort(effort).into());
-        }
+        // Store the mapped value so every supported provider actually receives
+        // a reasoning_effort the upstream understands.
+        self.reasoning_effort =
+            Some(normalized_reasoning_effort(&self.provider_kind, effort).into());
         self
     }
 
@@ -1070,7 +1105,32 @@ mod tests {
             assistant["tool_calls"][0]["function"]["arguments"],
             r#"{"path":"src/main.ts"}"#
         );
-        assert_eq!(body["temperature"], json!(0.2));
+        // DeepSeek V4 is a reasoning model: no temperature, effort defaults high.
+        assert_eq!(body["temperature"], Value::Null);
+        assert_eq!(body["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn deepseek_effort_maps_ui_tiers_to_low_high_max() {
+        let cases = [
+            ("light", "low"),
+            ("low", "low"),
+            ("medium", "high"),
+            ("high", "high"),
+            ("xhigh", "max"),
+            ("ultra", "max"),
+            ("max", "max"),
+        ];
+        for (ui, upstream) in cases {
+            assert_eq!(
+                normalized_reasoning_effort("deepseek", Some(ui)),
+                upstream,
+                "deepseek {ui} should map to {upstream}"
+            );
+        }
+        // xAI caps at high; its medium stays medium.
+        assert_eq!(normalized_reasoning_effort("xai", Some("ultra")), "high");
+        assert_eq!(normalized_reasoning_effort("xai", Some("medium")), "medium");
     }
 
     #[test]
@@ -1141,10 +1201,9 @@ mod tests {
             )),
             Some(10)
         );
-        assert!(reconnect_attempt_limit(&anyhow!(
-            "authentication_failed: Invalid API key."
-        ))
-        .is_none());
+        assert!(
+            reconnect_attempt_limit(&anyhow!("authentication_failed: Invalid API key.")).is_none()
+        );
         assert!(is_transient_provider_error(&anyhow!(
             "network_error: The provider request could not be completed."
         )));
@@ -1339,16 +1398,18 @@ mod tests {
 
     #[test]
     fn repairs_deepseek_style_malformed_tool_arguments() {
-        let trailing = parse_tool_call_arguments(r#"{"path":"index.html","content":"<h1>Hi</h1>",}"#)
-            .expect("trailing comma should repair");
+        let trailing =
+            parse_tool_call_arguments(r#"{"path":"index.html","content":"<h1>Hi</h1>",}"#)
+                .expect("trailing comma should repair");
         assert_eq!(trailing["path"], "index.html");
 
         let fenced = parse_tool_call_arguments("```json\n{\"path\":\".\"}\n```")
             .expect("fenced json should parse");
         assert_eq!(fenced["path"], ".");
 
-        let with_newline = parse_tool_call_arguments("{\"path\":\"a.js\",\"content\":\"line1\nline2\"}")
-            .expect("raw newline in string should escape");
+        let with_newline =
+            parse_tool_call_arguments("{\"path\":\"a.js\",\"content\":\"line1\nline2\"}")
+                .expect("raw newline in string should escape");
         assert_eq!(with_newline["content"], "line1\nline2");
 
         let wrapped = parse_tool_call_arguments("Sure. {\"path\":\"src/app.js\"} thanks")

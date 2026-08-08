@@ -70,11 +70,15 @@ test("HORMACHUELOS FREE never falls back to another provider", async () => {
   const priorNeuralWatt = process.env.NEURALWATT_API_KEY;
   const priorV2 = process.env.HORMACHUELOS_V2_API_KEY;
   const priorOpenCodeGo = process.env.OPENCODE_GO_API_KEY;
+  const priorV3 = process.env.HORMACHUELOS_V3_API_KEY;
+  const priorDeepSeek = process.env.DEEPSEEK_API_KEY;
   const priorOpenRouter = process.env.OPENROUTER_API_KEY;
   const priorCommandCode = process.env.COMMANDCODE_API_KEY;
   delete process.env.NEURALWATT_API_KEY;
   delete process.env.HORMACHUELOS_V2_API_KEY;
   delete process.env.OPENCODE_GO_API_KEY;
+  delete process.env.HORMACHUELOS_V3_API_KEY;
+  delete process.env.DEEPSEEK_API_KEY;
   delete process.env.COMMANDCODE_API_KEY;
   process.env.OPENROUTER_API_KEY = "test-only-openrouter-key";
   try {
@@ -88,6 +92,10 @@ test("HORMACHUELOS FREE never falls back to another provider", async () => {
     else process.env.HORMACHUELOS_V2_API_KEY = priorV2;
     if (priorOpenCodeGo == null) delete process.env.OPENCODE_GO_API_KEY;
     else process.env.OPENCODE_GO_API_KEY = priorOpenCodeGo;
+    if (priorV3 == null) delete process.env.HORMACHUELOS_V3_API_KEY;
+    else process.env.HORMACHUELOS_V3_API_KEY = priorV3;
+    if (priorDeepSeek == null) delete process.env.DEEPSEEK_API_KEY;
+    else process.env.DEEPSEEK_API_KEY = priorDeepSeek;
     if (priorOpenRouter == null) delete process.env.OPENROUTER_API_KEY;
     else process.env.OPENROUTER_API_KEY = priorOpenRouter;
     if (priorCommandCode == null) delete process.env.COMMANDCODE_API_KEY;

@@ -395,10 +395,11 @@ impl Settings {
         }
         if self.provider == "commandcode" {
             let hosted = crate::license::hosted_chat_base_url();
-            let allowed = matches!(
-                self.base_url.as_deref(),
-                Some(COMMANDCODE_API_BASE_URL)
-            ) || self.base_url.as_deref().is_some_and(|url| url.eq_ignore_ascii_case(&hosted));
+            let allowed = matches!(self.base_url.as_deref(), Some(COMMANDCODE_API_BASE_URL))
+                || self
+                    .base_url
+                    .as_deref()
+                    .is_some_and(|url| url.eq_ignore_ascii_case(&hosted));
             ensure!(
                 allowed,
                 "COMMANDCODE uses the Command Code gateway or the Hormachuelos hosted proxy."

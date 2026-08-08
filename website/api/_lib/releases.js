@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.48";
-const BUILTIN_MSI_SHA256 = "6bea237baef56a5b34e3f3695076bdb6046eeae526a9a95ab35b69c20446477a";
-const BUILTIN_EXE_SHA256 = "4f5a55ce7d1e41e37c932dc543b6b614099bdf54714d772782101e488657a096";
-const BUILTIN_RELEASE_NOTES = "Fix the preview window: it can now open live dev servers (http://localhost:PORT) directly in the iframe instead of failing with 'Invalid preview path'. The agent's open-in-preview tool calls now route dev-server URLs to the panel, and the CSP allows localhost frames.";
+const BUILTIN_RELEASE_VERSION = "0.1.50";
+const BUILTIN_MSI_SHA256 = "a38783e84e48a205e8647fd7aa1ee052cd501cffd4713ae913cace126e5e1124";
+const BUILTIN_EXE_SHA256 = "06056d32c5459438dbf05432cb976ea956ba653f03c42f533b44f6c5a37276ab";
+const BUILTIN_RELEASE_NOTES = "Faster AI task execution with compact long-session memory and parallel safe workspace inspection, plus improved continuation, preview, provider, and update reliability.";
 
 /**
  * A deployment-bundled release keeps the download/update path available even
@@ -35,17 +35,18 @@ const BUILTIN_RELEASE_NOTES = "Fix the preview window: it can now open live dev 
  * A database release with the same or newer version always remains authoritative.
  */
 export function builtinLatestRelease() {
-  // Installers live on Supabase Storage (the release pipeline uploads them
-  // there); the static /downloads files are excluded from Vercel deploys.
-  const assetBase =
-    "https://mketkzycxmtvgdbwzsvh.supabase.co/storage/v1/object/public/public-assets";
+  // This release is bundled with the website as a verified fallback. Normal
+  // admin-published releases still use Supabase Storage and win at the same
+  // version, but an unavailable publishing credential must not advertise a
+  // download URL that has not been uploaded yet.
+  const downloadBase = "https://hormachuelos.vercel.app/downloads";
   return {
     id: `builtin-${BUILTIN_RELEASE_VERSION}`,
     version: BUILTIN_RELEASE_VERSION,
     title: `Hormachuelos ${BUILTIN_RELEASE_VERSION}`,
     whatsNew: BUILTIN_RELEASE_NOTES,
-    msiUrl: `${assetBase}/downloads/Hormachuelos_${BUILTIN_RELEASE_VERSION}_x64_en-US.msi`,
-    exeUrl: `${assetBase}/downloads/Hormachuelos_${BUILTIN_RELEASE_VERSION}_x64-setup.exe`,
+    msiUrl: `${downloadBase}/Hormachuelos_${BUILTIN_RELEASE_VERSION}_x64_en-US.msi`,
+    exeUrl: `${downloadBase}/Hormachuelos_${BUILTIN_RELEASE_VERSION}_x64-setup.exe`,
     msiSha256: BUILTIN_MSI_SHA256,
     exeSha256: BUILTIN_EXE_SHA256,
     forceUpdate: false,

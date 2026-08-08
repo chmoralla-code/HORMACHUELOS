@@ -127,10 +127,7 @@ impl LlmProvider for Glm {
                 Ok(res) => {
                     let status = res.status();
                     let retryable = matches!(status.as_u16(), 429 | 502 | 503 | 504);
-                    let text = res
-                        .text()
-                        .await
-                        .context("failed reading GLM response")?;
+                    let text = res.text().await.context("failed reading GLM response")?;
                     if retryable && attempt < 2 {
                         tokio::time::sleep(Duration::from_millis(400 * (1 << attempt))).await;
                         continue;

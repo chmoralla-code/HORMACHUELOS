@@ -261,8 +261,12 @@ test("long HORMACHUELOS task recovers without a manual Continue message", async 
   await expect(page.locator("#smart-agent-status")).toBeVisible();
   await expect(page.locator("#smart-agent-status")).toContainText("Smart Agent");
   await expect(page.locator("#chat")).toContainText("Long-session Hormachuelos task complete.", { timeout: 30000 });
-  await expect(page.locator("#smart-agent-status")).toContainText("Verified");
-  await expect(page.locator("#smart-agent-status")).toContainText("Validate the result");
+  // The compact Smart Agent strip intentionally uses short labels, but it must
+  // still visibly show that the task completed and that every ledger step did.
+  const smartAgentStatus = page.locator("#smart-agent-status");
+  await expect(smartAgentStatus.locator(".smart-agent-badge.completed")).toHaveText("Done");
+  await expect(smartAgentStatus.locator(".smart-agent-step.completed")).toHaveCount(6);
+  await expect(smartAgentStatus).toContainText("Check");
 
   await expect.poll(() => page.evaluate(() => window.__HORMA_LONG_RUNS__)).toBe(1);
   const trace = await page.evaluate(() => window.__HORMA_LONG_EVENTS__);

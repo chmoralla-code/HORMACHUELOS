@@ -223,12 +223,7 @@ impl SmartAgentRun {
                     self.saw_validation = false;
                     self.saw_debug = false;
                     self.validation_tool_ids.clear();
-                    self.begin_debug(
-                        app,
-                        session_id,
-                        tool_id,
-                        "Applying a focused debug fix...",
-                    );
+                    self.begin_debug(app, session_id, tool_id, "Applying a focused debug fix...");
                 } else {
                     self.begin_implementation(app, session_id, "Applying the requested changes...");
                 }
@@ -239,12 +234,7 @@ impl SmartAgentRun {
                     .find_map(|key| arguments.get(*key).and_then(Value::as_str))
                     .unwrap_or("");
                 if is_debug_command(command) {
-                    self.begin_debug(
-                        app,
-                        session_id,
-                        tool_id,
-                        "Running a focused debug pass...",
-                    );
+                    self.begin_debug(app, session_id, tool_id, "Running a focused debug pass...");
                 } else if is_validation_command(command) {
                     if !tool_id.trim().is_empty() {
                         self.validation_tool_ids.insert(tool_id.to_string());
@@ -319,12 +309,7 @@ impl SmartAgentRun {
                         "Taking the next concrete task step...",
                     );
                 } else if self.phase >= Phase::Validate {
-                    self.begin_debug(
-                        app,
-                        session_id,
-                        tool_id,
-                        "Debugging the current issue...",
-                    );
+                    self.begin_debug(app, session_id, tool_id, "Debugging the current issue...");
                 }
             }
         }

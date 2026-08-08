@@ -433,6 +433,7 @@ async function handleChat(req, res) {
         system: forwardBody.system,
         maxTokens: forwardBody.max_tokens || forwardBody.max_completion_tokens,
         temperature: forwardBody.temperature,
+        reasoningEffort: forwardBody.reasoning_effort,
       });
       const response = await fetch(commandCodeGenerateUrl(route.baseUrl), {
         method: "POST",

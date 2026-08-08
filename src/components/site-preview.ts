@@ -556,6 +556,8 @@ export class SitePreview {
   private editBar: HTMLElement;
   private editInput: HTMLInputElement;
   private designMode = false;
+  /** Set when design mode is being torn down, to cancel pending inject retries. */
+  private designModeCleanedUp = false;
   private androidMode = false;
   private softwareMode = false;
   private projectRoot = "";
@@ -1208,10 +1210,21 @@ export class SitePreview {
         }
         this.statusEl.textContent = "No HTML preview found in this build.";
       } else {
-        this.destroyAllTabs();
-        this.syncTabStrip();
+        // Reopening the preview shell: keep previously opened tabs (they were
+        // preserved on close) so the loaded website reappears. Only tear down
+        // when there are no tabs to restore.
+        if (!this.tabs.length) {
+          this.destroyAllTabs();
+          this.statusEl.textContent = "Preview ready — open a file or wait for a build.";
+        } else {
+          this.activeTabId = this.tabs.some((t) => t.id === this.activeTabId)
+            ? this.activeTabId
+            : this.tabs[this.tabs.length - 1].id;
+          this.syncTabStrip();
+          void this.reloadTab(this.activeTab!);
+          this.statusEl.textContent = this.readyStatus();
+        }
         this.updateNavButtons();
-        this.statusEl.textContent = "Preview ready — open a file or wait for a build.";
       }
       this.emitStateChange();
       return;
@@ -1273,7 +1286,9 @@ export class SitePreview {
       if (!this.closing || generation !== this.closeGeneration) return;
       this.root.hidden = true;
       this.root.classList.remove("is-closing");
-      this.destroyAllTabs();
+      // Preserve open tabs so the preview (and its loaded websites) survives a
+      // drawer collapse / window minimize. Tabs are torn down only on explicit
+      // close-all / destroyAllTabs callers (project switch, app close).
       this.closing = false;
     }, 280);
   }
@@ -1466,13 +1481,32 @@ export class SitePreview {
     if (generation !== this.viewGeneration) return;
     const openPaths = new Set(this.tabs.map((tab) => tab.entryPath));
     const candidates = files.filter((f) => HTML_EXT.test(f) && !openPaths.has(f));
-    const entry = pickPreviewEntry(candidates) || pickPreviewEntry(files) || this.entryPath;
-    if (!entry) return;
-    await this.openPathInTab(entry, {
-      activate: true,
-      title: tabTitleFromPath(entry),
-      pushHistory: true,
-    });
+    const entry = pickPreviewEntry(candidates) || pickPreviewEntry(files.filter((f) => HTML_EXT.test(f)));
+    // Always create a fresh tab: prefer an unopened HTML file; otherwise open a
+    // blank tab the user can type a path/URL into (never re-activate an open one).
+    const freshPath = entry || "";
+    const tabId = `preview-tab-${++previewTabSeq}`;
+    const frame = this.createFrame(tabId);
+    const tab: PreviewTab = {
+      id: tabId,
+      entryPath: freshPath,
+      title: freshPath ? tabTitleFromPath(freshPath) : "New tab",
+      history: freshPath ? [freshPath] : [],
+      historyIndex: 0,
+      frame,
+      tabEl: null as unknown as HTMLButtonElement,
+    };
+    tab.tabEl = this.renderTabButton(tab);
+    this.tabs.push(tab);
+    this.activeTabId = tabId;
+    this.syncTabStrip();
+    if (freshPath) {
+      await this.reloadTab(tab);
+    } else {
+      frame.removeAttribute("srcdoc");
+      frame.src = "about:blank";
+      this.statusEl.textContent = "New tab — type a file path or http://localhost URL";
+    }
     if (generation === this.viewGeneration) this.emitStateChange();
   }
 
@@ -1572,7 +1606,12 @@ export class SitePreview {
 
   setDesignMode(on: boolean) {
     if (this.designMode === on) return;
-    if (!on) this.clearDesignMode();
+    if (!on) {
+      this.designModeCleanedUp = true;
+      this.clearDesignMode();
+    } else {
+      this.designModeCleanedUp = false;
+    }
     this.designMode = on;
     this.syncModeUi();
     if (on) {
@@ -1618,6 +1657,7 @@ export class SitePreview {
   }
 
   private clearDesignMode() {
+    this.designModeCleanedUp = true;
     for (const tab of this.tabs) {
       try {
         const doc = tab.frame.contentDocument as (Document & { __hormaDesignCleanup?: () => void }) | null;
@@ -1634,15 +1674,72 @@ export class SitePreview {
     }
   }
 
-  private injectDesignMode() {
+  private injectDesignMode(attempt = 0) {
     const frame = this.frame;
-    const doc = frame?.contentDocument;
-    if (!doc?.body) return;
+    if (!frame) return;
+    // This is the entry point that (re)activates design mode on the active
+    // frame, so clear the torn-down flag regardless of how we got here.
+    this.designModeCleanedUp = false;
+    // Some WebView2 versions expose the frame document via contentWindow when
+    // contentDocument reads null; try both before giving up.
+    let doc = frame.contentDocument;
+    if (!doc?.body) {
+      try {
+        doc = frame.contentWindow?.document ?? null;
+      } catch {
+        doc = null;
+      }
+    }
+    if (!doc?.body) {
+      // The frame may still be loading (srcdoc is set after readProjectFile
+      // resolves). Retry a few times across a short window instead of giving
+      // up immediately — WebView2 can be slower than Chromium here. Each retry
+      // re-reads the active frame so a mid-retry tab switch can't inject into
+      // a stale frame.
+      if (attempt < 8 && !this.designModeCleanedUp) {
+        window.setTimeout(() => {
+          if (this.designMode && !this.designModeCleanedUp) this.injectDesignMode(attempt + 1);
+        }, 120);
+        return;
+      }
+      // Not scriptable: cross-origin page (e.g. a live localhost dev server).
+      if (frame.src && !/^about:blank$/.test(frame.src)) {
+        this.statusEl.textContent =
+          "Design mode is unavailable on external/localhost pages — use a project file preview.";
+      }
+      return;
+    }
     this.clearDesignMode();
     const style = doc.createElement("style");
     style.id = "horma-design-style";
     style.textContent = `
       html.horma-design, html.horma-design body { cursor: crosshair !important; }
+      .horma-design-cursor {
+        position: fixed !important;
+        z-index: 2147483646 !important;
+        width: 34px !important;
+        height: 34px !important;
+        margin: -17px 0 0 -17px !important;
+        border: 2px solid rgba(90, 160, 255, 0.95) !important;
+        border-radius: 50% !important;
+        background: radial-gradient(circle, rgba(90, 160, 255, 0.18) 0%, rgba(90, 160, 255, 0) 70%) !important;
+        box-shadow: 0 0 18px rgba(90, 160, 255, 0.45), inset 0 0 10px rgba(90, 160, 255, 0.25) !important;
+        pointer-events: none !important;
+        opacity: 0 !important;
+        transition: opacity 0.18s ease, transform 0.12s ease !important;
+        will-change: transform !important;
+      }
+      html.horma-design .horma-design-cursor.is-visible { opacity: 1 !important; }
+      html.horma-design .horma-design-cursor.is-hovering {
+        transform: scale(1.35) !important;
+        border-color: #8fc2ff !important;
+        box-shadow: 0 0 26px rgba(90, 160, 255, 0.65), inset 0 0 14px rgba(90, 160, 255, 0.4) !important;
+      }
+      .horma-design-cursor.is-clicked {
+        transform: scale(0.7) !important;
+        border-color: #fff !important;
+        box-shadow: 0 0 30px rgba(90, 160, 255, 0.9) !important;
+      }
       .horma-design-hover {
         outline: 2px solid rgba(90, 160, 255, 0.9) !important;
         outline-offset: 2px !important;
@@ -1685,9 +1782,37 @@ export class SitePreview {
     doc.head.appendChild(style);
     doc.documentElement.classList.add("horma-design");
 
+    // Cursor-follow ring that trails the mouse in design mode.
+    const cursorRing = doc.createElement("div");
+    cursorRing.className = "horma-design-cursor";
+    doc.body.appendChild(cursorRing);
+    let ringX = 0;
+    let ringY = 0;
+    let ringTargetX = 0;
+    let ringTargetY = 0;
+    let ringRaf = 0;
+    const moveRing = () => {
+      ringX += (ringTargetX - ringX) * 0.28;
+      ringY += (ringTargetY - ringY) * 0.28;
+      cursorRing.style.transform = `translate3d(${ringX}px, ${ringY}px, 0)`;
+      if (Math.abs(ringTargetX - ringX) > 0.5 || Math.abs(ringTargetY - ringY) > 0.5) {
+        ringRaf = requestAnimationFrame(moveRing);
+      } else {
+        ringRaf = 0;
+      }
+    };
     const onMove = (e: MouseEvent) => {
       const t = e.target as HTMLElement | null;
-      if (!t || t === doc.body || t === doc.documentElement) return;
+      if (!t || t === doc.body || t === doc.documentElement) {
+        cursorRing.classList.remove("is-visible", "is-hovering");
+        return;
+      }
+      cursorRing.classList.add("is-visible");
+      const hovering = !!t.closest?.(".horma-design-hover, a, button, input, select, textarea, [role='button']");
+      cursorRing.classList.toggle("is-hovering", hovering);
+      ringTargetX = e.clientX;
+      ringTargetY = e.clientY;
+      if (!ringRaf) ringRaf = requestAnimationFrame(moveRing);
       doc.querySelectorAll(".horma-design-hover").forEach((n) => n.classList.remove("horma-design-hover"));
       t.classList.add("horma-design-hover");
     };
@@ -1707,6 +1832,10 @@ export class SitePreview {
     const onClick = (e: MouseEvent) => {
       e.preventDefault();
       e.stopPropagation();
+      // Cursor click "pop" effect.
+      cursorRing.classList.remove("is-hovering");
+      cursorRing.classList.add("is-clicked");
+      window.setTimeout(() => cursorRing.classList.remove("is-clicked"), 140);
       const t = e.target as HTMLElement | null;
       if (!t || t === doc.body || t === doc.documentElement) return;
       // Clicking the edit chip itself should not reselect.
@@ -1774,6 +1903,8 @@ export class SitePreview {
     (doc as any).__hormaDesignCleanup = () => {
       doc.removeEventListener("mousemove", onMove, true);
       doc.removeEventListener("click", onClick, true);
+      if (ringRaf) cancelAnimationFrame(ringRaf);
+      cursorRing.remove();
       const chip = doc.querySelector(".horma-edit-chip") as (HTMLElement & { __hormaReposition?: () => void }) | null;
       (chip as any)?.__hormaReposition?.();
       chip?.remove();

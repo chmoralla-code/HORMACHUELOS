@@ -918,16 +918,24 @@ export class ModelBar {
 
   private async attachImage() {
     try {
-      const path = await api.openImagePicker();
-      if (!path) return;
-      const imported = await api.importImagePath(path);
-      window.dispatchEvent(
-        new CustomEvent("horma:composer-attach-image", { detail: { path: imported } }),
-      );
-      this.setStatus("Image attached");
+      const paths = await api.openImagePicker();
+      if (!paths.length) return;
+      let ok = 0;
+      for (const path of paths) {
+        try {
+          const imported = await api.importImagePath(path);
+          window.dispatchEvent(
+            new CustomEvent("horma:composer-attach-image", { detail: { path: imported } }),
+          );
+          ok += 1;
+        } catch (err) {
+          console.error(err);
+        }
+      }
+      this.setStatus(ok === 1 ? "Image attached" : ok > 1 ? `${ok} images attached` : "Could not attach images", ok === 0);
     } catch (e) {
       console.error(e);
-      this.setStatus("Could not attach image", true);
+      this.setStatus("Could not attach images", true);
     }
   }
 

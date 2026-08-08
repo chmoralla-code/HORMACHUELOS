@@ -445,7 +445,18 @@ export function isOpenRouterFreeModel(modelId: string): boolean {
 export const CURSOR_SDK_PROVIDER_IDS = new Set(["cursor"]);
 
 /** Providers whose selected model supports an explicit reasoning-effort value. */
-export const REASONING_EFFORT_PROVIDER_IDS = new Set(["cursor", "xai"]);
+export const REASONING_EFFORT_PROVIDER_IDS = new Set([
+  "cursor",
+  "xai",
+  "deepseek",
+  "glm",
+  "openrouter",
+  "commandcode",
+  "hormachuelos_free",
+  "openai",
+  "ollama",
+  "pollinations",
+]);
 
 /** Provider catalogs that are deliberately pinned (no live /models flood). */
 export const STATIC_MODEL_PROVIDER_IDS = new Set([
@@ -501,9 +512,17 @@ export const CURSOR_EFFORT_OPTIONS = [
   { id: "ultra", label: "Ultra" },
 ] as const;
 
+/** DeepSeek V4 accepts low / high / max on its OpenAI-compatible endpoint. */
+export const DEEPSEEK_EFFORT_OPTIONS = [
+  { id: "light", label: "Low" },
+  { id: "high", label: "High" },
+  { id: "ultra", label: "Max" },
+] as const;
+
 export type EffortId = (typeof CURSOR_EFFORT_OPTIONS)[number]["id"];
 
-export function effortOptionsForProvider(_providerId: string) {
+export function effortOptionsForProvider(providerId: string) {
+  if (providerId === "deepseek") return DEEPSEEK_EFFORT_OPTIONS;
   return CURSOR_EFFORT_OPTIONS;
 }
 
@@ -520,9 +539,14 @@ export function normalizeEffort(value: string | null | undefined): EffortId {
 
 /** Normalize effort to the values accepted consistently by Rust and the UI. */
 export function normalizeEffortForProvider(
-  _providerId: string,
+  providerId: string,
   value: string | null | undefined,
 ): EffortId {
+  const v = (value || "").trim().toLowerCase();
+  if (providerId === "deepseek") {
+    // DeepSeek accepts light/high/ultra (→ low/high/max upstream).
+    if (v === "medium" || v === "xhigh") return v === "medium" ? "light" : "ultra";
+  }
   return normalizeEffort(value);
 }
 

@@ -222,10 +222,10 @@ export const api = {
     if (typeof sel === "string") return sel;
     return null;
   },
-  openImagePicker: async (): Promise<string | null> => {
+  openImagePicker: async (): Promise<string[]> => {
     const sel = await openDialog({
-      multiple: false,
-      title: "Attach image",
+      multiple: true,
+      title: "Attach images",
       filters: [
         {
           name: "Images",
@@ -233,8 +233,9 @@ export const api = {
         },
       ],
     });
-    if (typeof sel === "string") return sel;
-    return null;
+    if (typeof sel === "string") return [sel];
+    if (Array.isArray(sel)) return sel.filter((p): p is string => typeof p === "string");
+    return [];
   },
   openFilePicker: async (): Promise<string[]> => {
     const sel = await openDialog({

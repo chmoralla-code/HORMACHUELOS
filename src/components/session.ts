@@ -582,10 +582,14 @@ export type LlmHistoryTurn = {
   name?: string;
 };
 
-/** Soft ceiling for history payload — keep as much as practical for long sessions. */
-const HISTORY_MAX_CHARS = 140_000;
-const TOOL_RESULT_MAX = 2_400;
-const ASSISTANT_MAX = 12_000;
+/**
+ * Keep follow-up requests responsive. The backend applies a final compact
+ * history window too, but limiting the IPC payload here prevents old command
+ * output from making desktop sessions slow before the provider is contacted.
+ */
+const HISTORY_MAX_CHARS = 24_000;
+const TOOL_RESULT_MAX = 1_800;
+const ASSISTANT_MAX = 3_000;
 
 function clip(text: string, max: number): string {
   const t = (text || "").trim();

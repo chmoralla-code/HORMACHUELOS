@@ -654,7 +654,10 @@ fn record_license_usage(tokens: u64) -> Result<license::LicenseStatus, String> {
 fn paste_image_extension(mime: &str, fallback_name: &str) -> &'static str {
     let mime_l = mime.to_ascii_lowercase();
     let name_l = fallback_name.to_ascii_lowercase();
-    if mime_l.contains("jpeg") || mime_l.contains("jpg") || name_l.ends_with(".jpg") || name_l.ends_with(".jpeg")
+    if mime_l.contains("jpeg")
+        || mime_l.contains("jpg")
+        || name_l.ends_with(".jpg")
+        || name_l.ends_with(".jpeg")
     {
         "jpg"
     } else if mime_l.contains("webp") || name_l.ends_with(".webp") {

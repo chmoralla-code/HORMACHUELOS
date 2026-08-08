@@ -141,7 +141,11 @@ fn encode_message(message: &ChatMessage) -> Option<Value> {
         }
         "tool" => {
             let content = message.content.as_str().unwrap_or("");
-            let id = message.tool_call_id.as_deref().unwrap_or("tool").to_string();
+            let id = message
+                .tool_call_id
+                .as_deref()
+                .unwrap_or("tool")
+                .to_string();
             let name = message.name.as_deref().unwrap_or("").to_string();
             Some(json!({
                 "role": "tool",
@@ -277,10 +281,7 @@ impl LlmProvider for CommandCode {
                     let status = res.status();
                     let retryable = matches!(status.as_u16(), 429 | 502 | 503 | 504);
                     if !status.is_success() {
-                        let text = res
-                            .text()
-                            .await
-                            .unwrap_or_default();
+                        let text = res.text().await.unwrap_or_default();
                         if retryable && attempt < 2 {
                             tokio::time::sleep(Duration::from_millis(400 * (1 << attempt))).await;
                             continue;
@@ -303,7 +304,8 @@ impl LlmProvider for CommandCode {
                 }
             }
         }
-        let mut response = response.ok_or_else(|| anyhow!("Command Code did not return a response."))?;
+        let mut response =
+            response.ok_or_else(|| anyhow!("Command Code did not return a response."))?;
 
         let mut text_out = String::new();
         let mut reasoning_out = String::new();
@@ -538,7 +540,6 @@ mod tests {
 
     #[test]
     fn known_models_are_static_and_non_empty() {
-        assert!(!KNOWN_MODELS.is_empty());
         assert!(KNOWN_MODELS.contains(&"gpt-5.6-luna"));
         assert!(KNOWN_MODELS.contains(&"deepseek/deepseek-v4-pro"));
         assert!(KNOWN_MODELS.contains(&"xai/grok-4.5"));

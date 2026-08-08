@@ -9,6 +9,7 @@ use crate::tools::{self, ToolRunContext};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -121,7 +122,11 @@ Inspect the latest files/commands if needed, take the next concrete tool action,
 }
 
 /// True when a provider blip should resume the agent loop instead of ending the run.
-fn can_recover_from_provider_blip(err: &anyhow::Error, iteration: u32, messages: &[ChatMessage]) -> bool {
+fn can_recover_from_provider_blip(
+    err: &anyhow::Error,
+    iteration: u32,
+    messages: &[ChatMessage],
+) -> bool {
     let Some(limit) = crate::llm::reconnect_attempt_limit(err) else {
         return false;
     };
@@ -204,7 +209,10 @@ fn reply_announces_pending_action(text: &str) -> bool {
         "give me a second",
         "give me a moment",
     ];
-    if starters.iter().any(|p| lower.starts_with(p) || lower.contains(&format!("\n{p}"))) {
+    if starters
+        .iter()
+        .any(|p| lower.starts_with(p) || lower.contains(&format!("\n{p}")))
+    {
         return true;
     }
     // Trailing intent without a tool call, e.g. "…to sign in." after "Let me find…"
@@ -434,6 +442,168 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> (&str, bool) {
         end -= 1;
     }
     (&value[..end], true)
+}
+
+// The Cursor SDK already limits prior-session context to a compact recent
+// window. Native providers need the same protection: resending a 140k-char
+// transcript (including old command output) on every follow-up makes tool use
+// noticeably slower and can push smaller provider contexts over their limit.
+const NATIVE_HISTORY_MAX_TURNS: usize = 24;
+const NATIVE_HISTORY_MAX_BYTES: usize = 24_000;
+const NATIVE_HISTORY_MAX_TURN_BYTES: usize = 3_000;
+
+/// Convert saved transcript entries into compact plain conversation memory.
+/// Historical tool calls/results are deliberately represented as text instead
+/// of replaying OpenAI tool-call protocol: only calls made in the *current*
+/// run require matching tool-result messages, and this keeps trimmed histories
+/// valid for every OpenAI-compatible provider.
+fn compact_history_turn(turn: &HistoryTurn, max_bytes: usize) -> Option<ChatMessage> {
+    if max_bytes == 0 {
+        return None;
+    }
+    let role = turn.role.trim().to_ascii_lowercase();
+    let mut content = turn.content.trim().to_string();
+
+    match role.as_str() {
+        "assistant" => {
+            if let Some(calls) = turn.tool_calls.as_ref().filter(|calls| !calls.is_empty()) {
+                let calls = calls
+                    .iter()
+                    .take(6)
+                    .map(|call| {
+                        let args = serde_json::to_string(&call.arguments)
+                            .unwrap_or_else(|_| "{}".to_string());
+                        let (args, _) = truncate_utf8(&args, 320);
+                        format!("{}({args})", call.name)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if !content.is_empty() {
+                    content.push('\n');
+                }
+                content.push_str("[Earlier tool actions: ");
+                content.push_str(&calls);
+                content.push(']');
+            }
+            if content.is_empty() {
+                return None;
+            }
+        }
+        "tool" => {
+            let name = turn.name.as_deref().unwrap_or("tool");
+            content = if content.is_empty() {
+                format!("[Earlier tool result: {name}] (empty)")
+            } else {
+                format!("[Earlier tool result: {name}]\n{content}")
+            };
+        }
+        "user" | "system" => {
+            if content.is_empty() {
+                return None;
+            }
+        }
+        _ => {
+            if content.is_empty() {
+                return None;
+            }
+        }
+    }
+
+    let suffix = "\n…(earlier context truncated)";
+    let content = if max_bytes > suffix.len() {
+        let (content, truncated) = truncate_utf8(&content, max_bytes - suffix.len());
+        if truncated {
+            format!("{content}{suffix}")
+        } else {
+            content.to_string()
+        }
+    } else {
+        truncate_utf8(&content, max_bytes).0.to_string()
+    };
+    match role.as_str() {
+        "user" => Some(ChatMessage::user(&content)),
+        "system" => Some(ChatMessage::system(&content)),
+        _ => Some(ChatMessage::assistant(&content, None, None)),
+    }
+}
+
+fn compact_history_messages(history: &[HistoryTurn]) -> Vec<ChatMessage> {
+    let mut remaining = NATIVE_HISTORY_MAX_BYTES;
+    let mut newest_first = Vec::new();
+
+    for turn in history.iter().rev() {
+        if newest_first.len() >= NATIVE_HISTORY_MAX_TURNS || remaining <= 16 {
+            break;
+        }
+        let max_bytes = remaining
+            .saturating_sub(16)
+            .min(NATIVE_HISTORY_MAX_TURN_BYTES);
+        let Some(message) = compact_history_turn(turn, max_bytes) else {
+            continue;
+        };
+        let used = message
+            .content
+            .as_str()
+            .map(str::len)
+            .unwrap_or_default()
+            .saturating_add(16);
+        remaining = remaining.saturating_sub(used);
+        newest_first.push(message);
+        if remaining == 0 {
+            break;
+        }
+    }
+
+    newest_first.reverse();
+    newest_first
+}
+
+/// Execute one model-emitted inspection batch concurrently. The caller only
+/// invokes this for tools approved by `is_parallel_safe_readonly_tool`, so no
+/// action can alter another call's result or bypass a confirmation boundary.
+/// Results are later emitted and appended in the model's original order.
+async fn execute_parallel_readonly_batch(
+    tool_calls: &[ToolCall],
+    root: &Path,
+    timeout_secs: u64,
+    context: ToolRunContext,
+    cancel: &AtomicBool,
+) -> Option<HashMap<String, (bool, String)>> {
+    let mut jobs = tokio::task::JoinSet::new();
+    for call in tool_calls {
+        let id = call.id.clone();
+        let name = call.name.clone();
+        let args = call.arguments.clone();
+        let root = root.to_path_buf();
+        let context = context.clone();
+        jobs.spawn_blocking(move || {
+            let result = tools::execute(&name, &args, &root, timeout_secs, &context);
+            (id, result)
+        });
+    }
+
+    let mut results = HashMap::with_capacity(tool_calls.len());
+    while !jobs.is_empty() {
+        let joined = tokio::select! {
+            biased;
+            _ = wait_until_cancelled(cancel) => {
+                jobs.abort_all();
+                return None;
+            }
+            joined = jobs.join_next() => joined,
+        };
+        let Some(joined) = joined else {
+            break;
+        };
+        if let Ok((id, result)) = joined {
+            let (ok, content) = match result {
+                Ok(content) => (true, content),
+                Err(error) => (false, format!("Error: {error}")),
+            };
+            results.insert(id, (ok, content));
+        }
+    }
+    Some(results)
 }
 
 fn is_private_typing_tool(name: &str) -> bool {
@@ -766,9 +936,7 @@ pub async fn run_loop(
                         "status",
                         json!({ "message": "Viewed attached image" }),
                     );
-                    blocks.push(format!(
-                        "[Image already viewed: {path}]\n{description}"
-                    ));
+                    blocks.push(format!("[Image already viewed: {path}]\n{description}"));
                 }
                 Err(err) => {
                     blocks.push(format!(
@@ -913,7 +1081,10 @@ Current user request:\n{prompt}",
     let website_session = website_session.trim().to_string();
     let (key, base_url_override) = if uses_hormachuelos_free {
         if !website_session.is_empty() {
-            (website_session.clone(), Some(crate::license::hosted_chat_base_url()))
+            (
+                website_session.clone(),
+                Some(crate::license::hosted_chat_base_url()),
+            )
         } else if crate::license::should_use_hosted(&license) {
             (
                 license.license_key.clone(),
@@ -929,14 +1100,16 @@ Current user request:\n{prompt}",
             license.license_key.clone(),
             Some(crate::license::hosted_chat_base_url()),
         )
-    } else if (settings.provider.eq_ignore_ascii_case("commandcode")
-        || is_managed_alias)
+    } else if (settings.provider.eq_ignore_ascii_case("commandcode") || is_managed_alias)
         && !website_session.is_empty()
     {
         // Hosted-managed provider with a signed-in website account but no local
         // HORMA- key: let the proxy resolve the account's plan from the
         // session token.
-        (website_session, Some(crate::license::hosted_chat_base_url()))
+        (
+            website_session,
+            Some(crate::license::hosted_chat_base_url()),
+        )
     } else if is_managed_alias {
         return Err(anyhow::anyhow!(
             "'{}' is managed by your Hormachuelos administrator. Sign in with an active hosted plan before using this provider alias.",
@@ -1185,6 +1358,7 @@ BASE RULES (mode rules above win on conflict):\n\
 11. For deploy/git hosting: use connected integrations first. If missing, call connect_account (in-chat secure form + browser) — do not run interactive CLI login via run_command and do not request credentials in the chat message box.\n\
 12. Format final prose as clean Markdown: use a short Result heading followed by clear sections and bullets; use Markdown tables only for comparisons. Every table must include a header row and separator row; never use unaligned plain-text columns. Never print raw JSON, function-call syntax, tool arguments, or a literal `done` payload for the user. When work is complete, call the done tool instead of repeating its title, files, and features as loose prose.\n\
 13. Never stop after only announcing the next step (e.g. \"Let me find…\", \"I'll check…\", \"Looking for…\"). If you need to act, call a tool in the SAME turn. Narration without tools is incomplete.\n\
+14. Work efficiently: group independent local inspection calls (read_file, list_dir, glob, grep, git_status, file_info) in one tool response. The host may run that safe read-only batch together. Never assume results from one tool call while constructing another call in the same batch; keep writes, commands, browser actions, approvals, and computer actions ordered.\n\
 {memory_rules}\n\
 TOOL REFERENCE: read_file, write_file, edit_file, list_dir, glob, grep, run_command, git_init, git_add_all, git_commit, git_status, list_drives, sys_info, env_vars, list_processes, kill_process, open_url, open_path, download_file, move_file, copy_file, delete_file, make_dir, file_info, view_image, connect_account, integration_status, web_search, browse_page, export_client_pack, computer_list_windows, computer_observe, computer_focus_window, computer_click, computer_type_text, computer_press_key, computer_scroll, computer_drag, computer_game_sequence, ask_user, done.",
         root = root.display(),
@@ -1245,68 +1419,16 @@ Do not implement unless I explicitly ask. Mutating tools still need approval."
 
     let mut messages: Vec<ChatMessage> = vec![ChatMessage::system(&system)];
 
-    // Inject prior conversation for maximized session memory (native tool chains).
+    // Inject a bounded, protocol-safe summary of the recent session. This keeps
+    // follow-up turns fast and avoids replaying old tool-call protocol without
+    // its matching live results.
     if has_history {
         messages.push(ChatMessage::system(
-            "The following messages are the earlier conversation in this session \
-(user requests, your replies, tool calls/results, and decisions). \
-Use them as continuous memory for everything that follows.",
+            "The following is compact recent memory from this same session. \
+Use its user decisions, earlier replies, tool actions, and tool results as context. \
+The tool entries are historical summaries; use fresh tools for the current workspace.",
         ));
-        for turn in &history {
-            let role = turn.role.to_ascii_lowercase();
-            match role.as_str() {
-                "user" => {
-                    let content = turn.content.trim();
-                    if !content.is_empty() {
-                        messages.push(ChatMessage::user(content));
-                    }
-                }
-                "tool" => {
-                    let id = turn.tool_call_id.as_deref().unwrap_or("call").to_string();
-                    let name = turn.name.as_deref().unwrap_or("tool");
-                    let content = if turn.content.trim().is_empty() {
-                        "(empty)"
-                    } else {
-                        turn.content.trim()
-                    };
-                    messages.push(ChatMessage::tool(&id, name, content));
-                }
-                "assistant" => {
-                    let tool_calls = turn.tool_calls.as_ref().map(|calls| {
-                        calls
-                            .iter()
-                            .map(|c| ToolCall {
-                                id: c.id.clone(),
-                                name: c.name.clone(),
-                                arguments: c.arguments.clone(),
-                            })
-                            .collect::<Vec<_>>()
-                    });
-                    let has_tools = tool_calls.as_ref().map(|c| !c.is_empty()).unwrap_or(false);
-                    let content = turn.content.trim();
-                    if content.is_empty() && !has_tools {
-                        continue;
-                    }
-                    messages.push(ChatMessage::assistant(
-                        content,
-                        if has_tools { tool_calls } else { None },
-                        None,
-                    ));
-                }
-                "system" => {
-                    let content = turn.content.trim();
-                    if !content.is_empty() {
-                        messages.push(ChatMessage::system(content));
-                    }
-                }
-                _ => {
-                    let content = turn.content.trim();
-                    if !content.is_empty() {
-                        messages.push(ChatMessage::assistant(content, None, None));
-                    }
-                }
-            }
-        }
+        messages.extend(compact_history_messages(&history));
     }
 
     messages.push(ChatMessage::user(&user_content));
@@ -1488,9 +1610,8 @@ Use them as continuous memory for everything that follows.",
                             }
                             return Err(err);
                         }
-                        let delay_ms = (1_000u64
-                            .saturating_mul(1u64 << reconnect_attempt.min(5)))
-                        .min(30_000);
+                        let delay_ms =
+                            (1_000u64.saturating_mul(1u64 << reconnect_attempt.min(5))).min(30_000);
                         let status_message = if limit == 0 {
                             "Reconnecting…"
                         } else if reconnect_attempt >= limit {
@@ -1656,8 +1777,10 @@ Use them as continuous memory for everything that follows.",
                     | AutomaticContinuationReason::ProviderBlip => false,
                     _ => !reply_looks_stalled(&resp),
                 };
-                consecutive_stalled_recoveries =
-                    next_stalled_recovery_count(consecutive_stalled_recoveries, made_concrete_progress);
+                consecutive_stalled_recoveries = next_stalled_recovery_count(
+                    consecutive_stalled_recoveries,
+                    made_concrete_progress,
+                );
                 if consecutive_stalled_recoveries >= MAX_CONSECUTIVE_STALLED_RECOVERIES {
                     smart_agent.pause(
                         &app,
@@ -1758,6 +1881,43 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
         );
         messages.push(assistant_msg);
 
+        // Models commonly issue a first workspace-inspection batch (for
+        // example list_dir + glob + grep + read_file). Those local reads do
+        // not depend on one another, so finish them together while retaining
+        // original result order below. Mixed batches deliberately stay serial:
+        // a write, shell command, browser action, confirmation, or computer
+        // action must preserve the model's exact ordering.
+        let mut parallel_read_results = if resp.tool_calls.len() > 1
+            && resp
+                .tool_calls
+                .iter()
+                .all(|call| tools::is_parallel_safe_readonly_tool(&call.name))
+        {
+            emit(
+                &app,
+                &session_id,
+                "status",
+                json!({
+                    "message": format!("Inspecting {} workspace items in parallel…", resp.tool_calls.len()),
+                }),
+            );
+            let results = execute_parallel_readonly_batch(
+                &resp.tool_calls,
+                root,
+                settings.command_timeout_secs,
+                tool_ctx.clone(),
+                &cancel,
+            )
+            .await;
+            if cancel.load(Ordering::SeqCst) {
+                emit_cancelled(&app, &session_id, iteration);
+                return Ok(None);
+            }
+            results
+        } else {
+            None
+        };
+
         for (tool_index, tc) in resp.tool_calls.iter().enumerate() {
             if cancel.load(Ordering::SeqCst) {
                 emit_cancelled(&app, &session_id, iteration);
@@ -1826,7 +1986,18 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
                 );
             }
 
-            let (ok, content) = if tc.name == "ask_user" {
+            let precomputed = parallel_read_results
+                .as_mut()
+                .and_then(|results| results.remove(&tc.id));
+            let (ok, content) = if let Some((ok, content)) = precomputed {
+                (
+                    ok,
+                    integration_chat::redact_sensitive_text(
+                        &content,
+                        known_integration_secrets.as_ref(),
+                    ),
+                )
+            } else if tc.name == "ask_user" {
                 let question = tc
                     .arguments
                     .get("question")
@@ -2329,14 +2500,15 @@ fn project_context_block(root: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        can_recover_from_provider_blip, cursor_computer_use_instructions,
+        can_recover_from_provider_blip, compact_history_messages, cursor_computer_use_instructions,
         cursor_effort_for_request, cursor_permission_instructions, display_model_name,
         display_provider_name, identity_instructions, next_stalled_recovery_count,
         normalized_permission_mode, public_tool_arguments, public_tool_preview_delta,
         reply_announces_pending_action, reply_looks_stalled, resolve_tool_preview_name,
         starts_as_explanatory_request, stop_reason_requires_continuation,
         task_likely_requires_project_completion, tool_confirm_summary, truncate_utf8,
-        uses_cursor_sdk, MAX_CONSECUTIVE_STALLED_RECOVERIES,
+        uses_cursor_sdk, HistoryToolCall, HistoryTurn, MAX_CONSECUTIVE_STALLED_RECOVERIES,
+        NATIVE_HISTORY_MAX_BYTES, NATIVE_HISTORY_MAX_TURNS,
     };
     use crate::llm::{ChatMessage, LlmResponse};
     use anyhow::anyhow;
@@ -2350,6 +2522,67 @@ mod tests {
         let (truncated, was_truncated) = truncate_utf8(value, 3);
         assert_eq!(truncated, "a");
         assert!(was_truncated);
+    }
+
+    #[test]
+    fn native_history_is_bounded_and_never_replays_old_tool_protocol() {
+        let mut history = (0..40)
+            .map(|index| HistoryTurn {
+                role: "user".into(),
+                content: format!("old request {index}: {}", "x".repeat(1_200)),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            })
+            .collect::<Vec<_>>();
+        history.push(HistoryTurn {
+            role: "assistant".into(),
+            content: "I inspected the project.".into(),
+            tool_calls: Some(vec![HistoryToolCall {
+                id: "old-call".into(),
+                name: "read_file".into(),
+                arguments: json!({ "path": "src/main.ts" }),
+            }]),
+            tool_call_id: None,
+            name: None,
+        });
+        history.push(HistoryTurn {
+            role: "tool".into(),
+            content: "export const latest = true;".into(),
+            tool_calls: None,
+            tool_call_id: Some("old-call".into()),
+            name: Some("read_file".into()),
+        });
+        history.push(HistoryTurn {
+            role: "user".into(),
+            content: "Continue from the latest implementation.".into(),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        });
+
+        let messages = compact_history_messages(&history);
+        let bytes = messages
+            .iter()
+            .map(|message| message.content.as_str().map(str::len).unwrap_or_default() + 16)
+            .sum::<usize>();
+
+        assert!(messages.len() <= NATIVE_HISTORY_MAX_TURNS);
+        assert!(bytes <= NATIVE_HISTORY_MAX_BYTES);
+        assert!(messages.iter().all(|message| message.role != "tool"));
+        assert!(messages.iter().all(|message| message.tool_calls.is_none()));
+        assert!(messages.iter().any(|message| message
+            .content
+            .as_str()
+            .unwrap_or_default()
+            .contains("Earlier tool result: read_file")));
+        assert!(messages
+            .last()
+            .unwrap()
+            .content
+            .as_str()
+            .unwrap()
+            .contains("Continue from the latest"));
     }
 
     #[test]
@@ -2584,9 +2817,8 @@ mod tests {
 
     #[test]
     fn mid_task_provider_502_can_auto_recover() {
-        let blip = anyhow!(
-            "provider_unavailable: The provider is temporarily unavailable. (HTTP 502)"
-        );
+        let blip =
+            anyhow!("provider_unavailable: The provider is temporarily unavailable. (HTTP 502)");
         assert!(can_recover_from_provider_blip(&blip, 1, &[]));
         assert!(!can_recover_from_provider_blip(&blip, 0, &[]));
         assert!(can_recover_from_provider_blip(

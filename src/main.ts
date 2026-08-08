@@ -65,6 +65,8 @@ const runModelProfiles = new Map<
 >();
 /** Each run keeps its original workspace even when the visible project changes. */
 const runProjectPaths = new Map<string, string>();
+/** The user's prompt for each in-flight run — used to gate auto-opening the preview. */
+const runPrompts = new Map<string, string>();
 /** Files created/edited during a run — used to auto-open the build preview. */
 const runTouchedFiles = new Map<string, Set<string>>();
 /** Snapshot of project files at run start (relative paths). */
@@ -269,8 +271,58 @@ async function openBuildPreview(opts: {
   }
 }
 
+/**
+ * A build only auto-opens the preview when the user's own request points at
+ * something previewable (a website, page, app, game, UI, etc.). Plain code
+ * tasks ("fix this bug", "add a function") must never pop the preview open.
+ */
+function promptAsksForPreview(prompt: string | undefined): boolean {
+  const text = (prompt || "").toLowerCase();
+  if (!text) return false;
+  const previewIntent = [
+    "website",
+    "web site",
+    "webpage",
+    "web page",
+    "site",
+    "landing",
+    "homepage",
+    "home page",
+    "page",
+    "preview",
+    "html",
+    "css",
+    "frontend",
+    "front-end",
+    "ui",
+    "interface",
+    "dashboard",
+    "portfolio",
+    "game",
+    "app",
+    "application",
+    "screen",
+    "form",
+    "design",
+    "template",
+    "mockup",
+    "blog",
+    "store",
+    "shop",
+    "ecommerce",
+    "e-commerce",
+    "pos",
+    "booking",
+    "crm",
+    "landing page",
+  ];
+  return previewIntent.some((word) => text.includes(word));
+}
+
 async function maybeOpenBuildPreview(sessionId: string | undefined, reason: string) {
   if (!sessionId || reason === "cancelled" || !currentProjectPath) return;
+  // Only auto-open when the user explicitly asked for something previewable.
+  if (!promptAsksForPreview(runPrompts.get(sessionId))) return;
   const runProjectPath = runProjectPaths.get(sessionId);
   if (runProjectPath && !sameProjectPath(runProjectPath, currentProjectPath)) {
     runTouchedFiles.delete(sessionId);
@@ -817,6 +869,7 @@ function removeSession(id: string) {
     api.agentStop(id).catch(() => {});
     runningSessions.delete(id);
     runModelProfiles.delete(id);
+    runPrompts.delete(id);
   }
   deleteSession(id);
   sessionRegistry.delete(id);
@@ -909,6 +962,7 @@ function doRemoveAllSessions() {
     api.agentStop(id).catch(() => {});
     runningSessions.delete(id);
     runModelProfiles.delete(id);
+    runPrompts.delete(id);
   }
   deleteAllSessions(currentProjectPath!);
   for (const id of ids) sessionRegistry.delete(id);
@@ -1455,7 +1509,7 @@ async function sendPrompt(prompt: string) {
   }
 
   const sessionId = activeSessionId!;
-  // Maximize memory: send prior turns in this session only (never other chats).
+  // Send compact memory from this session only (never other chats).
   const history = buildLlmHistory(chat.getMessages(), prompt);
   if (modelBar.settings) {
     const profile = {
@@ -1476,6 +1530,7 @@ async function sendPrompt(prompt: string) {
   runningSessions.add(sessionId);
   syncActiveSessionModelLock();
   runProjectPaths.set(sessionId, projectRoot);
+  runPrompts.set(sessionId, prompt);
   runTouchedFiles.set(sessionId, new Set());
   previewOpenedForRun.delete(sessionId);
   void snapshotProjectFiles(projectRoot).then((snap) => {
@@ -1582,6 +1637,7 @@ async function sendPrompt(prompt: string) {
     syncUsageBar();
     refreshSidebar();
     runProjectPaths.delete(sessionId);
+    runPrompts.delete(sessionId);
   }
 }
 

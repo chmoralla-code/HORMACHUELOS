@@ -123,7 +123,9 @@ pub mod gemini;
 pub mod glm;
 pub mod openai;
 
-pub use openai::{build_client, is_transient_provider_error, reconnect_attempt_limit, request_error};
+pub use openai::{
+    build_client, is_transient_provider_error, reconnect_attempt_limit, request_error,
+};
 
 pub fn provider_needs_key(provider: &str) -> bool {
     if crate::config::is_custom_hosted_provider_alias(provider) {
@@ -233,10 +235,16 @@ pub fn build_provider_with_effort(
             }
         }
         "ollama" => Ok(Box::new(openai::OpenAi::new(&key, base, model, &prov))),
-        "openrouter" => Ok(Box::new(openai::OpenAi::new(&key, base, model, &prov))),
+        "openrouter" => Ok(Box::new(
+            openai::OpenAi::new(&key, base, model, &prov).with_reasoning_effort(model_effort),
+        )),
         "pollinations" => Ok(Box::new(openai::OpenAi::new(&key, base, model, &prov))),
-        "deepseek" => Ok(Box::new(openai::OpenAi::new(&key, base, model, &prov))),
-        "glm" => Ok(Box::new(openai::OpenAi::new(&key, base, model, &prov))),
+        "deepseek" => Ok(Box::new(
+            openai::OpenAi::new(&key, base, model, &prov).with_reasoning_effort(model_effort),
+        )),
+        "glm" => Ok(Box::new(
+            openai::OpenAi::new(&key, base, model, &prov).with_reasoning_effort(model_effort),
+        )),
         other if crate::config::is_custom_hosted_provider_alias(other) => {
             Ok(Box::new(
                 openai::OpenAi::new(&key, base, model, other).with_reasoning_effort(model_effort),
