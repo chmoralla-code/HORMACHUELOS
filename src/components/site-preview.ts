@@ -22,6 +22,15 @@ type SelectedEl = {
   element: HTMLElement | null;
   /** data:image/… screenshot of the clicked control, captured on select. */
   shotDataUrl: string | null;
+  /**
+   * Coordinates chosen from the parent preview overlay when the iframe is
+   * cross-origin.  A live localhost app cannot expose its DOM to the Tauri
+   * shell, so these are deliberately a visual pointer rather than a selector.
+   */
+  visualTarget?: {
+    xPercent: number;
+    yPercent: number;
+  };
 };
 
 /** Result returned by the chat shell after a preview action creates a prompt. */
@@ -537,6 +546,22 @@ function isStackedPreview(): boolean {
   return window.matchMedia("(max-width: 1179px)").matches;
 }
 
+/**
+ * A srcdoc preview is scriptable, while a localhost/external iframe is not
+ * scriptable from the Tauri WebView.  Check the configured source first so
+ * Design mode can offer its visual-selection fallback immediately instead of
+ * showing a misleading unavailable message after several retries.
+ */
+function isCrossOriginFrame(frame: HTMLIFrameElement): boolean {
+  const declaredSrc = frame.getAttribute("src")?.trim();
+  if (!declaredSrc || /^about:blank$/i.test(declaredSrc)) return false;
+  try {
+    return new URL(frame.src, window.location.href).origin !== window.location.origin;
+  } catch {
+    return true;
+  }
+}
+
 export class SitePreview {
   readonly root: HTMLElement;
   private tabsEl: HTMLElement;
@@ -564,6 +589,8 @@ export class SitePreview {
   private tabs: PreviewTab[] = [];
   private activeTabId = "";
   private selected: SelectedEl | null = null;
+  /** Parent-side selector used when an iframe's DOM is isolated by origin. */
+  private visualDesignOverlay: HTMLElement | null = null;
   private onDescribe: PreviewDescribeHandler | null = null;
   private onStateChange: ((state: SessionPreviewState | null) => void) | null = null;
   private closing = false;
@@ -1098,10 +1125,10 @@ export class SitePreview {
       this.selected = null;
       this.syncModeUi();
       this.syncTabStrip();
-      if (this.designMode) this.injectDesignMode();
       this.statusEl.textContent = /\.(apk|aab|ipa|exe|msi|dmg|wasm)$/i.test(this.entryPath)
         ? "Build artifact ready · open from Files to install/run"
         : this.readyStatus();
+      if (this.designMode) this.injectDesignMode();
     } finally {
       this.stateRestoreDepth -= 1;
     }
@@ -1129,6 +1156,29 @@ export class SitePreview {
           ? "Website preview in desktop software window"
           : "Website preview";
     }
+  }
+
+  private updateEditTargetUi(target: SelectedEl | null) {
+    const tagEl = this.editBar.querySelector("#site-preview-edit-tag");
+    if (!tagEl) return;
+    if (target?.visualTarget) {
+      tagEl.textContent = "area";
+      const x = Math.round(target.visualTarget.xPercent);
+      const y = Math.round(target.visualTarget.yPercent);
+      this.editInput.placeholder = `Change the selected area (${x}% × ${y}%)…`;
+      return;
+    }
+    if (target) {
+      tagEl.textContent = target.tag;
+      this.editInput.placeholder = target.text
+        ? `Change “${target.text.slice(0, 40)}”…`
+        : "Describe the change";
+      return;
+    }
+    tagEl.textContent = "element";
+    this.editInput.placeholder = this.designMode
+      ? "Click an element or area, then describe the change"
+      : "Describe the change";
   }
 
   private teardownSessionView() {
@@ -1399,6 +1449,7 @@ export class SitePreview {
     if (this.designMode) this.clearDesignMode();
     this.activeTabId = tabId;
     this.selected = null;
+    this.updateEditTargetUi(null);
     this.syncTabStrip();
     if (this.entryPath) this.statusEl.textContent = this.readyStatus();
     this.emitStateChange();
@@ -1613,12 +1664,13 @@ export class SitePreview {
       this.designModeCleanedUp = false;
     }
     this.designMode = on;
+    if (!on) this.selected = null;
     this.syncModeUi();
+    this.updateEditTargetUi(this.selected);
     if (on) {
-      this.injectDesignMode();
       this.statusEl.textContent = this.readyStatus();
+      this.injectDesignMode();
     } else {
-      this.selected = null;
       this.statusEl.textContent = this.readyStatus();
     }
     this.emitStateChange();
@@ -1649,15 +1701,16 @@ export class SitePreview {
         ? "Software window"
         : "Desktop";
     if (this.designMode) {
-      return `${mode} · Design mode · click an element, describe the change (sends a screenshot)`;
+      return `${mode} · Design mode · click an element or visual area, then describe the change`;
     }
     return assetMode
       ? `${mode} · Ready (asset mode)`
       : `${mode} · Ready · toggle Design to edit`;
   }
 
-  private clearDesignMode() {
-    this.designModeCleanedUp = true;
+  private clearDesignMode(cancelPendingInject = true) {
+    if (cancelPendingInject) this.designModeCleanedUp = true;
+    this.clearVisualDesignMode();
     for (const tab of this.tabs) {
       try {
         const doc = tab.frame.contentDocument as (Document & { __hormaDesignCleanup?: () => void }) | null;
@@ -1674,6 +1727,105 @@ export class SitePreview {
     }
   }
 
+  /** Remove the parent-side target selector used for cross-origin previews. */
+  private clearVisualDesignMode() {
+    this.visualDesignOverlay?.remove();
+    this.visualDesignOverlay = null;
+  }
+
+  /**
+   * Cross-origin frames (including live localhost dev servers in WebView2)
+   * cannot safely expose their DOM to the shell.  Keep Design mode useful by
+   * letting the user select a visible region, then give the agent stable
+   * coordinates and the project context in the generated prompt.
+   */
+  private enableVisualDesignMode(frame: HTMLIFrameElement) {
+    this.clearVisualDesignMode();
+    if (!this.designMode || this.activeTab?.frame !== frame) return;
+
+    const overlay = el("div", {
+      class: "site-preview-visual-design-overlay",
+      "data-testid": "design-visual-overlay",
+      tabindex: "0",
+      "aria-label": "Select a visual target in the live preview",
+    });
+    const hint = el("div", { class: "site-preview-visual-design-hint", "aria-hidden": "true" }, [
+      el("span", { class: "site-preview-visual-design-hint-label" }, ["Live preview"]),
+      el("span", {}, ["Click a visible area to target it"]),
+    ]);
+    const cursor = el("span", {
+      class: "site-preview-visual-design-cursor",
+      "aria-hidden": "true",
+      hidden: "true",
+    });
+    const marker = el("div", {
+      class: "site-preview-visual-design-marker",
+      "aria-hidden": "true",
+      hidden: "true",
+    }, [
+      el("span", { class: "site-preview-visual-design-marker-dot" }),
+      el("span", { class: "site-preview-visual-design-marker-label" }, ["Selected area"]),
+    ]);
+    overlay.append(hint, cursor, marker);
+
+    const pointForEvent = (event: PointerEvent | MouseEvent) => {
+      const rect = overlay.getBoundingClientRect();
+      if (rect.width < 1 || rect.height < 1) return null;
+      const clamp = (value: number) => Math.max(0, Math.min(100, value));
+      return {
+        xPercent: Math.round(clamp(((event.clientX - rect.left) / rect.width) * 100) * 10) / 10,
+        yPercent: Math.round(clamp(((event.clientY - rect.top) / rect.height) * 100) * 10) / 10,
+      };
+    };
+    const positionAt = (node: HTMLElement, point: { xPercent: number; yPercent: number }) => {
+      node.style.left = `${point.xPercent}%`;
+      node.style.top = `${point.yPercent}%`;
+    };
+
+    overlay.addEventListener("pointermove", (event) => {
+      const point = pointForEvent(event);
+      if (!point) return;
+      cursor.hidden = false;
+      positionAt(cursor, point);
+    });
+    overlay.addEventListener("pointerleave", () => {
+      cursor.hidden = true;
+    });
+    overlay.addEventListener("click", (event) => {
+      const point = pointForEvent(event);
+      if (!point) return;
+      event.preventDefault();
+      event.stopPropagation();
+      this.selected = {
+        tag: "visual area",
+        text: `${Math.round(point.xPercent)}% across, ${Math.round(point.yPercent)}% down`,
+        path: this.entryPath,
+        selector: `visual-area(${point.xPercent}%, ${point.yPercent}%)`,
+        element: null,
+        shotDataUrl: null,
+        visualTarget: point,
+      };
+      marker.hidden = false;
+      positionAt(marker, point);
+      overlay.dataset.selected = "true";
+      this.updateEditTargetUi(this.selected);
+      this.statusEl.textContent = "Visual target selected · describe the change for AI.";
+      this.editInput.focus();
+    });
+    overlay.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      this.setDesignMode(false);
+    });
+
+    this.frameHost.appendChild(overlay);
+    this.visualDesignOverlay = overlay;
+    this.selected = null;
+    this.updateEditTargetUi(null);
+    this.statusEl.textContent =
+      "Design mode · live preview is isolated, so click a visible area to target it.";
+  }
+
   private injectDesignMode(attempt = 0) {
     const frame = this.frame;
     if (!frame) return;
@@ -1682,6 +1834,10 @@ export class SitePreview {
     this.designModeCleanedUp = false;
     // Some WebView2 versions expose the frame document via contentWindow when
     // contentDocument reads null; try both before giving up.
+    if (isCrossOriginFrame(frame)) {
+      this.enableVisualDesignMode(frame);
+      return;
+    }
     let doc = frame.contentDocument;
     if (!doc?.body) {
       try {
@@ -1702,14 +1858,17 @@ export class SitePreview {
         }, 120);
         return;
       }
-      // Not scriptable: cross-origin page (e.g. a live localhost dev server).
+      // If a same-origin frame still cannot be inspected (for example while a
+      // navigation error page is active), retain a useful visual selector
+      // instead of disabling Design mode entirely.
       if (frame.src && !/^about:blank$/.test(frame.src)) {
-        this.statusEl.textContent =
-          "Design mode is unavailable on external/localhost pages — use a project file preview.";
+        this.enableVisualDesignMode(frame);
       }
       return;
     }
-    this.clearDesignMode();
+    this.clearDesignMode(false);
+    this.selected = null;
+    this.updateEditTargetUi(null);
     const style = doc.createElement("style");
     style.id = "horma-design-style";
     style.textContent = `
@@ -1853,9 +2012,7 @@ export class SitePreview {
         element: t,
         shotDataUrl: null,
       };
-      const tagEl = this.editBar.querySelector("#site-preview-edit-tag");
-      if (tagEl) tagEl.textContent = tag;
-      this.editInput.placeholder = text ? `Change “${text.slice(0, 40)}”…` : "Describe the change";
+      this.updateEditTargetUi(this.selected);
 
       // Floating "Edit this element" chip near the selection.
       removeEditChip();
@@ -2033,7 +2190,9 @@ When the task is complete, report the live public URL, GitHub repository URL, Ve
     if (!text) return;
     const sel = this.selected;
     this.editInput.value = "";
-    this.statusEl.textContent = "Capturing selection for AI…";
+    this.statusEl.textContent = sel?.visualTarget
+      ? "Preparing visual target for AI…"
+      : "Capturing selection for AI…";
 
     let shot = sel?.shotDataUrl || null;
     if (!shot && sel?.element?.isConnected) {
@@ -2054,6 +2213,8 @@ When the task is complete, report the live public URL, GitHub repository URL, Ve
     const previewLabel = sel?.path || this.entryPath || "the current preview";
     const prompt = imagePath
       ? `In the preview (${previewLabel}), update the element shown in the attached screenshot (the control I clicked in Design mode).\n\nRequested change: ${text}`
+      : sel?.visualTarget
+        ? `In the live preview (${previewLabel}), apply this design change to the visual target at approximately ${Math.round(sel.visualTarget.xPercent)}% from the left and ${Math.round(sel.visualTarget.yPercent)}% from the top of the visible preview. The live preview is isolated by the browser, so these coordinates are a visual pointer rather than a DOM selector. Inspect the relevant project files and running preview yourself, preserve surrounding behavior, and make the requested change at that target.\n\nRequested change: ${text}`
       : sel
         ? `In the preview (${previewLabel}), update the clicked <${sel.tag}>${sel.text ? ` (“${sel.text}”)` : ""} element.\n\nRequested change: ${text}`
         : `In the preview (${previewLabel}), apply this design change:\n\n${text}`;
@@ -2074,6 +2235,8 @@ When the task is complete, report the live public URL, GitHub repository URL, Ve
               ? "The current task is stopping — ask again after it ends."
               : imagePath
                 ? "Design change + screenshot sent to the active model."
+                : sel?.visualTarget
+                  ? "Visual design target sent to the active model."
                 : "Design change sent to the active model.";
   }
 }

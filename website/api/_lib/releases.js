@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.50";
-const BUILTIN_MSI_SHA256 = "a38783e84e48a205e8647fd7aa1ee052cd501cffd4713ae913cace126e5e1124";
-const BUILTIN_EXE_SHA256 = "06056d32c5459438dbf05432cb976ea956ba653f03c42f533b44f6c5a37276ab";
-const BUILTIN_RELEASE_NOTES = "Faster AI task execution with compact long-session memory and parallel safe workspace inspection, plus improved continuation, preview, provider, and update reliability.";
+const BUILTIN_RELEASE_VERSION = "0.1.51";
+const BUILTIN_MSI_SHA256 = "5376df1e4e0fb44986712c32404842de1e51bfefa7eeab06c4fdd449ac38ba7f";
+const BUILTIN_EXE_SHA256 = "e4b71655360117bd8a45ebd17936e4d2c92d2c7c8d6fa1d203267e5740cf734c";
+const BUILTIN_RELEASE_NOTES = "Design mode now works with live localhost previews through visual area selection, while project previews retain exact element editing and screenshots.";
 
 /**
  * A deployment-bundled release keeps the download/update path available even
