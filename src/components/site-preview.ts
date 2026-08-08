@@ -162,8 +162,15 @@ function withoutUrlSuffix(value: string): { path: string; suffix: string } {
     : { path: value, suffix: "" };
 }
 
+export function isExternalPreviewUrl(value: string): boolean {
+  const trimmed = value.trim();
+  return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(trimmed);
+}
+
 export function normalizePreviewEntry(projectRoot: string, value?: string | null): string | null {
   if (!projectRoot || !value) return null;
+  // A live dev server (localhost) can be previewed directly in the iframe.
+  if (isExternalPreviewUrl(value)) return value.trim();
   const root = decodePath(projectRoot).replace(/\/+$/, "");
   let candidate = decodePath(withoutUrlSuffix(value).path);
   if (!candidate) return null;
@@ -1534,6 +1541,13 @@ export class SitePreview {
     this.statusEl.textContent = "Loading…";
     const frame = tab.frame;
     try {
+      // A live dev server URL (localhost) is loaded directly in the iframe.
+      if (isExternalPreviewUrl(tab.entryPath)) {
+        frame.removeAttribute("srcdoc");
+        frame.src = tab.entryPath;
+        this.statusEl.textContent = this.readyStatus(true);
+        return;
+      }
       if (/\.(apk|aab|ipa|exe|msi|dmg|wasm)$/i.test(tab.entryPath)) {
         frame.removeAttribute("srcdoc");
         frame.src = "about:blank";

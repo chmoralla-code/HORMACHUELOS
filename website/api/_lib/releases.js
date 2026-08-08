@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.47";
-const BUILTIN_MSI_SHA256 = "455bffb4d4a3940cec73ac3cd4106c38689540db7f26cdd3e46cd7ab64b9ecfb";
-const BUILTIN_EXE_SHA256 = "e63c707d15d5cd9b401ab6b1a351f5686e8c9b2f812fe46d231d27e69644261f";
-const BUILTIN_RELEASE_NOTES = "Fix mid-task malformed-JSON failures on hosted (Hormachuelos v4) streams: cut-off or error streams now auto-resume instead of ending the run. Also fix the website Download buttons to serve installers from Supabase Storage.";
+const BUILTIN_RELEASE_VERSION = "0.1.48";
+const BUILTIN_MSI_SHA256 = "6bea237baef56a5b34e3f3695076bdb6046eeae526a9a95ab35b69c20446477a";
+const BUILTIN_EXE_SHA256 = "4f5a55ce7d1e41e37c932dc543b6b614099bdf54714d772782101e488657a096";
+const BUILTIN_RELEASE_NOTES = "Fix the preview window: it can now open live dev servers (http://localhost:PORT) directly in the iframe instead of failing with 'Invalid preview path'. The agent's open-in-preview tool calls now route dev-server URLs to the panel, and the CSP allows localhost frames.";
 
 /**
  * A deployment-bundled release keeps the download/update path available even

@@ -9,6 +9,7 @@ import { WorkspacePanel } from "./components/workspace";
 import { SmartAgentPanel, applySmartAgentEvent } from "./components/smart-agent";
 import {
   SitePreview,
+  isExternalPreviewUrl,
   isPreviewableBuild,
   mergePreviewSessionState,
   pickPreviewEntry,
@@ -202,6 +203,8 @@ function htmlPathFromOpenArgs(
     (typeof args.url === "string" && args.url) ||
     "";
   if (!raw) return null;
+  // A live dev server (localhost) can be previewed directly in the iframe.
+  if (isExternalPreviewUrl(raw)) return raw.trim();
   const rel = toProjectRelPath(raw.replace(/^file:\/\/\/?/i, ""), projectRoot);
   if (/\.html?$/i.test(rel) || /\.html?$/i.test(raw)) return rel;
   return null;

@@ -217,15 +217,10 @@ function redactSessionMessage(message: SessionMessage): SessionMessage {
 function sanitizePreviewPath(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const raw = value.trim().replace(/\\/g, "/");
-  if (
-    !raw ||
-    raw.length > SESSION_PREVIEW_PATH_MAX ||
-    raw.startsWith("/") ||
-    /^[a-z]:/i.test(raw) ||
-    raw.includes("\0")
-  ) {
-    return null;
-  }
+  if (!raw || raw.length > SESSION_PREVIEW_PATH_MAX || raw.includes("\0")) return null;
+  // A live dev server (localhost) can be previewed directly in the iframe.
+  if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(raw)) return raw;
+  if (raw.startsWith("/") || /^[a-z]:/i.test(raw)) return null;
   const parts: string[] = [];
   for (const part of raw.split("/")) {
     if (!part || part === ".") continue;
