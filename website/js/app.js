@@ -21,18 +21,25 @@ const STORAGE_DESKTOP_FLOW = "horma:desktop_flow";
 const ASSET_BASE =
   "https://mketkzycxmtvgdbwzsvh.supabase.co/storage/v1/object/public/public-assets";
 
-/** Desktop installer files (uploaded to Supabase after `npm run desktop:build`). */
+/**
+ * The current release is bundled with the production site as a verified
+ * fallback. Keep the first paint download buttons on this same origin; the
+ * update API can still replace them with a database-published asset URL.
+ */
+const RELEASE_DOWNLOAD_BASE = "/downloads";
+
+/** Desktop installer files for the current production release. */
 const DESKTOP_DOWNLOADS = {
   version: "0.1.53",
   windows: {
     msi: {
       label: "Windows installer (MSI)",
-      href: `${ASSET_BASE}/downloads/Hormachuelos_0.1.53_x64_en-US.msi`,
+      href: `${RELEASE_DOWNLOAD_BASE}/Hormachuelos_0.1.53_x64_en-US.msi`,
       file: "Hormachuelos_0.1.53_x64_en-US.msi",
     },
     setup: {
       label: "Windows setup (EXE)",
-      href: `${ASSET_BASE}/downloads/Hormachuelos_0.1.53_x64-setup.exe`,
+      href: `${RELEASE_DOWNLOAD_BASE}/Hormachuelos_0.1.53_x64-setup.exe`,
       file: "Hormachuelos_0.1.53_x64-setup.exe",
     },
   },
