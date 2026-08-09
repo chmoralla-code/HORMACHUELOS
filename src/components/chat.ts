@@ -14,6 +14,7 @@ type ToolStreamState = {
   renderedField: ToolArgField | null;
   renderedContent: string;
 };
+type MultiAgentTool = { id: string; name: string; arguments: any };
 type CompletionSummary = {
   primary: string;
   verification: string[];
@@ -83,8 +84,12 @@ export class Chat {
   private projectOutsideClose: ((e: MouseEvent) => void) | null = null;
   /** Image paths attached for the next send (hidden from the composer text). */
   private composerAttachments: string[] = [];
+  /** Video paths attached for the next send; sampled into one private frame grid on send. */
+  private composerVideoAttachments: string[] = [];
   /** Object URLs for attach-rail thumbs — revoked on clear/remove. */
   private composerAttachUrls = new Map<string, string>();
+  /** Prevent duplicate submits while the WebView is sampling attached videos. */
+  private preparingVideoFrames = false;
   /** True when usage windows / plan period are exhausted — no new prompts. */
   usageExhausted = false;
   /** Shown when composer is blocked by plan period limits. */
@@ -136,6 +141,10 @@ export class Chat {
   private replyModelLabel = "";
   /** Ultra effort — drives blue/purple gradient chrome (no emoji FX). */
   private ultraEffort = false;
+  /** Mode supplied by the active backend run; controls Multi-Agent activity chrome. */
+  private activePermissionMode = "plan";
+  /** Tool ids announced as one safe parallel Multi-Agent inspection pack. */
+  private multiAgentToolIds = new Set<string>();
 
   constructor(handlers: {
     onSend: (p: string) => void;
@@ -461,14 +470,14 @@ export class Chat {
       class: "composer-input",
       id: "forge-prompt",
       "aria-label": "Message",
-      placeholder: "Ask anything, paste an image, / for commands…",
+      placeholder: "Ask anything, attach an image or video, / for commands…",
     }) as HTMLTextAreaElement;
     this.input.rows = 1;
     this.input.addEventListener("input", () => this.autosize());
     this.input.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
         e.preventDefault();
-        this.submit();
+        void this.submit();
       }
     });
     this.input.addEventListener("paste", (e) => {
@@ -479,7 +488,7 @@ export class Chat {
       class: "composer-attach-rail",
       id: "composer-attach-rail",
       hidden: "true",
-      "aria-label": "Attached images",
+      "aria-label": "Attached media",
     });
 
     const bar = el("div", { class: "composer-toolbar" });
@@ -505,7 +514,7 @@ export class Chat {
       title: "Send",
       html: icon("send", 16),
     }) as HTMLButtonElement;
-    this.sendBtn.addEventListener("click", () => this.submit());
+    this.sendBtn.addEventListener("click", () => void this.submit());
     right.appendChild(this.sendBtn);
 
     bar.appendChild(left);
@@ -760,14 +769,26 @@ export class Chat {
     if (!this.composerAttachments.includes(trimmed)) {
       this.composerAttachments.push(trimmed);
     }
-    this.addComposerAttachPreview(trimmed, file);
+    this.addComposerAttachPreview(trimmed, file, "image");
     this.input?.focus();
   }
 
-  private composerPromptWithAttachments(text: string): string {
-    const markers = this.composerAttachments
-      .map((path) => `[Attached image: ${path}]`)
-      .join("\n");
+  /** Attach a video by path. It is converted to a six-frame contact sheet only when sent. */
+  addComposerVideoAttachment(path: string) {
+    const trimmed = path.trim();
+    if (!trimmed) return;
+    if (!this.composerVideoAttachments.includes(trimmed)) {
+      this.composerVideoAttachments.push(trimmed);
+    }
+    this.addComposerAttachPreview(trimmed, undefined, "video");
+    this.input?.focus();
+  }
+
+  private composerPromptWithAttachments(text: string, videoMarkers: string[] = []): string {
+    const markers = [
+      ...this.composerAttachments.map((path) => `[Attached image: ${path}]`),
+      ...videoMarkers,
+    ].join("\n");
     if (!markers) return text;
     return text ? `${markers}\n${text}` : markers;
   }
@@ -778,6 +799,7 @@ export class Chat {
     }
     this.composerAttachUrls.clear();
     this.composerAttachments = [];
+    this.composerVideoAttachments = [];
     const rail = this.composer?.querySelector("#composer-attach-rail") as HTMLElement | null;
     if (!rail) return;
     rail.querySelectorAll(".composer-attach-chip").forEach((chip) => chip.remove());
@@ -786,6 +808,7 @@ export class Chat {
 
   private removeComposerAttachment(path: string) {
     this.composerAttachments = this.composerAttachments.filter((p) => p !== path);
+    this.composerVideoAttachments = this.composerVideoAttachments.filter((p) => p !== path);
     const url = this.composerAttachUrls.get(path);
     if (url) {
       URL.revokeObjectURL(url);
@@ -799,7 +822,7 @@ export class Chat {
     if (!rail.querySelector(".composer-attach-chip")) rail.hidden = true;
   }
 
-  private addComposerAttachPreview(path: string, file?: File) {
+  private addComposerAttachPreview(path: string, file?: File, kind: "image" | "video" = "image") {
     const rail = this.composer?.querySelector("#composer-attach-rail") as HTMLElement | null;
     if (!rail) return;
     // Replace existing chip for the same path.
@@ -808,10 +831,15 @@ export class Chat {
     });
     rail.hidden = false;
     const chip = el("div", {
-      class: "composer-attach-chip",
-      title: "Attached image",
+      class: "composer-attach-chip" + (kind === "video" ? " composer-attach-video" : ""),
+      title: kind === "video" ? "Attached video — frames will be sampled when sent" : "Attached image",
       "data-path": path,
     });
+    if (kind === "video") {
+      const filename = path.split(/[/\\]/).pop() || "video";
+      chip.appendChild(el("span", { class: "composer-video-icon", "aria-hidden": "true" }, ["▶"]));
+      chip.appendChild(el("span", { class: "composer-video-name" }, [filename]));
+    } else {
     const img = document.createElement("img");
     img.alt = "Attached image";
     img.className = "composer-attach-thumb";
@@ -826,11 +854,13 @@ export class Chat {
         /* thumb optional */
       });
     }
+      chip.appendChild(img);
+    }
     const remove = el("button", {
       class: "composer-attach-remove",
       type: "button",
       title: "Remove attachment",
-      "aria-label": "Remove attached image",
+      "aria-label": kind === "video" ? "Remove attached video" : "Remove attached image",
       html: icon("close", 12),
     }) as HTMLButtonElement;
     remove.addEventListener("click", () => {
@@ -838,8 +868,164 @@ export class Chat {
       chip.remove();
       if (!rail.querySelector(".composer-attach-chip")) rail.hidden = true;
     });
-    chip.append(img, remove);
+    chip.appendChild(remove);
     rail.appendChild(chip);
+  }
+
+  /**
+   * Turn each selected video into one six-frame contact sheet before the run
+   * starts. The normal image bridge then describes that sheet once, so every
+   * chat model receives the same visual context without needing its own video
+   * API or the user's provider key.
+   */
+  private async prepareComposerVideoAttachments(): Promise<string[]> {
+    const markers: string[] = [];
+    const failed: string[] = [];
+    for (const path of this.composerVideoAttachments) {
+      try {
+        const sampled = await this.sampleVideoContactSheet(path);
+        markers.push(
+          `[Attached video: ${path}]\n` +
+          `[Video contact sheet: ${sampled.imagePath}; six chronological frames sampled across ${this.formatVideoDuration(sampled.durationSecs)}.]\n` +
+          `[Attached image: ${sampled.imagePath}]`,
+        );
+      } catch (error) {
+        const detail = this.videoErrorMessage(error);
+        const name = path.split(/[/\\]/).pop() || "video";
+        failed.push(name);
+        markers.push(
+          `[Attached video: ${path}]\n` +
+          `[Video frame sampling unavailable: ${detail}. Do not infer visual details; ask the user for an MP4 or WebM if they are needed.]`,
+        );
+      }
+    }
+    if (failed.length) this.showAttachmentToast(`Could not sample ${failed.join(", ")}`);
+    return markers;
+  }
+
+  private async sampleVideoContactSheet(path: string): Promise<{ imagePath: string; durationSecs: number }> {
+    const { convertFileSrc } = await import("@tauri-apps/api/core");
+    const video = document.createElement("video");
+    video.preload = "auto";
+    video.muted = true;
+    video.playsInline = true;
+    // `convertFileSrc` uses Tauri's local asset protocol. Request CORS mode so
+    // its decoded frames can be placed on a canvas and saved as the private
+    // contact sheet rather than becoming a tainted canvas.
+    video.crossOrigin = "anonymous";
+    video.src = convertFileSrc(path);
+    video.load();
+
+    try {
+      await this.waitForVideoMetadata(video);
+      const durationSecs = Number(video.duration);
+      if (!Number.isFinite(durationSecs) || durationSecs < 0.1) {
+        throw new Error("The video duration could not be read");
+      }
+      if (durationSecs > 20 * 60) {
+        throw new Error("Videos longer than 20 minutes are not sampled automatically");
+      }
+      if (!video.videoWidth || !video.videoHeight) {
+        throw new Error("This video does not provide decodable frames");
+      }
+
+      const columns = 3;
+      const frames = 6;
+      const maxCellWidth = 384;
+      const cellWidth = Math.max(160, Math.min(maxCellWidth, video.videoWidth));
+      const cellHeight = Math.max(90, Math.round((cellWidth * video.videoHeight) / video.videoWidth));
+      const canvas = document.createElement("canvas");
+      canvas.width = cellWidth * columns;
+      canvas.height = cellHeight * Math.ceil(frames / columns);
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("The video frame canvas is unavailable");
+      ctx.fillStyle = "#10151f";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      for (let index = 0; index < frames; index += 1) {
+        // Avoid an exact zero seek, which some MP4 files interpret as a stale
+        // poster frame. The range covers the beginning through the ending.
+        const fraction = 0.04 + (index / (frames - 1)) * 0.92;
+        const seconds = Math.max(0.001, Math.min(durationSecs - 0.001, durationSecs * fraction));
+        await this.seekVideoFrame(video, seconds);
+        const x = (index % columns) * cellWidth;
+        const y = Math.floor(index / columns) * cellHeight;
+        ctx.drawImage(video, x, y, cellWidth, cellHeight);
+        ctx.fillStyle = "rgba(5, 11, 20, 0.78)";
+        ctx.fillRect(x + 7, y + 7, 74, 23);
+        ctx.fillStyle = "#f5f8ff";
+        ctx.font = "600 12px system-ui, sans-serif";
+        ctx.fillText(this.formatVideoDuration(seconds), x + 13, y + 23);
+      }
+
+      return {
+        imagePath: await api.savePastedImage(canvas.toDataURL("image/jpeg", 0.82), "image/jpeg"),
+        durationSecs,
+      };
+    } finally {
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+    }
+  }
+
+  private waitForVideoMetadata(video: HTMLVideoElement): Promise<void> {
+    if (video.readyState >= HTMLMediaElement.HAVE_METADATA) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const timer = window.setTimeout(() => finish(new Error("Timed out while opening the video")), 15_000);
+      const finish = (error?: Error) => {
+        window.clearTimeout(timer);
+        video.removeEventListener("loadedmetadata", loaded);
+        video.removeEventListener("error", failed);
+        if (error) reject(error);
+        else resolve();
+      };
+      const loaded = () => finish();
+      const failed = () => finish(new Error(`Windows could not decode this video (media error ${video.error?.code || "unknown"})`));
+      video.addEventListener("loadedmetadata", loaded, { once: true });
+      video.addEventListener("error", failed, { once: true });
+    });
+  }
+
+  private seekVideoFrame(video: HTMLVideoElement, seconds: number): Promise<void> {
+    if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && Math.abs(video.currentTime - seconds) < 0.03) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve, reject) => {
+      const timer = window.setTimeout(() => finish(new Error("Timed out while sampling a video frame")), 7_000);
+      const finish = (error?: Error) => {
+        window.clearTimeout(timer);
+        video.removeEventListener("seeked", ready);
+        video.removeEventListener("error", failed);
+        if (error) reject(error);
+        else resolve();
+      };
+      const ready = () => finish();
+      const failed = () => finish(new Error(`Windows could not decode this video (media error ${video.error?.code || "unknown"})`));
+      video.addEventListener("seeked", ready, { once: true });
+      video.addEventListener("error", failed, { once: true });
+      video.currentTime = seconds;
+    });
+  }
+
+  private formatVideoDuration(seconds: number): string {
+    const total = Math.max(0, Math.floor(seconds));
+    const mins = Math.floor(total / 60);
+    const secs = total % 60;
+    return mins ? `${mins}:${String(secs).padStart(2, "0")}` : `0:${String(secs).padStart(2, "0")}`;
+  }
+
+  private videoErrorMessage(error: unknown): string {
+    const raw = error instanceof Error ? error.message : String(error || "Unknown media error");
+    return raw.replace(/[\r\n\[\]]+/g, " ").trim().slice(0, 180) || "Unknown media error";
+  }
+
+  private showAttachmentToast(message: string) {
+    const toast = document.getElementById("toast");
+    if (!toast) return;
+    toast.textContent = message;
+    toast.hidden = false;
+    window.setTimeout(() => { toast.hidden = true; }, 5000);
   }
 
   /** Small workspace pill under the composer — click to change AI work directory. */
@@ -1030,18 +1216,22 @@ export class Chat {
     this.input.style.height = Math.min(this.input.scrollHeight, 200) + "px";
   }
 
-  private submit() {
-    // Allow image-only sends (caption optional).
+  private async submit() {
+    // Allow image- or video-only sends (caption optional).
+    if (this.preparingVideoFrames) return;
     const typed = this.input.value.trim();
-    const text = this.composerPromptWithAttachments(typed);
-    if (!text) return;
+    if (!typed && !this.composerAttachments.length && !this.composerVideoAttachments.length) return;
     if (!this.projectReady) {
       this.onNeedProject();
       return;
     }
+    const unsampledText = this.composerPromptWithAttachments(
+      typed,
+      this.composerVideoAttachments.map((path) => `[Attached video: ${path}]`),
+    );
     if (this.usageExhausted) {
       // Refuse send + queue while at 0% — keep text so user can retry after reset
-      this.onSend(text);
+      this.onSend(unsampledText);
       return;
     }
     // While stopping, do not queue — keep composer contents so cancel stays a full stop
@@ -1049,6 +1239,22 @@ export class Chat {
       this.input.placeholder = "Stopping… wait for cancel, then send";
       return;
     }
+
+    let videoMarkers: string[] = [];
+    if (this.composerVideoAttachments.length) {
+      this.preparingVideoFrames = true;
+      this.sendBtn.disabled = true;
+      this.input.placeholder = "Preparing video frames for every model…";
+      try {
+        videoMarkers = await this.prepareComposerVideoAttachments();
+      } finally {
+        this.preparingVideoFrames = false;
+        this.sendBtn.disabled = false;
+        this.input.placeholder = "Ask anything, attach an image or video, / for commands…";
+      }
+    }
+    const text = this.composerPromptWithAttachments(typed, videoMarkers);
+    if (!text) return;
     this.input.value = "";
     this.clearComposerAttachments();
     this.autosize();
@@ -1086,8 +1292,10 @@ export class Chat {
     chip.appendChild(el("span", { class: "pending-chip-badge" }, ["Pending"]));
     const preview = text
       .replace(/\[Attached image:\s*.+?\]/gi, "")
+      .replace(/\[Attached video:\s*.+?\]/gi, "")
+      .replace(/\[Video [^\]]+\]/gi, "")
       .replace(/\s+/g, " ")
-      .trim() || "Attached image";
+      .trim() || "Attached media";
     const body = el("span", { class: "pending-chip-text" }, [preview]);
     chip.appendChild(body);
     const remove = el("button", {
@@ -1342,6 +1550,7 @@ export class Chat {
     this.toolBatchEl = null;
     this.toolBatchCount = 0;
     this.toolBatchOpen = false;
+    this.setActivePermissionMode("plan");
     clear(this.node);
     const empty = div("chat-empty");
     empty.appendChild(el("div", { class: "chat-empty-mark", "aria-hidden": "true" }, ["Hormachuelos"]));
@@ -1364,6 +1573,7 @@ export class Chat {
     this.toolBatchEl = null;
     this.toolBatchCount = 0;
     this.toolBatchOpen = false;
+    this.setActivePermissionMode("plan");
     this.pendingAssistant = null;
     this.thinking = null;
     this.thinkingBody = null;
@@ -1414,6 +1624,7 @@ export class Chat {
     this.toolBatchEl = null;
     this.toolBatchCount = 0;
     this.toolBatchOpen = false;
+    this.setActivePermissionMode("plan");
     this.pendingAssistant = null;
     this.thinking = null;
     this.messages = [...msgs];
@@ -1473,19 +1684,34 @@ export class Chat {
     this.scrollToBottom(true);
   }
 
-  /** Show image attachments as chips; hide the raw temp-path markers. */
+  /** Show media attachments as chips; hide private temp-path markers. */
   private renderUserMessageBody(host: HTMLElement, text: string) {
-    const markerRe = /\[Attached image:\s*(.+?)\]/gi;
-    const paths: string[] = [];
-    let cleaned = text.replace(markerRe, (_full, path: string) => {
+    const imageMarkerRe = /\[Attached image:\s*(.+?)\]/gi;
+    const videoMarkerRe = /\[Attached video:\s*(.+?)\]/gi;
+    const imagePaths: string[] = [];
+    const videoPaths: string[] = [];
+    let cleaned = text.replace(videoMarkerRe, (_full, path: string) => {
       const p = String(path || "").trim();
-      if (p && !paths.includes(p)) paths.push(p);
+      if (p && !videoPaths.includes(p)) videoPaths.push(p);
+      return "";
+    });
+    cleaned = cleaned.replace(/\[Video [^\]]+\]/gi, "");
+    cleaned = cleaned.replace(imageMarkerRe, (_full, path: string) => {
+      const p = String(path || "").trim();
+      if (p && !imagePaths.includes(p)) imagePaths.push(p);
       return "";
     }).replace(/\n{3,}/g, "\n\n").trim();
 
-    if (paths.length) {
-      const rail = el("div", { class: "msg-attach-rail", "aria-label": "Attached images" });
-      for (const path of paths) {
+    if (imagePaths.length || videoPaths.length) {
+      const rail = el("div", { class: "msg-attach-rail", "aria-label": "Attached media" });
+      for (const path of videoPaths) {
+        const filename = path.split(/[/\\]/).pop() || "Video";
+        rail.appendChild(el("div", { class: "msg-attach-chip msg-attach-video", title: "Attached video" }, [
+          el("span", { class: "msg-video-icon", "aria-hidden": "true" }, ["▶"]),
+          el("span", { class: "msg-video-name" }, [filename]),
+        ]));
+      }
+      for (const path of imagePaths) {
         const chip = el("div", { class: "msg-attach-chip", title: "Attached image" });
         const img = document.createElement("img");
         img.alt = "Attached image";
@@ -1504,7 +1730,7 @@ export class Chat {
     }
     if (cleaned) {
       host.appendChild(document.createTextNode(cleaned));
-    } else if (!paths.length) {
+    } else if (!imagePaths.length && !videoPaths.length) {
       host.textContent = text;
     }
   }
@@ -1576,6 +1802,7 @@ export class Chat {
       ripgrep: "Code search",
       greptool: "Code search",
       run_command: "Shell run",
+      start_dev_server: "Local preview",
       shell: "Shell run",
       bash: "Shell run",
       run_terminal_cmd: "Shell run",
@@ -1600,6 +1827,8 @@ export class Chat {
       make_dir: "Folder make",
       mkdir: "Folder make",
       file_info: "File peek",
+      view_image: "Image view",
+      view_video: "Video view",
       web_search: "Web scout",
       websearch: "Web scout",
       browse_page: "Page browse",
@@ -1638,6 +1867,160 @@ export class Chat {
     return pretty || "Action";
   }
 
+  private setActivePermissionMode(mode: unknown) {
+    const normalized = String(mode || "").trim().toLowerCase();
+    this.activePermissionMode = normalized === "multi_agent" ? "multi_agent" : "plan";
+    this.node.classList.toggle("chat-multi-agent", this.activePermissionMode === "multi_agent");
+    if (this.activePermissionMode !== "multi_agent") this.multiAgentToolIds.clear();
+  }
+
+  private isMultiAgentRun(): boolean {
+    return this.activePermissionMode === "multi_agent";
+  }
+
+  /** A plain-language role for a tool — shown instead of its API identifier in Multi-Agent mode. */
+  private multiAgentActivity(name: string, args: any): { emoji: string; label: string; detail: string } {
+    const key = String(name || "")
+      .trim()
+      .replace(/([a-z])([A-Z])/g, "$1_$2")
+      .replace(/[\s.-]+/g, "_")
+      .toLowerCase();
+    const value = (...keys: string[]) => {
+      for (const candidate of keys) {
+        const item = args?.[candidate];
+        if (typeof item === "string" && item.trim()) return item.trim();
+      }
+      return "";
+    };
+    const clip = (text: string, size = 44) =>
+      text.length > size ? `${text.slice(0, Math.max(1, size - 1))}…` : text;
+    const path = value("path", "file_path", "target_file", "src", "cwd");
+    const file = path.split(/[\\/]/).filter(Boolean).pop() || "the project";
+    const pattern = value("pattern", "query", "search");
+    const command = value("command");
+    const target = clip(file);
+
+    switch (key) {
+      case "read_file":
+      case "read":
+      case "readfile":
+        return { emoji: "📖", label: `Reading ${target}`, detail: "Checking the current implementation" };
+      case "list_dir":
+      case "listdir":
+      case "list_directory":
+        return { emoji: "🧭", label: `Mapping ${target}`, detail: "Finding the relevant project folders" };
+      case "glob":
+      case "glob_file_search":
+        return { emoji: "🗂️", label: `Finding ${clip(pattern || "project files")}`, detail: "Locating files that match the task" };
+      case "grep":
+      case "ripgrep":
+        return { emoji: "🔎", label: `Searching for ${clip(pattern || "the requested code")}`, detail: "Finding the relevant implementation" };
+      case "git_status":
+        return { emoji: "🌿", label: "Checking project changes", detail: "Reviewing the current Git working tree" };
+      case "file_info":
+        return { emoji: "ℹ️", label: `Inspecting ${target}`, detail: "Checking file details before the next step" };
+      case "write_file":
+      case "write":
+      case "writefile":
+        return { emoji: "✍️", label: `Creating ${target}`, detail: "Adding the requested project file" };
+      case "edit_file":
+      case "edit":
+      case "apply_patch":
+      case "str_replace":
+        return { emoji: "🛠️", label: `Updating ${target}`, detail: "Applying a focused project change" };
+      case "run_command":
+      case "shell":
+      case "terminal":
+        return { emoji: "⚙️", label: "Running a project task", detail: command ? `Executing ${clip(command, 58)}` : "Executing a project command" };
+      case "start_dev_server":
+        return {
+          emoji: "🚀",
+          label: "Starting local preview",
+          detail: command ? `Launching ${clip(command, 58)}` : "Launching the local development server",
+        };
+      case "web_search":
+      case "websearch":
+        return { emoji: "🌐", label: `Researching ${clip(pattern || "the web")}`, detail: "Gathering public information for this task" };
+      case "browse_page":
+      case "web_fetch":
+        return { emoji: "🔗", label: "Reviewing a web page", detail: "Checking the requested online resource" };
+      case "view_image":
+        return { emoji: "🖼️", label: `Reviewing ${target}`, detail: "Inspecting the supplied image" };
+      case "view_video":
+        return { emoji: "🎬", label: `Reviewing ${target}`, detail: "Sampling chronological video frames" };
+      case "open_path":
+      case "open_url":
+        return { emoji: "↗️", label: "Opening the requested view", detail: "Showing the result in the appropriate app" };
+      case "ask_user":
+        return { emoji: "💬", label: "Asking for a decision", detail: "Waiting only for a choice that changes the result" };
+      case "done":
+        return { emoji: "✅", label: "Preparing the delivery", detail: "Summarizing the verified result" };
+      default:
+        return { emoji: "🧩", label: "Handling a project task", detail: "Completing the next requested step" };
+    }
+  }
+
+  private showMultiAgentBatch(tools: MultiAgentTool[]) {
+    const safeTools = Array.isArray(tools)
+      ? tools.filter((tool): tool is MultiAgentTool =>
+          Boolean(tool && typeof tool.id === "string" && typeof tool.name === "string"),
+        )
+      : [];
+    if (!safeTools.length) return;
+
+    this.setActivePermissionMode("multi_agent");
+    this.clearIdleActivityTimer();
+    this.sealThoughtBeforeTools();
+    for (const tool of safeTools) this.multiAgentToolIds.add(tool.id);
+
+    const batch = div("multi-agent-batch tool-spawn");
+    batch.setAttribute("role", "status");
+    batch.setAttribute("aria-label", `${safeTools.length} Multi-Agent tools started together`);
+    const head = div("multi-agent-head");
+    head.appendChild(el("span", { class: "multi-agent-mark", "aria-hidden": "true" }, ["🌈"]));
+    const title = div("multi-agent-copy");
+    title.appendChild(el("strong", {}, ["Multi-Agent"]));
+    title.appendChild(el("span", {}, [
+      `${safeTools.length} independent workspace ${safeTools.length === 1 ? "check" : "checks"} started together`,
+    ]));
+    head.appendChild(title);
+    head.appendChild(el("span", { class: "multi-agent-live" }, ["LIVE"]));
+    batch.appendChild(head);
+
+    const toolsList = div("multi-agent-tools");
+    safeTools.forEach((tool, index) => {
+      const activity = this.multiAgentActivity(tool.name, tool.arguments);
+      const agent = div("multi-agent-tool working");
+      agent.dataset.multiAgentToolId = tool.id;
+      agent.style.setProperty("--agent-index", String(index));
+      agent.title = activity.detail;
+      agent.appendChild(el("span", { class: "multi-agent-tool-emoji", "aria-hidden": "true" }, [activity.emoji]));
+      const copy = div("multi-agent-tool-copy");
+      copy.appendChild(el("strong", {}, [activity.label]));
+      copy.appendChild(el("span", {}, [activity.detail]));
+      agent.appendChild(copy);
+      agent.appendChild(el("span", { class: "multi-agent-tool-pulse", "aria-hidden": "true" }));
+      toolsList.appendChild(agent);
+    });
+    batch.appendChild(toolsList);
+    this.node.appendChild(batch);
+    this.scrollToBottom();
+  }
+
+  private markMultiAgentToolDone(id: string, ok: boolean) {
+    this.node.querySelectorAll<HTMLElement>(".multi-agent-tool").forEach((agent) => {
+      if (agent.dataset.multiAgentToolId !== id) return;
+      agent.classList.remove("working");
+      agent.classList.add(ok ? "done" : "failed");
+      const batch = agent.closest<HTMLElement>(".multi-agent-batch");
+      if (batch && !batch.querySelector(".multi-agent-tool.working")) {
+        batch.classList.add("complete");
+        const status = batch.querySelector(".multi-agent-live");
+        if (status) status.textContent = "DONE";
+      }
+    });
+  }
+
   /** Noun-ish title used under Running/Ran (premium-friendly, never raw tool ids). */
   private toolRunTitle(name: string, args: any): string {
     const friendly = this.friendlyToolName(name);
@@ -1664,12 +2047,21 @@ export class Chat {
   }
 
   private toolRunningLabel(name: string, args: any): string {
+    if (this.isMultiAgentRun()) {
+      const activity = this.multiAgentActivity(name, args);
+      return `${activity.emoji} ${activity.label}`;
+    }
     return this.isPremiumReply()
       ? `Working · ${this.toolRunTitle(name, args)}`
       : `Running ${this.toolRunTitle(name, args)}`;
   }
 
   private toolRanLabel(name: string, args: any, ok: boolean, content: string): string {
+    if (this.isMultiAgentRun()) {
+      const activity = this.multiAgentActivity(name, args);
+      if (!ok) return `⚠️ ${activity.label} needs attention`;
+      return `✓ ${activity.emoji} ${activity.label}`;
+    }
     const title = this.toolRunTitle(name, args);
     if (!ok) {
       const first = (content || "failed").split("\n")[0].trim();
@@ -1682,6 +2074,14 @@ export class Chat {
   }
 
   private toolArgsHeader(name: string, args: any): string {
+    if (this.isMultiAgentRun()) {
+      const activity = this.multiAgentActivity(name, args);
+      const displayArgs = redactToolArguments(name, args);
+      const argsStr = typeof displayArgs === "string"
+        ? displayArgs
+        : JSON.stringify(displayArgs ?? {}, null, 2);
+      return `· ${activity.emoji} ${activity.label}\n${activity.detail}\n\n${argsStr}`;
+    }
     const friendly = this.friendlyToolName(name);
     const displayArgs = redactToolArguments(name, args);
     const argsStr = typeof displayArgs === "string"
@@ -1703,12 +2103,25 @@ export class Chat {
         : "commands";
     const label = this.toolBatchEl.querySelector(".tool-batch-label") as HTMLElement | null;
     if (!label) return;
+    const multiAgent = this.isMultiAgentRun();
     if (this.toolBatchOpen || this.pendingTools.size > 0) {
-      setShimmerText(label, `${premium ? "Working" : "Running"} ${n} ${unit}`, true);
+      setShimmerText(
+        label,
+        multiAgent
+          ? `🌈 ${n} ${n === 1 ? "agent" : "agents"} working`
+          : `${premium ? "Working" : "Running"} ${n} ${unit}`,
+        true,
+      );
       this.toolBatchEl.classList.add("is-running");
       this.toolBatchEl.classList.remove("is-done");
     } else {
-      setShimmerText(label, `${premium ? "Done" : "Ran"} ${n} ${unit}`, false);
+      setShimmerText(
+        label,
+        multiAgent
+          ? `✓ ${n} ${n === 1 ? "agent" : "agents"} finished`
+          : `${premium ? "Done" : "Ran"} ${n} ${unit}`,
+        false,
+      );
       this.toolBatchEl.classList.remove("is-running");
       this.toolBatchEl.classList.add("is-done");
     }
@@ -1734,11 +2147,18 @@ export class Chat {
     const batchLabel = head.querySelector(".tool-batch-label") as HTMLElement;
     setShimmerText(
       batchLabel,
-      this.isPremiumReply() ? "Working 1 step" : "Running 1 command",
+      this.isMultiAgentRun()
+        ? "🌈 1 agent working"
+        : this.isPremiumReply()
+          ? "Working 1 step"
+          : "Running 1 command",
       true,
     );
     head.appendChild(el("span", { class: "tool-batch-chev", html: icon("chevronDown", 12) }));
-    const wrap = div("tool-batch-wrap tool-spawn collapsed is-running");
+    const wrap = div(
+      "tool-batch-wrap tool-spawn collapsed is-running" +
+        (this.isMultiAgentRun() ? " multi-agent-tool-batch" : ""),
+    );
     wrap.appendChild(head);
     head.addEventListener("click", () => {
       wrap.classList.toggle("collapsed");
@@ -2424,6 +2844,8 @@ export class Chat {
         return pattern ? `Searching · ${clip(pattern, 40)}` : "Searching code";
       case "run_command":
         return cmd ? `Running · ${clip(cmd, 44)}` : "Running a command";
+      case "start_dev_server":
+        return cmd ? `Starting local preview · ${clip(cmd, 40)}` : "Starting local preview";
       case "git_init":
         return "Initializing git";
       case "git_add_all":
@@ -2593,6 +3015,8 @@ export class Chat {
         return pattern ? `Searching for ${pattern}${path ? ` in ${path}` : ""}` : "Searching code";
       case "run_command":
         return cmd ? `Running:\n${cmd}` : "Running a command";
+      case "start_dev_server":
+        return cmd ? `Starting local development server:\n${cmd}` : "Starting local development server";
       case "git_commit":
         return msg ? `Committing: ${msg}` : "Creating commit";
       case "open_url":
@@ -3077,10 +3501,13 @@ export class Chat {
   /** Live tool card shown as soon as the model requests the tool. */
   private buildPendingToolCard(id: string, name: string, args: any) {
     this.ensureToolBatch();
-    const wrap = div("tool-card-wrap tool-spawn");
+    const multiAgentTool = this.isMultiAgentRun() && this.multiAgentToolIds.has(id);
+    const wrap = div(
+      "tool-card-wrap tool-spawn" + (multiAgentTool ? " multi-agent-tool-card-wrap" : ""),
+    );
     // Batch stays collapsed by default — cards hidden until user expands
     wrap.hidden = this.isToolBatchCollapsed();
-    const card = div("tool-card pending");
+    const card = div("tool-card pending" + (multiAgentTool ? " multi-agent-tool-card" : ""));
     const bodyId = `tool-result-${id.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
     const head = el("button", {
       class: "tool-card-head",
@@ -3126,9 +3553,14 @@ export class Chat {
   /** Build a finished tool card (only when no pending card exists yet). */
   private buildFinishedToolCard(id: string, name: string, args: any, ok: boolean, content: string, at?: number) {
     this.ensureToolBatch();
-    const wrap = div("tool-card-wrap tool-spawn");
+    const multiAgentTool = this.isMultiAgentRun() && this.multiAgentToolIds.has(id);
+    const wrap = div(
+      "tool-card-wrap tool-spawn" + (multiAgentTool ? " multi-agent-tool-card-wrap" : ""),
+    );
     wrap.hidden = this.isToolBatchCollapsed();
-    const card = div("tool-card" + (ok ? " ok" : " err"));
+    const card = div(
+      "tool-card" + (ok ? " ok" : " err") + (multiAgentTool ? " multi-agent-tool-card" : ""),
+    );
     const bodyId = `tool-result-${id.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
     const head = el("button", {
       class: "tool-card-head",
@@ -3218,6 +3650,8 @@ export class Chat {
     } else {
       this.buildFinishedToolCard(id, toolName, toolArgs, ok, content, stamp);
     }
+    this.markMultiAgentToolDone(id, ok);
+    this.multiAgentToolIds.delete(id);
     this.scrollToBottom();
   }
 
@@ -3909,6 +4343,9 @@ export class Chat {
 
   private renderEvent(e: AgentEvent) {
     switch (e.kind) {
+      case "start":
+        this.setActivePermissionMode(e.payload.permission_mode);
+        break;
       case "thinking": this.showThinking(e.payload.iteration); break;
       case "status": {
         const message = (e.payload.message || "Reconnecting…").trim() || "Reconnecting…";
@@ -3935,6 +4372,9 @@ export class Chat {
           e.payload.name,
           e.payload.arguments_delta ?? "",
         );
+        break;
+      case "multi_agent_batch":
+        this.showMultiAgentBatch(e.payload.tools);
         break;
       case "tool_call":
         this.queueTool(

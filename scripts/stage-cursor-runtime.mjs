@@ -59,6 +59,10 @@ writeFileSync(
     "Node.js license and notices: https://github.com/nodejs/node/blob/v24.14.1/LICENSE",
     "Cursor SDK package metadata: runtime/node_modules/@cursor/sdk/package.json",
     "",
+    "Video attachment frame-sampling workflow inspired by claude-video by Bradley Bonanno (MIT):",
+    "https://github.com/bradautomates/claude-video",
+    "Hormachuelos uses browser media APIs for its implementation; no claude-video source files are bundled.",
+    "",
   ].join("\n"),
   "utf8",
 );

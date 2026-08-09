@@ -37,6 +37,25 @@ const SECRET_FILE_NAMES: &[&str] = &[
 ];
 const SECRET_FILE_EXTENSIONS: &[&str] =
     &["pem", "key", "p8", "p12", "pfx", "jks", "keystore", "kdbx"];
+/// A project opened from an empty accidental child folder can safely be
+/// repaired only when its direct parent has both a real build manifest and a
+/// source-control/layout signal. This deliberately does not guess across
+/// multiple ancestors or accept a README alone.
+const PROJECT_MANIFESTS: &[&str] = &[
+    "package.json",
+    "Cargo.toml",
+    "pyproject.toml",
+    "requirements.txt",
+    "go.mod",
+    "composer.json",
+    "Gemfile",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+];
+const PROJECT_LAYOUT_DIRS: &[&str] = &[
+    "src", "app", "pages", "public", "lib", "frontend", "backend", "mobile",
+];
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -74,6 +93,69 @@ pub fn canonical_project_root(path: &Path) -> Result<PathBuf> {
         bail!("Project path must be a directory.");
     }
     Ok(root)
+}
+
+/// Return a stable user-facing Windows path without the internal `\\\\?\\`
+/// verbatim prefix emitted by `canonicalize`. The native filesystem APIs still
+/// canonicalize paths before using them, so this only improves matching and
+/// display across the frontend, sessions, and provider prompts.
+pub fn display_project_root(path: &Path) -> String {
+    let value = path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        if let Some(unc) = value.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{unc}");
+        }
+        if let Some(plain) = value.strip_prefix(r"\\?\") {
+            return plain.to_string();
+        }
+    }
+    value.to_string()
+}
+
+fn directory_is_empty(path: &Path) -> Result<bool> {
+    let mut entries = std::fs::read_dir(path)
+        .with_context(|| format!("Could not inspect project folder: {}", path.display()))?;
+    Ok(entries.next().transpose()?.is_none())
+}
+
+fn looks_like_project_root(path: &Path) -> bool {
+    let has_manifest = PROJECT_MANIFESTS
+        .iter()
+        .any(|name| path.join(name).is_file());
+    if !has_manifest {
+        return false;
+    }
+    path.join(".git").is_dir()
+        || PROJECT_LAYOUT_DIRS
+            .iter()
+            .any(|name| path.join(name).is_dir())
+}
+
+/// Resolve a folder selected through **Open Project**. When that selection is
+/// completely empty and its direct parent is unmistakably a source project,
+/// adopt the parent. This fixes a common accidental "one folder too deep"
+/// selection without broadening access beyond one verified parent.
+///
+/// New projects deliberately call `canonical_project_root` directly, so an
+/// intentionally blank project is never redirected.
+pub fn resolve_open_project_root(path: &Path) -> Result<PathBuf> {
+    let selected = canonical_project_root(path)?;
+    if !directory_is_empty(&selected)? {
+        return Ok(selected);
+    }
+    let Some(parent) = selected.parent() else {
+        return Ok(selected);
+    };
+    let parent = match parent.canonicalize() {
+        Ok(parent) if parent.is_dir() => parent,
+        _ => return Ok(selected),
+    };
+    if looks_like_project_root(&parent) {
+        Ok(parent)
+    } else {
+        Ok(selected)
+    }
 }
 
 fn validate_relative_path(relative: &str) -> Result<PathBuf> {
@@ -413,7 +495,10 @@ Prepared with Hormachuelos.\n\n\
 
 #[cfg(test)]
 mod tests {
-    use super::{export_client_pack, list_project_files, read_project_file, ProjectNode};
+    use super::{
+        export_client_pack, list_project_files, read_project_file, resolve_open_project_root,
+        ProjectNode,
+    };
     use std::path::{Path, PathBuf};
 
     struct TestWorkspace(PathBuf);
@@ -449,6 +534,41 @@ mod tests {
         let workspace = TestWorkspace::new();
         assert!(read_project_file(workspace.path(), "../outside.txt").is_err());
         assert!(read_project_file(workspace.path(), "C:\\Windows\\win.ini").is_err());
+    }
+
+    #[test]
+    fn opening_an_empty_child_of_a_real_project_uses_the_parent_root() {
+        let workspace = TestWorkspace::new();
+        std::fs::write(workspace.path().join("package.json"), "{}").unwrap();
+        std::fs::create_dir_all(workspace.path().join("src")).unwrap();
+        let empty_child = workspace.path().join("accidentally-selected-folder");
+        std::fs::create_dir_all(&empty_child).unwrap();
+
+        let resolved = resolve_open_project_root(&empty_child).expect("resolve project root");
+        assert_eq!(resolved, workspace.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn opening_an_intentionally_nonempty_child_never_promotes_to_its_parent() {
+        let workspace = TestWorkspace::new();
+        std::fs::write(workspace.path().join("package.json"), "{}").unwrap();
+        std::fs::create_dir_all(workspace.path().join("src")).unwrap();
+        let child = workspace.path().join("new-project");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(child.join(".gitkeep"), "").unwrap();
+
+        let resolved = resolve_open_project_root(&child).expect("resolve project root");
+        assert_eq!(resolved, child.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn empty_child_is_not_promoted_when_parent_is_not_a_verified_project() {
+        let workspace = TestWorkspace::new();
+        let child = workspace.path().join("empty-project");
+        std::fs::create_dir_all(&child).unwrap();
+
+        let resolved = resolve_open_project_root(&child).expect("resolve project root");
+        assert_eq!(resolved, child.canonicalize().unwrap());
     }
 
     #[test]

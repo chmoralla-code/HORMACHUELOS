@@ -30,17 +30,17 @@ const RELEASE_DOWNLOAD_BASE = "/downloads";
 
 /** Desktop installer files for the current production release. */
 const DESKTOP_DOWNLOADS = {
-  version: "0.1.53",
+  version: "0.1.55",
   windows: {
     msi: {
       label: "Windows installer (MSI)",
-      href: `${RELEASE_DOWNLOAD_BASE}/Hormachuelos_0.1.53_x64_en-US.msi`,
-      file: "Hormachuelos_0.1.53_x64_en-US.msi",
+      href: `${RELEASE_DOWNLOAD_BASE}/Hormachuelos_0.1.55_x64_en-US.msi`,
+      file: "Hormachuelos_0.1.55_x64_en-US.msi",
     },
     setup: {
       label: "Windows setup (EXE)",
-      href: `${RELEASE_DOWNLOAD_BASE}/Hormachuelos_0.1.53_x64-setup.exe`,
-      file: "Hormachuelos_0.1.53_x64-setup.exe",
+      href: `${RELEASE_DOWNLOAD_BASE}/Hormachuelos_0.1.55_x64-setup.exe`,
+      file: "Hormachuelos_0.1.55_x64-setup.exe",
     },
   },
 };

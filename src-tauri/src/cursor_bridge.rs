@@ -403,7 +403,7 @@ fn bounded_cursor_history(history: &[HistoryTurn]) -> Vec<BridgeHistoryTurn> {
 
 fn cursor_permission_enforcement(mode: &str) -> &'static str {
     match mode {
-        "full" => "cursor_sdk_agent",
+        "full" | "multi_agent" => "cursor_sdk_agent",
         "auto" => "cursor_sdk_auto_review",
         "research" | "plan" => "cursor_sdk_plan_read_only",
         _ => "cursor_sdk_plan_read_only",

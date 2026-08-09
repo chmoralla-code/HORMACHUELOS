@@ -112,7 +112,11 @@ async function installMock(page) {
         `**Mock agent reply**\n\nYou said: “${prompt}”\n\n` +
         `Session \`${sessionId?.slice?.(0, 8) || "sess"}\` · OK`;
 
-      emit("agent", { kind: "start", session_id: sessionId, payload: { prompt } });
+      emit("agent", {
+        kind: "start",
+        session_id: sessionId,
+        payload: { prompt, permission_mode: settings.permission_mode },
+      });
       await delay(40);
       emit("agent", {
         kind: "thinking",
@@ -126,6 +130,49 @@ async function installMock(page) {
         payload: { text: "Considering the user message…", iteration: 1 },
       });
       await delay(40);
+      if (settings.permission_mode === "multi_agent") {
+        const parallelTools = [
+          { id: "multi-list", name: "list_dir", arguments: { path: "." } },
+          { id: "multi-read", name: "read_file", arguments: { path: "package.json" } },
+          { id: "multi-grep", name: "grep", arguments: { pattern: "scripts", path: "package.json" } },
+        ];
+        emit("agent", {
+          kind: "multi_agent_batch",
+          session_id: sessionId,
+          payload: { tools: parallelTools },
+        });
+        await delay(12);
+        for (const tool of parallelTools) {
+          emit("agent", { kind: "tool_call", session_id: sessionId, payload: tool });
+        }
+        await delay(12);
+        for (const tool of parallelTools) {
+          emit("agent", {
+            kind: "tool_result",
+            session_id: sessionId,
+            payload: { id: tool.id, name: tool.name, ok: true, content: "Mock inspection complete" },
+          });
+        }
+      }
+      if (window.__HORMA_DEV_SERVER_FIXTURE__) {
+        const localServer = {
+          id: "local-preview",
+          name: "start_dev_server",
+          arguments: { command: "npm run dev -- --host 127.0.0.1", port: 5173 },
+        };
+        emit("agent", { kind: "tool_call", session_id: sessionId, payload: localServer });
+        await delay(45);
+        emit("agent", {
+          kind: "tool_result",
+          session_id: sessionId,
+          payload: {
+            id: localServer.id,
+            name: localServer.name,
+            ok: true,
+            content: "Started local development server in background (PID 4242). Preview: http://127.0.0.1:5173.",
+          },
+        });
+      }
       // stream text in two chunks
       const mid = Math.ceil(reply.length / 2);
       emit("agent", {
@@ -187,9 +234,11 @@ async function installMock(page) {
             return projectRoot ? [projectRoot] : ["C:\\\\Users\\\\Cyrhiel\\\\Documents\\\\INVENTIONS\\\\AI-Forge"];
           case "get_project_root":
             return projectRoot;
-          case "set_project_root":
-            projectRoot = args.path;
+          case "set_project_root": {
+            const remaps = window.__HORMA_PROJECT_ROOT_REMAP__ || {};
+            projectRoot = remaps[args.path] || args.path;
             return null;
+          }
           case "create_project_dir":
             projectRoot = args.path;
             return null;
@@ -229,8 +278,16 @@ async function installMock(page) {
                 ? window.__HORMA_IMAGE_PICKER_FIXTURE__
                 : null;
             }
+            if (args.options?.title === "Attach videos") {
+              window.__HORMA_LAST_DIALOG_OPTIONS__ = args.options;
+              return Array.isArray(window.__HORMA_VIDEO_PICKER_FIXTURE__)
+                ? window.__HORMA_VIDEO_PICKER_FIXTURE__
+                : null;
+            }
             return null;
           case "import_image_path":
+            return String(args.path || "");
+          case "import_video_path":
             return String(args.path || "");
           case "agent_run":
             window.__HORMA_LAST_AGENT_PROMPT__ = args.prompt;
@@ -375,6 +432,85 @@ test("legacy burst blocks cannot lock a healthy plan wallet", async ({ page }) =
 
   await sendMessage(page, "Confirm the healthy wallet can still send this message.");
   await expect(page.locator("#chat")).toContainText("Mock agent reply", { timeout: 10000 });
+});
+
+test("repairs an accidentally empty child workspace before the AI starts", async ({ page }) => {
+  const requestedPath = String.raw`\\?\C:\fixtures\CRISPY KING DESIGN 2\KRESPE KING`;
+  const normalizedRequestedPath = String.raw`C:\fixtures\CRISPY KING DESIGN 2\KRESPE KING`;
+  const resolvedPath = String.raw`C:\fixtures\CRISPY KING DESIGN 2`;
+  await page.addInitScript(
+    ({ requestedPath, normalizedRequestedPath, resolvedPath }) => {
+      window.__HORMA_RECENT_PROJECTS_FIXTURE__ = [requestedPath];
+      window.__HORMA_PROJECT_ROOT_REMAP__ = {
+        [requestedPath]: resolvedPath,
+        [normalizedRequestedPath]: resolvedPath,
+      };
+      localStorage.setItem("ai-forge:active-project-workspace", requestedPath);
+      localStorage.setItem(
+        "ai-forge:project-workspaces",
+        JSON.stringify([
+          { path: requestedPath, name: "KRESPE KING", addedAt: 1, lastOpenedAt: 1 },
+        ]),
+      );
+      localStorage.setItem(
+        "ai-forge:sessions",
+        JSON.stringify([
+          {
+            id: "root-repair-session",
+            title: "Existing project context",
+            projectId: requestedPath,
+            messages: [{ type: "assistant", text: "Existing project context", at: 1 }],
+            createdAt: 1,
+            preview: {
+              version: 1,
+              projectRoot: requestedPath,
+              tabs: [],
+              activeTabIndex: 0,
+              designMode: false,
+              androidMode: false,
+              softwareMode: false,
+            },
+          },
+        ]),
+      );
+      localStorage.setItem("ai-forge:project-usage", JSON.stringify({ [requestedPath]: 42 }));
+    },
+    { requestedPath, normalizedRequestedPath, resolvedPath },
+  );
+  await installMock(page);
+  await page.route("https://hormachuelos.vercel.app/api/update?*", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ updateAvailable: false, forceUpdate: false, currentVersion: "0.1.5", latest: null }),
+    }),
+  );
+  await page.route("https://hormachuelos.vercel.app/api/auth/me", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ ok: true, user: { email: "root-repair@example.com", plan: "pro" } }),
+    }),
+  );
+
+  await page.goto(APP, { waitUntil: "networkidle" });
+  await expect(page.locator("#chat")).toContainText("Existing project context");
+  const projectWorkspaces = page.locator(".sb-project-workspace:not(.sb-quick-session)");
+  await expect(projectWorkspaces).toContainText("CRISPY KING DESIGN 2");
+  await expect(projectWorkspaces).not.toContainText("KRESPE KING");
+
+  await sendMessage(page, "Read the active project files.");
+  await expect
+    .poll(() => page.evaluate(() => window.__HORMA_LAST_AGENT_PROJECT_ROOT__))
+    .toBe(resolvedPath);
+
+  const persisted = await page.evaluate(() => JSON.parse(localStorage.getItem("ai-forge:sessions") || "[]"));
+  const session = persisted.find((entry) => entry.id === "root-repair-session");
+  expect(session.projectId).toBe(resolvedPath);
+  expect(session.preview).toBeUndefined();
+  const usage = await page.evaluate(() => JSON.parse(localStorage.getItem("ai-forge:project-usage") || "{}"));
+  expect(usage[resolvedPath]).toBe(42);
+  expect(usage[requestedPath]).toBeUndefined();
 });
 
 test("creates and uses a Quick session without asking for a folder", async ({ page }) => {
@@ -630,4 +766,104 @@ test("attaches every image selected together or pasted from Explorer", async ({ 
     .toContain("pasted-two.png");
   const prompt = await page.evaluate(() => String(window.__HORMA_LAST_AGENT_PROMPT__ || ""));
   expect(prompt.match(/\[Attached image:/g) || []).toHaveLength(2);
+});
+
+test("video picker attaches video chips before frame sampling", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__HORMA_VIDEO_PICKER_FIXTURE__ = [
+      "C:\\fixtures\\demo-one.mp4",
+      "C:\\fixtures\\demo-two.webm",
+    ];
+  });
+  await installMock(page);
+  await page.route("https://hormachuelos.vercel.app/api/update?*", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ updateAvailable: false, forceUpdate: false, currentVersion: "0.1.5", latest: null }),
+    }),
+  );
+  await page.route("https://hormachuelos.vercel.app/api/auth/me", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ ok: true, user: { email: "videos@example.com", plan: "pro" } }),
+    }),
+  );
+  await page.goto(APP, { waitUntil: "networkidle" });
+  await openProjectViaUI(page);
+
+  await page.getByRole("button", { name: "Add modes and attachments" }).click();
+  await page.getByRole("menuitem", { name: "Video", exact: true }).click();
+  await expect(page.locator(".composer-attach-video")).toHaveCount(2);
+  await expect(page.locator(".composer-attach-video").first()).toContainText("demo-one.mp4");
+  expect(await page.evaluate(() => window.__HORMA_LAST_DIALOG_OPTIONS__?.title)).toBe("Attach videos");
+  expect(await page.evaluate(() => window.__HORMA_LAST_DIALOG_OPTIONS__?.multiple)).toBe(true);
+});
+
+test("local preview launch completes instead of remaining as a running shell command", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__HORMA_DEV_SERVER_FIXTURE__ = true;
+  });
+  await installMock(page);
+  await page.route("https://hormachuelos.vercel.app/api/update?*", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ updateAvailable: false, forceUpdate: false, currentVersion: "0.1.5", latest: null }),
+    }),
+  );
+  await page.route("https://hormachuelos.vercel.app/api/auth/me", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ ok: true, user: { email: "preview-launch@example.com", plan: "pro" } }),
+    }),
+  );
+
+  await page.goto(APP, { waitUntil: "networkidle" });
+  await openProjectViaUI(page);
+  await sendMessage(page, "Start the local preview and continue working.");
+
+  const previewTool = page.locator('.tool-name[data-tool="start_dev_server"]');
+  await expect(previewTool).toContainText("Local preview", { timeout: 10000 });
+  await expect(previewTool).toContainText(/Ran|Done/);
+  await expect(page.locator("#chat")).toContainText("Mock agent reply");
+  await page.waitForFunction(
+    () => document.querySelector(".send-btn:not(.stop-btn)")?.getAttribute("aria-label") === "Send message",
+    { timeout: 10000 },
+  );
+});
+
+test("Multi-Agent mode saves Ship-level access and renders parallel tool roles", async ({ page }) => {
+  await installMock(page);
+  await page.route("https://hormachuelos.vercel.app/api/update?*", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ updateAvailable: false, forceUpdate: false, currentVersion: "0.1.5", latest: null }),
+    }),
+  );
+  await page.route("https://hormachuelos.vercel.app/api/auth/me", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ ok: true, user: { email: "multi@example.com", plan: "pro" } }),
+    }),
+  );
+  await page.goto(APP, { waitUntil: "networkidle" });
+  await openProjectViaUI(page);
+
+  await page.getByRole("button", { name: "Mode: Auto" }).click();
+  await page.getByRole("option", { name: /multi-agent/i }).click();
+  await expect(page.locator(".chip-mode-multi-agent")).toBeVisible();
+
+  await sendMessage(page, "Inspect the project quickly with multiple agents.");
+  const swarm = page.locator(".multi-agent-batch");
+  await expect(swarm).toBeVisible();
+  await expect(swarm).toContainText("Multi-Agent");
+  await expect(swarm).toContainText("Reading package.json");
+  await expect(swarm).toContainText("Mapping");
+  await expect(swarm).toContainText("Searching for scripts");
+  await expect(page.locator(".multi-agent-tool.done")).toHaveCount(3);
 });

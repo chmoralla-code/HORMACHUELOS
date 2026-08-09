@@ -33,6 +33,7 @@ export const icons = {
   multitask: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="8" height="7" rx="1.5"/><rect x="13" y="13" width="8" height="7" rx="1.5"/><path d="M15 4h4a2 2 0 0 1 2 2v4M9 20H5a2 2 0 0 1-2-2v-4"/></svg>`,
   ask: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.4 8.4 0 0 1-9 8.5 9.4 9.4 0 0 1-4-.9L3 21l1.6-4.3A8.3 8.3 0 1 1 21 11.5Z"/><path d="M9.6 9a2.5 2.5 0 1 1 3.4 2.3c-.8.4-1 .8-1 1.7M12 16h.01"/></svg>`,
   image: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9" r="1.5"/><path d="m4 17 5-5 3 3 2-2 6 6"/></svg>`,
+  video: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="13" height="14" rx="2"/><path d="m16 10 5-3v10l-5-3z"/><path d="m8.5 10 4 2-4 2z" fill="currentColor" stroke="none"/></svg>`,
 };
 
 // Real brand logos — official marks rendered with currentColor.

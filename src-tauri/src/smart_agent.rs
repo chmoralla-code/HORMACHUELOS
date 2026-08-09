@@ -496,7 +496,12 @@ fn is_command_tool(name: &str) -> bool {
     let name = name.trim().to_ascii_lowercase();
     matches!(
         name.as_str(),
-        "run_command" | "run_terminal" | "run_terminal_cmd" | "execute_command" | "shell"
+        "run_command"
+            | "start_dev_server"
+            | "run_terminal"
+            | "run_terminal_cmd"
+            | "execute_command"
+            | "shell"
     ) || name.contains("command")
 }
 
@@ -575,6 +580,7 @@ mod tests {
     fn cursor_terminal_commands_are_classified_as_commands() {
         assert!(is_command_tool("run_terminal_cmd"));
         assert!(is_command_tool("execute_command"));
+        assert!(is_command_tool("start_dev_server"));
         assert!(!is_command_tool("read_file"));
     }
 }

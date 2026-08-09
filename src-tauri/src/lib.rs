@@ -67,11 +67,17 @@ fn get_project_root(state: tauri::State<'_, state::AppState>) -> Option<String> 
 
 #[tauri::command]
 fn set_project_root(path: String, state: tauri::State<'_, state::AppState>) -> Result<(), String> {
-    let root = workspace::canonical_project_root(std::path::Path::new(&path))
+    let selected = workspace::canonical_project_root(std::path::Path::new(&path))
         .map_err(|error| error.to_string())?;
-    let canonical = root.to_string_lossy().to_string();
+    let root =
+        workspace::resolve_open_project_root(&selected).map_err(|error| error.to_string())?;
+    let canonical = workspace::display_project_root(&root);
     *state.project_root.lock().unwrap() = Some(canonical.clone());
-    state.add_recent_project(canonical);
+    if root != selected {
+        state.replace_recent_project(&path, canonical);
+    } else {
+        state.add_recent_project(canonical);
+    }
     Ok(())
 }
 
@@ -92,7 +98,7 @@ fn ensure_quick_session_workspace(
     let directories = directories::ProjectDirs::from("com", "ai-forge", "AI-Forge")
         .ok_or_else(|| "Could not determine the Hormachuelos data folder.".to_string())?;
     let root = quick_session_workspace_in(directories.data_local_dir())?;
-    let canonical = root.to_string_lossy().to_string();
+    let canonical = workspace::display_project_root(&root);
     *state.project_root.lock().unwrap() = Some(canonical.clone());
     Ok(canonical)
 }
@@ -117,7 +123,7 @@ async fn save_settings(
     // Normalize permission mode + auto_approve together
     let mode = settings.permission_mode.trim().to_ascii_lowercase();
     settings.permission_mode = match mode.as_str() {
-        "plan" | "auto" | "research" | "full" => mode,
+        "plan" | "auto" | "research" | "full" | "multi_agent" => mode,
         _ => {
             if settings.auto_approve {
                 "auto".into()
@@ -126,8 +132,10 @@ async fn save_settings(
             }
         }
     };
-    settings.auto_approve =
-        settings.permission_mode == "auto" || settings.permission_mode == "full";
+    settings.auto_approve = matches!(
+        settings.permission_mode.as_str(),
+        "auto" | "full" | "multi_agent"
+    );
     settings.validate().map_err(|e| e.to_string())?;
     settings.save().map_err(|e| e.to_string())?;
     *state.settings.lock().unwrap() = settings;
@@ -606,7 +614,7 @@ async fn create_project_dir(
     let tid = template_id.unwrap_or_else(|| "blank".into());
     templates::scaffold(&tid, p).map_err(|e| e.to_string())?;
     let root = workspace::canonical_project_root(p).map_err(|error| error.to_string())?;
-    let canonical = root.to_string_lossy().to_string();
+    let canonical = workspace::display_project_root(&root);
     *state.project_root.lock().unwrap() = Some(canonical.clone());
     state.add_recent_project(canonical);
     Ok(())
@@ -754,6 +762,70 @@ fn import_image_path(path: String) -> Result<String, String> {
     write_paste_image_bytes(&bytes, out_ext)
 }
 
+const MAX_PASTE_VIDEO_BYTES: u64 = 750 * 1024 * 1024;
+
+fn is_supported_video_extension(ext: &str) -> bool {
+    matches!(
+        ext,
+        "mp4" | "mov" | "m4v" | "webm" | "mkv" | "avi" | "wmv" | "flv" | "mpeg" | "mpg" | "3gp"
+    )
+}
+
+/// Copy a user-selected video into the app's attachment directory. Keeping a
+/// private copy makes the attachment survive Explorer moves and lets the
+/// WebView sample frames without granting an agent access to arbitrary paths.
+#[tauri::command]
+fn import_video_path(path: String) -> Result<String, String> {
+    use std::io::{Read, Write};
+
+    let src = std::path::PathBuf::from(path.trim().trim_matches('"'));
+    if !src.is_file() {
+        return Err(format!("Video file not found: {}", src.display()));
+    }
+    let ext = src
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    if !is_supported_video_extension(&ext) {
+        return Err(format!(
+            "Unsupported video type .{ext}. Use MP4, MOV, WEBM, MKV, AVI, WMV, FLV, MPEG, or 3GP."
+        ));
+    }
+    let metadata = std::fs::metadata(&src).map_err(|e| format!("Could not inspect video: {e}"))?;
+    if metadata.len() == 0 {
+        return Err("Video is empty.".into());
+    }
+    if metadata.len() > MAX_PASTE_VIDEO_BYTES {
+        return Err("Video is too large (max 750 MB).".into());
+    }
+
+    let dir = std::env::temp_dir().join("hormachuelos-paste");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let dest = dir.join(format!("video-{}.{}", uuid::Uuid::new_v4(), ext));
+    let copied = (|| -> Result<u64, String> {
+        let input = std::fs::File::open(&src).map_err(|e| format!("Could not read video: {e}"))?;
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&dest)
+            .map_err(|e| format!("Could not create video attachment: {e}"))?;
+        let copied = std::io::copy(&mut input.take(MAX_PASTE_VIDEO_BYTES + 1), &mut output)
+            .map_err(|e| format!("Could not copy video: {e}"))?;
+        output
+            .flush()
+            .map_err(|e| format!("Could not finalize video: {e}"))?;
+        if copied > MAX_PASTE_VIDEO_BYTES {
+            return Err("Video is too large (max 750 MB).".into());
+        }
+        Ok(copied)
+    })();
+    if copied.is_err() {
+        let _ = std::fs::remove_file(&dest);
+    }
+    copied?;
+    Ok(dest.to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 fn list_project_files(
     max_depth: Option<u32>,
@@ -827,10 +899,9 @@ async fn agent_run(
     // Carry the workspace captured by the frontend into this specific run.
     // A project switch must never redirect an already-starting agent.
     let project_root = if let Some(path) = project_root.filter(|path| !path.trim().is_empty()) {
-        workspace::canonical_project_root(std::path::Path::new(&path))
-            .map_err(|error| error.to_string())?
-            .to_string_lossy()
-            .to_string()
+        let root = workspace::canonical_project_root(std::path::Path::new(&path))
+            .map_err(|error| error.to_string())?;
+        workspace::display_project_root(&root)
     } else {
         state
             .project_root
@@ -1116,6 +1187,7 @@ pub fn run() {
             save_pasted_image,
             preview_capture::capture_preview_selection,
             import_image_path,
+            import_video_path,
             agent_run,
             agent_stop,
             open_project_in_explorer,

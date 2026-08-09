@@ -44,7 +44,7 @@ pub struct Settings {
     pub max_iterations: u32,
     pub command_timeout_secs: u64,
     pub auto_approve: bool,
-    /// Permission mode: "plan" | "auto" | "research" | "full"
+    /// Permission mode: "plan" | "auto" | "research" | "full" | "multi_agent"
     #[serde(default = "default_permission_mode")]
     pub permission_mode: String,
     /// Capability chip: thinking | guided | agent | balanced | investigate | brief | autonomous | max
@@ -102,7 +102,7 @@ fn capability_for_mode(mode: &str) -> &'static str {
     match mode {
         "auto" => "agent",
         "research" => "investigate",
-        "full" => "autonomous",
+        "full" | "multi_agent" => "autonomous",
         _ => "thinking",
     }
 }
@@ -160,7 +160,7 @@ impl Settings {
         // Keep auto_approve in sync with mode for older code paths
         let mode = s.permission_mode.to_ascii_lowercase();
         match mode.as_str() {
-            "auto" | "full" => {
+            "auto" | "full" | "multi_agent" => {
                 s.permission_mode = mode;
                 s.auto_approve = true;
             }
@@ -175,7 +175,8 @@ impl Settings {
                 } else {
                     "plan".into()
                 };
-                s.auto_approve = s.permission_mode == "auto" || s.permission_mode == "full";
+                s.auto_approve =
+                    matches!(s.permission_mode.as_str(), "auto" | "full" | "multi_agent");
             }
         }
         let cap = s.capability_mode.trim().to_ascii_lowercase();
@@ -345,9 +346,9 @@ impl Settings {
         ensure!(
             matches!(
                 self.permission_mode.as_str(),
-                "plan" | "auto" | "research" | "full"
+                "plan" | "auto" | "research" | "full" | "multi_agent"
             ),
-            "Permission mode must be plan, auto, research, or full."
+            "Permission mode must be plan, auto, research, full, or multi_agent."
         );
         ensure!(
             matches!(
@@ -674,6 +675,16 @@ mod tests {
     #[test]
     fn computer_use_is_opt_in() {
         assert!(!Settings::default().computer_use_enabled);
+    }
+
+    #[test]
+    fn multi_agent_mode_is_a_valid_full_permission_mode() {
+        let settings = Settings {
+            permission_mode: "multi_agent".into(),
+            auto_approve: true,
+            ..Settings::default()
+        };
+        assert!(settings.validate().is_ok());
     }
 
     #[test]

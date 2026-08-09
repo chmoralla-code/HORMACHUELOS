@@ -684,15 +684,19 @@ export async function getSettingsSafe(): Promise<Settings> {
 /** Normalize provider settings while preserving user-entered custom model IDs. */
 export function normalizeSettings(s: Settings): Settings {
   s.provider = String(s.provider || "").trim().toLowerCase();
-  if (!s.permission_mode || !["plan", "auto", "research", "full"].includes(s.permission_mode)) {
+  if (!s.permission_mode || !["plan", "auto", "research", "full", "multi_agent"].includes(s.permission_mode)) {
     s.permission_mode = s.auto_approve ? "auto" : "plan";
   }
-  s.auto_approve = s.permission_mode === "auto" || s.permission_mode === "full";
+  s.auto_approve =
+    s.permission_mode === "auto" ||
+    s.permission_mode === "full" ||
+    s.permission_mode === "multi_agent";
   const capsByMode: Record<string, string[]> = {
     plan: ["thinking", "guided"],
     auto: ["agent", "balanced"],
     research: ["investigate", "brief"],
     full: ["autonomous", "max"],
+    multi_agent: ["autonomous", "max"],
   };
   const allowed = capsByMode[s.permission_mode] || ["thinking"];
   if (!s.capability_mode || !allowed.includes(s.capability_mode)) {
@@ -1338,6 +1342,7 @@ export class SettingsModal {
         ["auto", "Auto — build with defaults; confirm delete/kill/outside project"],
         ["research", "Research — investigate code with evidence; reads free, writes need Approve"],
         ["full", "Full — maximum autonomy, zero desktop prompts"],
+        ["multi_agent", "Multi-Agent — Ship permission; independent workspace checks run together"],
       ] as const) {
         const opt = el("option", { value }, [label]);
         if ((this.settings.permission_mode || "plan") === value) opt.setAttribute("selected", "selected");
@@ -1345,12 +1350,13 @@ export class SettingsModal {
       }
       sel.addEventListener("change", () => {
         this.settings.permission_mode = sel.value;
-        this.settings.auto_approve = sel.value === "auto" || sel.value === "full";
+        this.settings.auto_approve =
+          sel.value === "auto" || sel.value === "full" || sel.value === "multi_agent";
       });
       return sel;
     }));
     body.appendChild(el("div", { class: "set-hint", style: "margin-top:-6px;margin-bottom:12px" }, [
-      "Plan: improve brief, options, then Approve tools. Research: explore & answer with evidence (reads free). Auto: implement in-project quickly. Full: no tool prompts, including desktop control. Same switch sits next to the chat box.",
+      "Plan: improve brief, options, then Approve tools. Research: explore & answer with evidence (reads free). Auto: implement in-project quickly. Full: no tool prompts. Multi-Agent: Ship-level access with safe independent workspace checks started together. Same switch sits next to the chat box.",
     ]));
 
     body.appendChild(this.renderComputerUsePanel());
@@ -1448,7 +1454,9 @@ export class SettingsModal {
       e.stopPropagation();
       this.settings.permission_mode = (this.settings.permission_mode || "plan").toLowerCase();
       this.settings.auto_approve =
-        this.settings.permission_mode === "auto" || this.settings.permission_mode === "full";
+        this.settings.permission_mode === "auto" ||
+        this.settings.permission_mode === "full" ||
+        this.settings.permission_mode === "multi_agent";
       try {
         await api.saveSettings(this.settings);
         this.close();

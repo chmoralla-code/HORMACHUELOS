@@ -167,8 +167,8 @@ const READ_ONLY_TOOLS = new Set([
 
 function resolveExecutionPolicy(value) {
   const mode = String(value || "").trim().toLowerCase();
-  if (mode === "full") {
-    return { requestedMode: "full", sdkMode: "agent", autoReview: false, readOnly: false };
+  if (mode === "full" || mode === "multi_agent") {
+    return { requestedMode: mode, sdkMode: "agent", autoReview: false, readOnly: false };
   }
   if (mode === "auto") {
     return { requestedMode: "auto", sdkMode: "agent", autoReview: true, readOnly: false };

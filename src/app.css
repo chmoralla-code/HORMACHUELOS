@@ -2270,6 +2270,206 @@
 .tool-card-body .args { color: rgba(150, 150, 150, 0.7); border-bottom: 1px solid rgba(255,255,255,0.06); padding-bottom: 8px; margin-bottom: 8px; }
 .tool-card-body .result { color: rgba(210, 210, 210, 0.88); }
 
+/* Multi-Agent: a compact parallel-work control room, not a second chat layout. */
+.multi-agent-batch {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  max-width: 760px;
+  width: 100%;
+  margin: 10px auto 5px;
+  padding: 12px;
+  border: 1px solid rgba(151, 179, 255, 0.38);
+  border-radius: 14px;
+  background: linear-gradient(135deg, rgba(22, 27, 50, 0.94), rgba(38, 24, 67, 0.9));
+  box-shadow: 0 12px 32px rgba(28, 16, 74, 0.25), inset 0 0 0 1px rgba(83, 218, 255, 0.06);
+}
+.multi-agent-batch::before {
+  content: "";
+  position: absolute;
+  inset: -75%;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.24;
+  background: conic-gradient(
+    rgba(89, 222, 255, 0.92),
+    rgba(129, 112, 255, 0.84),
+    rgba(247, 96, 240, 0.76),
+    rgba(255, 198, 98, 0.72),
+    rgba(101, 241, 190, 0.86),
+    rgba(89, 222, 255, 0.92)
+  );
+  transform: rotate(0deg) scale(1.05);
+  transform-origin: center;
+  animation: multiAgentSpectrumOrbit 10s linear infinite;
+  will-change: transform;
+}
+.multi-agent-batch > * {
+  position: relative;
+  z-index: 1;
+}
+.multi-agent-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.multi-agent-mark {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  border: 1px solid rgba(192, 223, 255, 0.48);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.09);
+  box-shadow: 0 0 18px rgba(116, 181, 255, 0.26);
+  font-size: 16px;
+}
+.multi-agent-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+.multi-agent-copy strong {
+  color: rgba(245, 247, 255, 0.98);
+  font-size: 13px;
+  letter-spacing: 0.015em;
+}
+.multi-agent-copy span {
+  color: rgba(214, 224, 255, 0.78);
+  font-size: 11px;
+}
+.multi-agent-live {
+  margin-left: auto;
+  padding: 3px 6px;
+  border: 1px solid rgba(124, 239, 194, 0.42);
+  border-radius: 999px;
+  color: rgba(186, 255, 218, 0.96);
+  background: rgba(53, 193, 127, 0.12);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+.multi-agent-batch.complete .multi-agent-live {
+  border-color: rgba(141, 234, 184, 0.52);
+  background: rgba(58, 196, 130, 0.2);
+}
+.multi-agent-tools {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(185px, 1fr));
+  gap: 7px;
+  margin-top: 10px;
+}
+.multi-agent-tool {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 52px;
+  padding: 8px 9px;
+  border: 1px solid rgba(185, 206, 255, 0.22);
+  border-radius: 10px;
+  background: rgba(12, 16, 34, 0.47);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.025);
+  opacity: 0;
+  transform: translateY(7px) scale(0.985);
+  animation: multiAgentToolEnter 360ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  animation-delay: calc(var(--agent-index, 0) * 72ms);
+  will-change: transform, opacity;
+}
+.multi-agent-tool-emoji {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.07);
+  font-size: 13px;
+}
+.multi-agent-tool-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+.multi-agent-tool-copy strong,
+.multi-agent-tool-copy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.multi-agent-tool-copy strong {
+  color: rgba(244, 246, 255, 0.94);
+  font-size: 11px;
+  font-weight: 650;
+}
+.multi-agent-tool-copy span {
+  color: rgba(195, 207, 236, 0.7);
+  font-size: 10px;
+}
+.multi-agent-tool-pulse {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #82e9ff;
+  box-shadow: 0 0 0 0 rgba(130, 233, 255, 0.6);
+}
+.multi-agent-tool.working .multi-agent-tool-pulse {
+  animation: multiAgentPulse 1.35s ease-out infinite;
+}
+.multi-agent-tool.done {
+  border-color: rgba(119, 226, 168, 0.34);
+}
+.multi-agent-tool.done .multi-agent-tool-pulse {
+  background: #8ce6b0;
+  box-shadow: none;
+}
+.multi-agent-tool.failed {
+  border-color: rgba(255, 151, 151, 0.46);
+}
+.multi-agent-tool.failed .multi-agent-tool-pulse {
+  background: #ff9696;
+  box-shadow: none;
+}
+.tool-batch-wrap.multi-agent-tool-batch .tool-batch-label {
+  color: rgba(206, 220, 255, 0.94);
+}
+.tool-card-wrap.multi-agent-tool-card-wrap {
+  padding-left: 9px;
+  border-left: 2px solid rgba(129, 165, 255, 0.52);
+}
+.tool-card.multi-agent-tool-card .tool-card-head {
+  color: rgba(220, 229, 255, 0.95);
+}
+.tool-card.multi-agent-tool-card.pending .tool-card-head {
+  text-shadow: 0 0 14px rgba(121, 185, 255, 0.22);
+}
+
+@keyframes multiAgentSpectrumOrbit {
+  from { transform: rotate(0deg) scale(1.05); }
+  to { transform: rotate(360deg) scale(1.05); }
+}
+@keyframes multiAgentToolEnter {
+  from { opacity: 0; transform: translateY(7px) scale(0.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes multiAgentPulse {
+  0% { box-shadow: 0 0 0 0 rgba(130, 233, 255, 0.56); }
+  70% { box-shadow: 0 0 0 6px rgba(130, 233, 255, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(130, 233, 255, 0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chip-btn.chip-mode-multi-agent::before,
+  .multi-agent-batch::before,
+  .multi-agent-tool,
+  .multi-agent-tool.working .multi-agent-tool-pulse {
+    animation: none;
+  }
+  .multi-agent-tool { opacity: 1; transform: none; }
+}
+
 /* Approval required — centered card in the chat column */
 .tool-confirm-wrap {
   display: flex;
@@ -2894,6 +3094,38 @@
   object-fit: cover;
   display: block;
 }
+.composer-attach-video {
+  width: min(190px, 42vw);
+  padding: 7px 28px 7px 8px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #d8eaff;
+  border-color: rgba(83, 164, 255, 0.48);
+  background: linear-gradient(135deg, rgba(34, 84, 132, 0.45), rgba(10, 18, 29, 0.92));
+}
+.composer-video-icon,
+.msg-video-icon {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  color: #091420;
+  background: #69b9ff;
+  font-size: 11px;
+  padding-left: 1px;
+}
+.composer-video-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  line-height: 1.25;
+}
 .composer-attach-remove {
   position: absolute;
   top: 3px;
@@ -2931,6 +3163,28 @@
   height: 100%;
   object-fit: cover;
   display: block;
+}
+.msg-attach-video {
+  width: min(176px, 48vw);
+  height: 72px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px;
+  color: #d9ecff;
+  border-color: rgba(83, 164, 255, 0.44);
+  background: linear-gradient(135deg, rgba(34, 84, 132, 0.48), rgba(10, 18, 29, 0.92));
+}
+.msg-video-icon {
+  width: 29px;
+  height: 29px;
+}
+.msg-video-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
 }
 .composer-input {
   width: 100%;
@@ -3034,6 +3288,45 @@
   background: rgba(255, 255, 255, 0.1);
   border-color: rgba(255, 255, 255, 0.2);
   color: #fff;
+}
+.chip-btn.chip-mode-multi-agent {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  border-color: rgba(165, 171, 255, 0.5);
+  background: rgba(54, 38, 96, 0.48);
+  box-shadow: 0 0 0 1px rgba(98, 223, 255, 0.08), 0 5px 18px rgba(95, 70, 215, 0.16);
+}
+.chip-btn.chip-mode-multi-agent::before {
+  content: "";
+  position: absolute;
+  inset: -115%;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.48;
+  background: conic-gradient(
+    from 0deg,
+    rgba(83, 218, 255, 0.9),
+    rgba(122, 115, 255, 0.85),
+    rgba(244, 106, 255, 0.78),
+    rgba(255, 188, 91, 0.74),
+    rgba(99, 241, 186, 0.82),
+    rgba(83, 218, 255, 0.9)
+  );
+  transform: rotate(0deg);
+  transform-origin: center;
+  animation: multiAgentSpectrumOrbit 9s linear infinite;
+  will-change: transform;
+}
+.chip-btn.chip-mode-multi-agent .chip-label,
+.chip-btn.chip-mode-multi-agent .chip-caret {
+  position: relative;
+  z-index: 1;
+}
+.chip-btn.chip-mode-multi-agent:hover,
+.chip-btn.chip-mode-multi-agent.menu-open {
+  border-color: rgba(192, 223, 255, 0.84);
+  background: rgba(63, 47, 112, 0.68);
 }
 .chip-btn:disabled,
 .chip-btn.chip-model-locked {

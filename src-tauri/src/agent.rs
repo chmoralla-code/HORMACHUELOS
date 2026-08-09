@@ -606,6 +606,34 @@ async fn execute_parallel_readonly_batch(
     Some(results)
 }
 
+/// Return the first safe inspection batch that can run at the same time.
+///
+/// Ordinary modes retain the existing conservative behaviour: an entire model
+/// response must contain only independent read-only calls. Multi-Agent mode is
+/// more eager at the beginning of a response, where the model can explicitly
+/// place its independent discovery calls before a dependent command or edit.
+/// Everything after the first non-read-only call remains ordered.
+fn parallel_readonly_batch_len(tool_calls: &[ToolCall], mode: &str) -> usize {
+    if tool_calls.len() < 2 {
+        return 0;
+    }
+
+    let initial_readonly = tool_calls
+        .iter()
+        .take_while(|call| tools::is_parallel_safe_readonly_tool(&call.name))
+        .count();
+
+    if initial_readonly < 2 {
+        return 0;
+    }
+
+    if mode == "multi_agent" || initial_readonly == tool_calls.len() {
+        initial_readonly
+    } else {
+        0
+    }
+}
+
 fn is_private_typing_tool(name: &str) -> bool {
     name.trim().eq_ignore_ascii_case("computer_type_text")
 }
@@ -664,9 +692,19 @@ fn resolve_tool_preview_name(
 ) -> Option<String> {
     let streamed_name = streamed_name.trim();
     if !streamed_name.is_empty() {
-        names.insert(index, streamed_name.to_string());
+        names.insert(index, tools::normalize_tool_name(streamed_name));
     }
     names.get(&index).cloned()
+}
+
+/// Normalize provider tool names before they reach history, permission checks,
+/// UI events, Smart Agent state, or the dispatcher. This keeps a harmless
+/// provider typo from becoming a visible failed command and ensures aliases
+/// for commands still receive the real command's approval policy.
+fn normalize_tool_calls(tool_calls: &mut [ToolCall]) {
+    for tool_call in tool_calls {
+        tool_call.name = tools::normalize_tool_name(&tool_call.name);
+    }
 }
 
 /// Split text into small UTF-8-safe chunks for progressive UI streaming.
@@ -767,6 +805,10 @@ fn tool_confirm_summary(name: &str, args: &Value) -> String {
     match name {
         "run_command" => format!(
             "Run command: {}",
+            args.get("command").and_then(|v| v.as_str()).unwrap_or("?")
+        ),
+        "start_dev_server" => format!(
+            "Start local development server: {}",
             args.get("command").and_then(|v| v.as_str()).unwrap_or("?")
         ),
         "delete_file" => format!(
@@ -915,6 +957,31 @@ pub async fn run_loop(
     let known_integration_secrets = Arc::new(crate::integrations::loaded_tokens());
     let mut prompt =
         integration_chat::redact_sensitive_text(&prompt, known_integration_secrets.as_ref());
+    // A selected video is sampled into one chronological contact sheet by the
+    // desktop composer before this loop starts. That sheet is auto-described
+    // below through the same vision bridge used for images, keeping video
+    // understanding available to every selected chat model rather than only
+    // models with a native video endpoint.
+    if prompt.contains("[Attached video:") {
+        let paths = crate::tools::attached_video_paths(&prompt);
+        if !paths.is_empty() {
+            emit(
+                &app,
+                &session_id,
+                "status",
+                json!({ "message": "Reading attached video frames…" }),
+            );
+            let mut note = String::from(
+                "\n\n[The user attached video(s). When a Video contact sheet is present, it contains six evenly spaced frames in chronological order. The automatic image description for that sheet is the video’s visual context. Do not claim audio, speech, or events between sampled frames unless the user supplied a transcript.]\n",
+            );
+            for path in paths {
+                note.push_str(&format!("[Video attached: {path}]\n"));
+            }
+            note.push('\n');
+            note.push_str(&prompt);
+            prompt = note;
+        }
+    }
     // Text-only models (DeepSeek, Hormachuelos v1–v4, …) cannot see pixels.
     // Describe attached images once up front so vision works for every
     // non-vision model — including Hormachuelos v4 (VISION).
@@ -1230,6 +1297,18 @@ BEHAVIOR:\n\
 - After scaffolding: read generated files, then edit; verify with build/test when possible.\n\
 - Keep text short. Prefer doing over narrating.\n\
 - On tool failure: fix root cause and retry once or twice, then report clearly.",
+        "multi_agent" => "\
+=== ACTIVE MODE: MULTI-AGENT (parallel discovery, full autonomy) ===\n\
+You have the same full-permission policy as Ship. Move quickly, but coordinate independent work safely.\n\
+\n\
+BEHAVIOR:\n\
+- For each workspace discovery step, issue all independent local inspection tools in the SAME tool response before any command or edit. Good examples: list_dir + glob + grep + read_file + git_status.\n\
+- The host starts that independent inspection pack together and preserves the results in the order you requested.\n\
+- Do NOT assume one tool's result while creating another call in that same pack.\n\
+- Keep writes, edits, shell commands, git mutations, browser actions, account flows, approvals, and computer actions strictly ordered after the information they need.\n\
+- Immediately implement clear requests. Skip long planning essays; a one-line status is enough.\n\
+- Choose practical defaults, verify with build/test when possible, and self-heal failures before giving up.\n\
+- Never invent unrelated work. Stay on the user goal and call done only after the result is verified.",
         _ => "\
 === ACTIVE MODE: FULL (maximum autonomy) ===\n\
 The user granted full permission. Move fast end-to-end with zero approval prompts.\n\
@@ -1246,10 +1325,11 @@ BEHAVIOR:\n\
     };
 
     let execution_style = match mode.as_str() {
-        "plan" => "6. In PLAN mode: explain plans and options clearly. After the user accepts, implement step by step.\n",
-        "research" => "6. In RESEARCH mode: evidence first (paths + findings). Do not implement unless the user explicitly asks.\n",
-        "auto" => "6. In AUTO mode: keep responses concise. Prefer doing work over long preambles.\n",
-        _ => "6. In FULL mode: keep responses very short. Don't explain what you are about to do â€” do it.\n",
+        "plan" => "7. In PLAN mode: explain plans and options clearly. After the user accepts, implement step by step.\n",
+        "research" => "7. In RESEARCH mode: evidence first (paths + findings). Do not implement unless the user explicitly asks.\n",
+        "auto" => "7. In AUTO mode: keep responses concise. Prefer doing work over long preambles.\n",
+        "multi_agent" => "7. In MULTI-AGENT mode: start independent local inspection tools together, then keep dependent actions ordered.\n",
+        _ => "7. In FULL mode: keep responses very short. Don't explain what you are about to do â€” do it.\n",
     };
 
     let has_history = history.iter().any(|t| !t.content.trim().is_empty());
@@ -1309,6 +1389,11 @@ BEHAVIOR:\n\
     let smart_agent_enabled = settings.smart_agent_enabled && requires_project_completion;
     let smart_agent_policy =
         crate::smart_agent::SmartAgentRun::system_instructions(smart_agent_enabled);
+    let tool_scheduling_rules = if mode == "multi_agent" {
+        "15. MULTI-AGENT SCHEDULING: put independent, local, read-only discovery calls first in one tool response so the host can spawn them together. Use only read_file, list_dir, glob, grep, git_status, and file_info in that parallel pack. Never parallelize writes, commands, browser actions, approvals, account actions, or computer control."
+    } else {
+        "15. Work efficiently: group independent local inspection calls (read_file, list_dir, glob, grep, git_status, file_info) in one tool response. The host may run that safe read-only batch together. Never assume results from one tool call while constructing another call in the same batch; keep writes, commands, browser actions, approvals, and computer actions ordered."
+    };
     let system = format!(
         "You are Hormachuelos, an autonomous agent embedded in a desktop app with access to the user's computer. \
 You can answer questions, explain concepts, build websites, games, and apps, manage files, run programs, and perform system tasks. \
@@ -1327,6 +1412,8 @@ ACTIVE RUNTIME (report these values accurately when asked):\n\
 CAPABILITIES:\n\
 - File tools accept ABSOLUTE paths (e.g. C:\\Users\\…) or paths relative to the project root.\n\
 - run_command runs PowerShell hidden — scaffold, install, build, test, system tasks, CLIs. Use `cwd` when needed.\n\
+- start_dev_server starts a Vite/Next/npm/pnpm/yarn local server in a detached host-managed process. Give it a command plus optional `cwd` and `port`; it handles Windows `.cmd` shims, sends server output to `.hormachuelos-dev-server.log`, and returns immediately.\n\
+- NEVER use `Start-Process`, `Start-Job`, `cmd.exe`, `start /b`, `&`, or other background-shell tricks through run_command for a local server. Use start_dev_server, then continue with preview, inspection, and the requested work.\n\
 - Connected account tokens (GitHub, Supabase, Vercel, …) are injected as env vars into run_command and git — never echo tokens.\n\
 - Prefer: `gh` / git for GitHub; `npx supabase` or `supabase` for Supabase; `npx vercel` / `vercel` for Vercel; same for netlify/fly when connected.\n\
 - AUTH / LOGIN (critical):\n\
@@ -1339,28 +1426,32 @@ CAPABILITIES:\n\
   * These auth tools support only the validated built-in catalog above. This build has no generic remote MCP client/config runtime, so never claim arbitrary MCP/OAuth servers can connect automatically and never accept an arbitrary auth URL.\n\
   * Use open_url only for general public links, never to transmit credentials.\n\
 - System tools: list_drives, sys_info, env_vars, list_processes, kill_process, open_url, open_path, download_file, move_file, copy_file, delete_file, make_dir, file_info, connect_account, integration_status, web_search, browse_page, export_client_pack.\n\
+- TOOL NAMING: call exactly one tool per function call and use its exact snake_case name. Never merge names. For example, call read_file to inspect package.json and list_processes separately when checking running apps.\n\
 - ask_user: multiple-choice questions for real decisions (stack, style, scope). Use allow_other when freeform answers help.\n\
 - export_client_pack: zip the project for client handoff (excludes node_modules/.git/target/dist) and write CLIENT_HANDOFF.md.\n\
 - web_search / browse_page: research the public web when local files are not enough.\n\
 - view_image: view/describe an image file (PNG/JPG/WEBP/GIF/BMP). Attached images are usually auto-described already; call view_image only when you need a closer look or a path was not auto-viewed.\n\
+- view_video: view a local project video through six chronological visual samples. Attached videos are already sampled automatically; call view_video only for a project file that was not attached. Visual summary only, not an audio transcript.\n\
+- Attached videos arrive as a six-frame chronological contact sheet plus its auto-generated visual description. Treat that description as the video’s visual context for every model; never invent audio or unsampled moments.\n\
 - computer_* tools: protected Windows desktop control when Computer Use is enabled. Observe before each action. For realtime games, use one bounded computer_game_sequence instead of a model turn per key.\n\n\
 BASE RULES (mode rules above win on conflict):\n\
 1. READ THE USER'S INTENT FIRST. Questions and chat get text answers. Build/create/modify requests may use tools per mode.\n\
 2. Only use tools when the request needs action (build, edit, run, inspect files). \"What is React?\" = text only.\n\
 3. When building, prefer run_command for scaffolding (`npx create-vite`, `npm init -y`, `python -m venv`, `cargo init`, etc.).\n\
-4. After scaffolding, read generated files before editing. Use edit_file for precise edits; write_file for new files.\n\
-5. Verify work with build/test commands when possible.\n\
+4. When a project needs a live local preview, call start_dev_server instead of run_command. Do not wait for the server process; start it once, then inspect or open its local URL.\n\
+5. After scaffolding, read generated files before editing. Use edit_file for precise edits; write_file for new files.\n\
+6. Verify work with build/test commands when possible.\n\
 {execution_style}\
-7. When the task is COMPLETE, call `done` with a short plain delivery summary: a 2–6 word title, one result sentence in `summary`, and only distinct supporting details in `description` and `features`. Do not repeat the same action, verification, files, or wording across fields. Leave `description` empty when it adds nothing new. Use up to 5 concise features. No hype. Pure conversation can end without done.\n\
-8. If a command fails, read the error, fix the cause, and retry — don't give up immediately.\n\
-9. For an active build, fix, release, deployment, website, APK, app, or software task: keep taking concrete tool steps until all requested work is implemented and verified. Do NOT stop at a progress update, partial response, or an unfinished plan, and never ask the user to type \"continue\". If the provider reaches an output limit, the host will resume this same run automatically with its current workspace and tool history.\n\
-10. Only do what the user asked (or what they approved in Plan mode). No unrelated changes.\n\
-11. For deploy/git hosting: use connected integrations first. If missing, call connect_account (in-chat secure form + browser) — do not run interactive CLI login via run_command and do not request credentials in the chat message box.\n\
-12. Format final prose as clean Markdown: use a short Result heading followed by clear sections and bullets; use Markdown tables only for comparisons. Every table must include a header row and separator row; never use unaligned plain-text columns. Never print raw JSON, function-call syntax, tool arguments, or a literal `done` payload for the user. When work is complete, call the done tool instead of repeating its title, files, and features as loose prose.\n\
-13. Never stop after only announcing the next step (e.g. \"Let me find…\", \"I'll check…\", \"Looking for…\"). If you need to act, call a tool in the SAME turn. Narration without tools is incomplete.\n\
-14. Work efficiently: group independent local inspection calls (read_file, list_dir, glob, grep, git_status, file_info) in one tool response. The host may run that safe read-only batch together. Never assume results from one tool call while constructing another call in the same batch; keep writes, commands, browser actions, approvals, and computer actions ordered.\n\
+8. When the task is COMPLETE, call `done` with a short plain delivery summary: a 2–6 word title, one result sentence in `summary`, and only distinct supporting details in `description` and `features`. Do not repeat the same action, verification, files, or wording across fields. Leave `description` empty when it adds nothing new. Use up to 5 concise features. No hype. Pure conversation can end without done.\n\
+9. If a command fails, read the error, fix the cause, and retry — don't give up immediately.\n\
+10. For an active build, fix, release, deployment, website, APK, app, or software task: keep taking concrete tool steps until all requested work is implemented and verified. Do NOT stop at a progress update, partial response, or an unfinished plan, and never ask the user to type \"continue\". If the provider reaches an output limit, the host will resume this same run automatically with its current workspace and tool history.\n\
+11. Only do what the user asked (or what they approved in Plan mode). No unrelated changes.\n\
+12. For deploy/git hosting: use connected integrations first. If missing, call connect_account (in-chat secure form + browser) — do not run interactive CLI login via run_command and do not request credentials in the chat message box.\n\
+13. Format final prose as clean Markdown: use a short Result heading followed by clear sections and bullets; use Markdown tables only for comparisons. Every table must include a header row and separator row; never use unaligned plain-text columns. Never print raw JSON, function-call syntax, tool arguments, or a literal `done` payload for the user. When work is complete, call the done tool instead of repeating its title, files, and features as loose prose.\n\
+14. Never stop after only announcing the next step (e.g. \"Let me find…\", \"I'll check…\", \"Looking for…\"). If you need to act, call a tool in the SAME turn. Narration without tools is incomplete.\n\
+{tool_scheduling_rules}\n\
 {memory_rules}\n\
-TOOL REFERENCE: read_file, write_file, edit_file, list_dir, glob, grep, run_command, git_init, git_add_all, git_commit, git_status, list_drives, sys_info, env_vars, list_processes, kill_process, open_url, open_path, download_file, move_file, copy_file, delete_file, make_dir, file_info, view_image, connect_account, integration_status, web_search, browse_page, export_client_pack, computer_list_windows, computer_observe, computer_focus_window, computer_click, computer_type_text, computer_press_key, computer_scroll, computer_drag, computer_game_sequence, ask_user, done.",
+TOOL REFERENCE: read_file, write_file, edit_file, list_dir, glob, grep, run_command, start_dev_server, git_init, git_add_all, git_commit, git_status, list_drives, sys_info, env_vars, list_processes, kill_process, open_url, open_path, download_file, move_file, copy_file, delete_file, make_dir, file_info, view_image, view_video, connect_account, integration_status, web_search, browse_page, export_client_pack, computer_list_windows, computer_observe, computer_focus_window, computer_click, computer_type_text, computer_press_key, computer_scroll, computer_drag, computer_game_sequence, ask_user, done.",
         root = root.display(),
         provider_display = provider_display,
         model_display = model_display,
@@ -1373,6 +1464,7 @@ TOOL REFERENCE: read_file, write_file, edit_file, list_dir, glob, grep, run_comm
         computer_policy = computer_policy,
         smart_agent_policy = smart_agent_policy,
         execution_style = execution_style,
+        tool_scheduling_rules = tool_scheduling_rules,
         memory_rules = memory_rules,
     );
 
@@ -1409,6 +1501,11 @@ Do not implement unless I explicitly ask. Mutating tools still need approval."
         format!(
             "{prompt}\n\n\
 [Full mode active] Implement with full autonomy. Use session history. Stay focused on this request."
+        )
+    } else if mode == "multi_agent" {
+        format!(
+            "{prompt}\n\n\
+[Multi-Agent mode active] Implement with Ship-level autonomy. Start independent local inspection tools together, then keep all dependent actions ordered. Use session history and stay focused on this request."
         )
     } else {
         format!(
@@ -1684,6 +1781,7 @@ The tool entries are historical summaries; use fresh tools for the current works
             emit_cancelled(&app, &session_id, iteration);
             return Ok(None);
         }
+        normalize_tool_calls(&mut resp.tool_calls);
         total_tokens = total_tokens.saturating_add(resp.usage_tokens);
         let billable = crate::license::to_billable_tokens(
             &settings.provider,
@@ -1884,25 +1982,40 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
         // Models commonly issue a first workspace-inspection batch (for
         // example list_dir + glob + grep + read_file). Those local reads do
         // not depend on one another, so finish them together while retaining
-        // original result order below. Mixed batches deliberately stay serial:
-        // a write, shell command, browser action, confirmation, or computer
-        // action must preserve the model's exact ordering.
-        let mut parallel_read_results = if resp.tool_calls.len() > 1
-            && resp
-                .tool_calls
-                .iter()
-                .all(|call| tools::is_parallel_safe_readonly_tool(&call.name))
-        {
+        // original result order below. Multi-Agent mode can safely use an
+        // independent read-only prefix before a later ordered action; writes,
+        // commands, browser, confirmation, and computer actions never join it.
+        let parallel_batch_len = parallel_readonly_batch_len(&resp.tool_calls, &mode);
+        let mut parallel_read_results = if parallel_batch_len > 0 {
+            let parallel_calls = &resp.tool_calls[..parallel_batch_len];
+            if mode == "multi_agent" {
+                emit(
+                    &app,
+                    &session_id,
+                    "multi_agent_batch",
+                    json!({
+                        "tools": parallel_calls.iter().map(|call| json!({
+                            "id": call.id,
+                            "name": call.name,
+                            "arguments": public_tool_arguments(&call.name, &call.arguments),
+                        })).collect::<Vec<_>>(),
+                    }),
+                );
+            }
             emit(
                 &app,
                 &session_id,
                 "status",
                 json!({
-                    "message": format!("Inspecting {} workspace items in parallel…", resp.tool_calls.len()),
+                    "message": if mode == "multi_agent" {
+                        format!("Multi-Agent started {} independent workspace checks together…", parallel_calls.len())
+                    } else {
+                        format!("Inspecting {} workspace items in parallel…", parallel_calls.len())
+                    },
                 }),
             );
             let results = execute_parallel_readonly_batch(
-                &resp.tool_calls,
+                parallel_calls,
                 root,
                 settings.command_timeout_secs,
                 tool_ctx.clone(),
@@ -2310,7 +2423,7 @@ fn uses_cursor_sdk(provider: &str) -> bool {
 
 fn normalized_permission_mode(mode: &str) -> String {
     match mode.trim().to_ascii_lowercase().as_str() {
-        "plan" | "research" | "auto" | "full" => mode.trim().to_ascii_lowercase(),
+        "plan" | "research" | "auto" | "full" | "multi_agent" => mode.trim().to_ascii_lowercase(),
         _ => "plan".into(),
     }
 }
@@ -2358,6 +2471,9 @@ fn cursor_effort_for_request(configured: &str, prompt: &str, computer_use_enable
 
 fn cursor_permission_instructions(mode: &str) -> &'static str {
     match mode {
+        "multi_agent" => {
+            "Execution mode: MULTI-AGENT. Use Ship-level autonomy. Start independent local discovery tools together; keep edits, commands, browser actions, and computer control ordered."
+        }
         "full" => {
             "Execution mode: FULL. The user permits project work inside the selected project directory."
         }
@@ -2503,14 +2619,14 @@ mod tests {
         can_recover_from_provider_blip, compact_history_messages, cursor_computer_use_instructions,
         cursor_effort_for_request, cursor_permission_instructions, display_model_name,
         display_provider_name, identity_instructions, next_stalled_recovery_count,
-        normalized_permission_mode, public_tool_arguments, public_tool_preview_delta,
-        reply_announces_pending_action, reply_looks_stalled, resolve_tool_preview_name,
-        starts_as_explanatory_request, stop_reason_requires_continuation,
-        task_likely_requires_project_completion, tool_confirm_summary, truncate_utf8,
-        uses_cursor_sdk, HistoryToolCall, HistoryTurn, MAX_CONSECUTIVE_STALLED_RECOVERIES,
-        NATIVE_HISTORY_MAX_BYTES, NATIVE_HISTORY_MAX_TURNS,
+        normalize_tool_calls, normalized_permission_mode, parallel_readonly_batch_len,
+        public_tool_arguments, public_tool_preview_delta, reply_announces_pending_action,
+        reply_looks_stalled, resolve_tool_preview_name, starts_as_explanatory_request,
+        stop_reason_requires_continuation, task_likely_requires_project_completion,
+        tool_confirm_summary, truncate_utf8, uses_cursor_sdk, HistoryToolCall, HistoryTurn,
+        MAX_CONSECUTIVE_STALLED_RECOVERIES, NATIVE_HISTORY_MAX_BYTES, NATIVE_HISTORY_MAX_TURNS,
     };
-    use crate::llm::{ChatMessage, LlmResponse};
+    use crate::llm::{ChatMessage, LlmResponse, ToolCall};
     use anyhow::anyhow;
     use serde_json::json;
 
@@ -2630,6 +2746,32 @@ mod tests {
         resolve_tool_preview_name(&mut names, 2, "computer_type_text");
         let continued_typing = resolve_tool_preview_name(&mut names, 2, "").unwrap();
         assert!(public_tool_preview_delta(&continued_typing, TYPED_SENTINEL).is_empty());
+
+        assert_eq!(
+            resolve_tool_preview_name(&mut names, 3, "read_filelist_processes").as_deref(),
+            Some("read_file")
+        );
+    }
+
+    #[test]
+    fn agent_normalizes_provider_tool_calls_before_they_reach_the_dispatch_loop() {
+        let mut calls = vec![
+            ToolCall {
+                id: "read-call".into(),
+                name: "read_filelist_processes".into(),
+                arguments: json!({ "path": "package.json" }),
+            },
+            ToolCall {
+                id: "command-call".into(),
+                name: "run_terminal_cmd".into(),
+                arguments: json!({ "command": "npm run dev" }),
+            },
+        ];
+
+        normalize_tool_calls(&mut calls);
+
+        assert_eq!(calls[0].name, "read_file");
+        assert_eq!(calls[1].name, "run_command");
     }
 
     #[test]
@@ -2671,6 +2813,33 @@ mod tests {
         assert_eq!(normalized_permission_mode("unexpected"), "plan");
         assert!(cursor_permission_instructions("plan").contains("read-only"));
         assert!(cursor_permission_instructions("research").contains("read-only"));
+        assert_eq!(normalized_permission_mode("multi_agent"), "multi_agent");
+        assert!(cursor_permission_instructions("multi_agent").contains("MULTI-AGENT"));
+    }
+
+    #[test]
+    fn multi_agent_parallelizes_only_an_initial_independent_read_pack() {
+        let calls = vec![
+            ToolCall {
+                id: "list".into(),
+                name: "list_dir".into(),
+                arguments: json!({ "path": "." }),
+            },
+            ToolCall {
+                id: "read".into(),
+                name: "read_file".into(),
+                arguments: json!({ "path": "package.json" }),
+            },
+            ToolCall {
+                id: "build".into(),
+                name: "run_command".into(),
+                arguments: json!({ "command": "npm test" }),
+            },
+        ];
+
+        assert_eq!(parallel_readonly_batch_len(&calls, "auto"), 0);
+        assert_eq!(parallel_readonly_batch_len(&calls, "multi_agent"), 2);
+        assert_eq!(parallel_readonly_batch_len(&calls[..2], "auto"), 2);
     }
 
     #[test]

@@ -44,6 +44,12 @@ test("execution policy maps restricted modes to SDK plan mode", () => {
   });
   assert.equal(resolveExecutionPolicy("auto").autoReview, true);
   assert.equal(resolveExecutionPolicy("full").sdkMode, "agent");
+  assert.deepEqual(resolveExecutionPolicy("multi_agent"), {
+    requestedMode: "multi_agent",
+    sdkMode: "agent",
+    autoReview: false,
+    readOnly: false,
+  });
   assert.equal(resolveExecutionPolicy("unexpected").readOnly, true);
 });
 

@@ -196,6 +196,9 @@ export const api = {
   /** Copy an on-disk image into the paste dir (Explorer paste / file picker). */
   importImagePath: (path: string): Promise<string> =>
     invoke("import_image_path", { path }),
+  /** Copy a user-selected video into the private attachment directory. */
+  importVideoPath: (path: string): Promise<string> =>
+    invoke("import_video_path", { path }),
   agentRun: (
     prompt: string,
     sessionId: string,
@@ -244,6 +247,21 @@ export const api = {
         {
           name: "Images",
           extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp"],
+        },
+      ],
+    });
+    if (typeof sel === "string") return [sel];
+    if (Array.isArray(sel)) return sel.filter((p): p is string => typeof p === "string");
+    return [];
+  },
+  openVideoPicker: async (): Promise<string[]> => {
+    const sel = await openDialog({
+      multiple: true,
+      title: "Attach videos",
+      filters: [
+        {
+          name: "Videos",
+          extensions: ["mp4", "mov", "m4v", "webm", "mkv", "avi", "wmv", "flv", "mpeg", "mpg", "3gp"],
         },
       ],
     });
@@ -301,7 +319,7 @@ export type IntegrationTestResult = {
 };
 
 export type AgentEventPayload =
-  | { kind: "start"; payload: { prompt: string } }
+  | { kind: "start"; payload: { prompt: string; permission_mode?: string } }
   | { kind: "task_plan"; payload: { title: string; summary: string; steps: { id: string; label: string; state: string }[]; active_step: number; status: string; detail?: string } }
   | { kind: "task_progress"; payload: { step: number; phase: string; status: string; detail: string; completed_before?: number; complete_all?: boolean } }
   | { kind: "thinking"; payload: { iteration: number } }
@@ -309,6 +327,12 @@ export type AgentEventPayload =
   | { kind: "reasoning"; payload: { text: string; iteration?: number } }
   | { kind: "text"; payload: { text: string } }
   | { kind: "tool_preview"; payload: { id: string; name: string; arguments_delta?: string } }
+  | {
+      kind: "multi_agent_batch";
+      payload: {
+        tools: { id: string; name: string; arguments: any }[];
+      };
+    }
   | { kind: "tool_call"; payload: { id: string; name: string; arguments: any; preview_id?: string } }
   | { kind: "integration_auth"; payload: { service: string; secure_entry: boolean } }
   | { kind: "tool_args_truncated"; payload: { id: string; preview: string } }

@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.53";
-const BUILTIN_MSI_SHA256 = "bd240e7c6fda2b9dffa7a8a539cda549f0465dca004dc4d3f65da0e5102deb25";
-const BUILTIN_EXE_SHA256 = "ea61fe0bb3df7f47e9509b753f54cc745b6cfdd8beeb9c9684ebba9856976310";
-const BUILTIN_RELEASE_NOTES = "Cleaner project and session sidebar, better build summaries, folder-free Quick Sessions, and reliability improvements for long tasks and updates.";
+const BUILTIN_RELEASE_VERSION = "0.1.55";
+const BUILTIN_MSI_SHA256 = "3464736d5ed3d9d89bde62ebd71f5b4999f9303964e9f542f5531e127cd1675f";
+const BUILTIN_EXE_SHA256 = "9f0579384ba44e19cfaf86a8eb5923f83414cd0cdca43b6dfc1e1ee71191d222";
+const BUILTIN_RELEASE_NOTES = "All models can now view attached videos through chronological visual summaries. Added project video viewing, safer media limits, and reliability improvements for long agent runs.";
 
 /**
  * A deployment-bundled release keeps the download/update path available even

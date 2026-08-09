@@ -140,13 +140,41 @@ impl AppState {
 
     pub fn add_recent_project(&self, path: String) {
         let mut list = self.recent_projects.lock().unwrap();
-        list.retain(|p| p != &path);
+        let key = project_path_key(&path);
+        list.retain(|p| project_path_key(p) != key);
         list.insert(0, path);
         if list.len() > 20 {
             list.truncate(20);
         }
         let _ = save_recent(list.clone());
     }
+
+    /// Replace an accidentally selected empty child with the verified parent
+    /// project so startup never reintroduces the stale workspace.
+    pub fn replace_recent_project(&self, previous: &str, replacement: String) {
+        let previous_key = project_path_key(previous);
+        let replacement_key = project_path_key(&replacement);
+        let mut list = self.recent_projects.lock().unwrap();
+        list.retain(|path| {
+            let key = project_path_key(path);
+            key != previous_key && key != replacement_key
+        });
+        list.insert(0, replacement);
+        if list.len() > 20 {
+            list.truncate(20);
+        }
+        let _ = save_recent(list.clone());
+    }
+}
+
+fn project_path_key(path: &str) -> String {
+    let mut value = path.trim().replace('/', "\\");
+    if let Some(unc) = value.strip_prefix(r"\\?\UNC\") {
+        value = format!(r"\\{unc}");
+    } else if let Some(plain) = value.strip_prefix(r"\\?\") {
+        value = plain.to_string();
+    }
+    value.trim_end_matches('\\').to_ascii_lowercase()
 }
 
 fn recent_path() -> Option<std::path::PathBuf> {

@@ -35,12 +35,14 @@ import {
   activateProjectWorkspace,
   listProjectWorkspaces,
   rememberRecentProjectWorkspaces,
+  replaceProjectWorkspacePath,
 } from "./components/projects";
 import {
   loadSessions, saveSession, saveSessionForUpdate, scheduleSessionSave,
   flushSessionSaves, flushSessionSavesForUpdate,
   deleteSession, deleteAllSessions, newSessionId, sessionTitle,
   recordAgentEvent, buildLlmHistory, redactChatCredentials, addSessionTokens, SESSION_TOKEN_BUDGET,
+  rehomeSessionsToProjectRoot,
   type Session,
 } from "./components/session";
 import { icon } from "./components/icons";
@@ -85,11 +87,16 @@ const pendingConfirms = new Map<
   { id: string; name: string; summary: string; arguments: any }
 >();
 
+function normalizeProjectPath(path: string | null | undefined): string {
+  let value = String(path || "").trim().replace(/\//g, "\\");
+  value = value
+    .replace(/^\\\\\?\\UNC\\/i, "\\\\")
+    .replace(/^\\\\\?\\/, "");
+  return value.replace(/[\\/]+$/, "");
+}
+
 function projectPathKey(path: string | null | undefined): string {
-  return String(path || "")
-    .trim()
-    .replace(/[\\/]+$/, "")
-    .toLocaleLowerCase();
+  return normalizeProjectPath(path).toLocaleLowerCase();
 }
 
 function sameProjectPath(a: string | null | undefined, b: string | null | undefined): boolean {
@@ -143,14 +150,15 @@ const PREVIEW_OPEN_TOOLS = new Set([
 ]);
 
 function toProjectRelPath(path: string, projectRoot = currentProjectPath): string {
-  let p = path.replace(/\\/g, "/").trim();
+  let p = path.trim();
   if (/^file:\/\//i.test(p)) {
     p = decodeURIComponent(p.replace(/^file:\/\/\/?/i, ""));
     if (/^[a-zA-Z]:/.test(p) === false && /^[a-zA-Z]%3A/i.test(path)) {
       /* keep decoded */
     }
   }
-  const root = projectRoot?.replace(/\\/g, "/").replace(/\/$/, "");
+  p = normalizeProjectPath(p).replace(/\\/g, "/");
+  const root = normalizeProjectPath(projectRoot).replace(/\\/g, "/");
   if (root && p.toLowerCase().startsWith(root.toLowerCase() + "/")) {
     return p.slice(root.length + 1);
   }
@@ -1353,14 +1361,38 @@ async function openQuickSessionWorkspace() {
   await selectProject(path, { quickSession: true });
 }
 
+function repairProjectRootReferences(requestedPath: string, canonicalPath: string): void {
+  if (sameProjectPath(requestedPath, canonicalPath)) return;
+  const migrated = rehomeSessionsToProjectRoot(requestedPath, canonicalPath);
+  for (const session of migrated) sessionRegistry.set(session.id, session);
+  replaceProjectWorkspacePath(requestedPath, canonicalPath);
+
+  const emptyFolder = basename(normalizeProjectPath(requestedPath)) || "the empty folder";
+  const projectFolder = basename(normalizeProjectPath(canonicalPath)) || canonicalPath;
+  reportError(`Opened ${projectFolder} because ${emptyFolder} is empty and its parent contains the project files.`);
+}
+
 async function selectProject(path: string, options: { quickSession?: boolean } = {}) {
   const quickSession = options.quickSession === true || isQuickSessionWorkspace(path);
   const nextMode: WorkspaceMode = quickSession ? "quick" : "project";
-  if (sameProjectPath(currentProjectPath, path) && currentWorkspaceMode === nextMode) return;
   persistCurrentSession();
   flushSessionSaves();
   if (!quickSession) await api.setProjectRoot(path);
   const canonicalPath = quickSession ? path : (await api.getProjectRoot()) || path;
+  const wasRepaired = !quickSession && !sameProjectPath(path, canonicalPath);
+
+  if (sameProjectPath(currentProjectPath, canonicalPath) && currentWorkspaceMode === nextMode) {
+    if (wasRepaired) repairProjectRootReferences(path, canonicalPath);
+    if (currentProjectPath !== canonicalPath) {
+      currentProjectPath = canonicalPath;
+      activateProjectWorkspace(canonicalPath);
+      await workspacePanel.setProject(canonicalPath);
+      await refreshHeader();
+    }
+    return;
+  }
+
+  if (wasRepaired) repairProjectRootReferences(path, canonicalPath);
   currentProjectPath = canonicalPath;
   currentWorkspaceMode = nextMode;
   if (!quickSession) activateProjectWorkspace(canonicalPath);
@@ -2144,6 +2176,10 @@ async function init() {
   window.addEventListener("horma:composer-attach-image", ((e: CustomEvent<{ path?: string }>) => {
     const path = e.detail?.path;
     if (typeof path === "string" && path.trim()) chat.addComposerAttachment(path.trim());
+  }) as EventListener);
+  window.addEventListener("horma:composer-attach-video", ((e: CustomEvent<{ path?: string }>) => {
+    const path = e.detail?.path;
+    if (typeof path === "string" && path.trim()) chat.addComposerVideoAttachment(path.trim());
   }) as EventListener);
   window.addEventListener("horma:open-settings", ((e: CustomEvent<{ integrationId?: string }>) => {
     openSettings(e.detail?.integrationId);

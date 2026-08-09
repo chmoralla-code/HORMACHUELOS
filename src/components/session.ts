@@ -126,6 +126,19 @@ const SESSION_PREVIEW_MAX_HISTORY = 32;
 const SESSION_PREVIEW_PATH_MAX = 768;
 const SESSION_PREVIEW_ROOT_MAX = 2_048;
 
+function projectPathKey(value: unknown): string {
+  let path = String(value || "").trim().replace(/\//g, "\\");
+  path = path
+    .replace(/^\\\\\?\\UNC\\/i, "\\\\")
+    .replace(/^\\\\\?\\/, "");
+  return path.replace(/[\\/]+$/, "").toLocaleLowerCase();
+}
+
+function sameProjectPath(left: unknown, right: unknown): boolean {
+  const key = projectPathKey(left);
+  return !!key && key === projectPathKey(right);
+}
+
 /** Keep credentials out of local chat history and provider prompts. */
 export function redactChatCredentials(text: string): string {
   return String(text || "")
@@ -416,8 +429,72 @@ export function loadSessions(projectId: string): Session[] {
       // Keep the sanitized in-memory transcript even if storage is unavailable.
     }
     return safeAll
-      .filter((s) => s.projectId === projectId)
+      .filter((s) => sameProjectPath(s.projectId, projectId))
       .sort((a, b) => b.createdAt - a.createdAt);
+  } catch {
+    return [];
+  }
+}
+
+function rehomeProjectUsage(previousProjectId: string, nextProjectId: string): void {
+  try {
+    const map = loadProjectUsageMap();
+    let usage = 0;
+    let moved = false;
+    for (const [projectId, value] of Object.entries(map)) {
+      if (!sameProjectPath(projectId, previousProjectId) && !sameProjectPath(projectId, nextProjectId)) {
+        continue;
+      }
+      // Equivalent path spellings can coexist after an older release. Keep
+      // the highest recorded value rather than double-counting the same work.
+      usage = Math.max(usage, Math.max(0, Math.floor(Number(value) || 0)));
+      if (projectId !== nextProjectId) delete map[projectId];
+      moved = true;
+    }
+    if (moved) {
+      map[nextProjectId] = usage;
+      saveProjectUsageMap(map);
+    }
+  } catch {
+    // The repaired workspace remains usable even if an old usage cache is corrupt.
+  }
+}
+
+/**
+ * Move local sessions when an empty child folder is repaired to the verified
+ * direct-parent project root. Preview state tied to the empty folder is
+ * deliberately discarded; it cannot safely represent the repaired project.
+ */
+export function rehomeSessionsToProjectRoot(previousProjectId: string, nextProjectId: string): Session[] {
+  const next = String(nextProjectId || "").trim();
+  if (!projectPathKey(previousProjectId) || !projectPathKey(next) || sameProjectPath(previousProjectId, next)) {
+    return [];
+  }
+  rehomeProjectUsage(previousProjectId, next);
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return [];
+    const moved: Session[] = [];
+    const all: Session[] = JSON.parse(raw);
+    const updated = all.map((candidate) => {
+      const session = safeSessionForStorage(candidate);
+      if (!sameProjectPath(session.projectId, previousProjectId)) return session;
+      const repaired: Session = { ...session, projectId: next };
+      if (!repaired.preview || !sameProjectPath(repaired.preview.projectRoot, next)) {
+        delete repaired.preview;
+      }
+      moved.push(repaired);
+      return repaired;
+    });
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+    for (const session of pendingSessionSaves.values()) {
+      if (!sameProjectPath(session.projectId, previousProjectId)) continue;
+      session.projectId = next;
+      if (!session.preview || !sameProjectPath(session.preview.projectRoot, next)) {
+        delete session.preview;
+      }
+    }
+    return moved;
   } catch {
     return [];
   }
@@ -542,7 +619,7 @@ export function deleteSession(id: string): void {
 }
 export function deleteAllSessions(projectId: string): void {
   for (const [id, session] of pendingSessionSaves) {
-    if (session.projectId === projectId) pendingSessionSaves.delete(id);
+    if (sameProjectPath(session.projectId, projectId)) pendingSessionSaves.delete(id);
   }
   clearSessionSaveTimerIfIdle();
   try {
@@ -551,7 +628,7 @@ export function deleteAllSessions(projectId: string): void {
     const all: Session[] = JSON.parse(raw);
     localStorage.setItem(
       STORAGE_KEY,
-      JSON.stringify(all.filter((s) => s.projectId !== projectId)),
+      JSON.stringify(all.filter((s) => !sameProjectPath(s.projectId, projectId))),
     );
   } catch {
     // non-fatal
@@ -565,11 +642,14 @@ export function newSessionId(): string {
 
 /** Derive a short title from the first user message. */
 export function sessionTitle(prompt: string): string {
+  const hasVideo = /\[Attached video:\s*.+?\]/i.test(prompt);
   const cleaned = prompt
     .replace(/\[Attached image:\s*.+?\]/gi, "")
+    .replace(/\[Attached video:\s*.+?\]/gi, "")
+    .replace(/\[Video [^\]]+\]/gi, "")
     .replace(/\s+/g, " ")
     .trim();
-  const trimmed = cleaned || "Image chat";
+  const trimmed = cleaned || (hasVideo ? "Video chat" : "Image chat");
   return trimmed.length > 48 ? trimmed.slice(0, 48) + "…" : trimmed;
 }
 

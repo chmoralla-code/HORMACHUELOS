@@ -3,7 +3,7 @@ import { PROVIDERS, effortOptionsForProvider, displayModelName, getProviderMeta,
 import { clear, el, escapeHtml } from "./util";
 import { icon, icons } from "./icons";
 
-export type PermissionMode = "plan" | "auto" | "research" | "full";
+export type PermissionMode = "plan" | "auto" | "research" | "full" | "multi_agent";
 
 /** Agent permission modes (OpenCode-style chip labels). */
 const MODES: {
@@ -44,6 +44,14 @@ const MODES: {
     title: "Full — maximum autonomy, no approval prompts.",
     capability: "Autonomous",
   },
+  {
+    id: "multi_agent",
+    chip: "🌈 Multi-Agent",
+    label: "Multi-Agent",
+    title:
+      "Multi-Agent — Ship-level permission; independent workspace checks run together.",
+    capability: "Autonomous",
+  },
 ];
 
 /** Capability labels per mode (what the agent is allowed to do). */
@@ -74,6 +82,10 @@ const CAPABILITIES: Record<
   full: [
     { id: "autonomous", label: "Autonomous", title: "Full tools, no prompts" },
     { id: "max", label: "Max", title: "Maximum autonomy" },
+  ],
+  multi_agent: [
+    { id: "autonomous", label: "Autonomous", title: "Full tools with parallel discovery" },
+    { id: "max", label: "Max", title: "Maximum autonomy with parallel discovery" },
   ],
 };
 
@@ -344,13 +356,15 @@ export class ModelBar {
 
   private normalizeMode() {
     const m = String(this.settings.permission_mode || "").toLowerCase().trim();
-    if (m === "plan" || m === "auto" || m === "research" || m === "full") {
+    if (m === "plan" || m === "auto" || m === "research" || m === "full" || m === "multi_agent") {
       this.settings.permission_mode = m;
     } else {
       this.settings.permission_mode = this.settings.auto_approve ? "auto" : "plan";
     }
     this.settings.auto_approve =
-      this.settings.permission_mode === "auto" || this.settings.permission_mode === "full";
+      this.settings.permission_mode === "auto" ||
+      this.settings.permission_mode === "full" ||
+      this.settings.permission_mode === "multi_agent";
   }
 
   private syncCapabilityDefault() {
@@ -428,7 +442,8 @@ export class ModelBar {
   private async saveMode(mode: PermissionMode) {
     const prev = this.getMode();
     this.settings.permission_mode = mode;
-    this.settings.auto_approve = mode === "auto" || mode === "full";
+    this.settings.auto_approve =
+      mode === "auto" || mode === "full" || mode === "multi_agent";
     this.syncCapabilityDefault();
     this.renderProviderRail();
     try {
@@ -443,6 +458,7 @@ export class ModelBar {
         auto: "Auto — build with defaults",
         research: "Research — investigate with evidence",
         full: "Full — max autonomy",
+        multi_agent: "Multi-Agent — parallel discovery",
       };
       this.setStatus(labels[this.getMode()]);
       this.onChange();
@@ -523,12 +539,12 @@ export class ModelBar {
     const provider = PROVIDERS.find((p) => p.id === uiProvId) || visibleProviders()[0] || PROVIDERS[0];
     const meta = getProviderMeta(uiProvId) || provider;
 
-    // + menu: Plan / Debug / Multitask / Ask · Image / Files
+    // + menu: Plan / Debug / Multitask / Ask · Image / Video / Files
     const plusWrap = el("div", { class: "chip-wrap" });
     const plus = el("button", {
       class: "chip-btn chip-icon",
       type: "button",
-      title: "Add — Plan, Debug, Multitask, Ask, Image, Files",
+      title: "Add — Plan, Debug, Multitask, Ask, Image, Video, Files",
       "aria-label": "Add modes and attachments",
       "aria-haspopup": "menu",
       "aria-expanded": "false",
@@ -552,7 +568,7 @@ export class ModelBar {
       modeMeta.chip,
       modeMeta.title,
       `Mode: ${modeMeta.label}`,
-      "chip-mode",
+      "chip-mode" + (mode === "multi_agent" ? " chip-mode-multi-agent" : ""),
     );
     modeBtn.addEventListener("click", (ev) => {
       ev.preventDefault();
@@ -569,7 +585,11 @@ export class ModelBar {
           role: "option",
           "aria-selected": String(m.id === mode),
           title: m.title,
-        }, [`${m.chip} — ${m.label}`]) as HTMLButtonElement;
+        }, [
+          m.id === "multi_agent"
+            ? "🌈 Multi-Agent — parallel workspace discovery"
+            : `${m.chip} — ${m.label}`,
+        ]) as HTMLButtonElement;
         item.addEventListener("click", (e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -738,7 +758,7 @@ export class ModelBar {
       const caps = CAPABILITIES[mode];
       const cap = caps.find((c) => c.id === this.capabilityId) || caps[0];
       const capWrap = el("div", { class: "chip-wrap" });
-      const agentic = mode === "auto" || mode === "full";
+      const agentic = mode === "auto" || mode === "full" || mode === "multi_agent";
       const capBtn = this.chipBtn(
         cap.label,
         cap.title,
@@ -789,7 +809,7 @@ export class ModelBar {
     this.providerRail.appendChild(this.statusEl);
   }
 
-  /** + menu: Plan / Debug / Multitask / Ask · Image / Files. */
+  /** + menu: Plan / Debug / Multitask / Ask · Image / Video / Files. */
   private async openPlusMenu(btn: HTMLButtonElement) {
     const menu = el("div", {
       class: "chip-menu chip-menu-plus",
@@ -872,6 +892,13 @@ export class ModelBar {
         void this.attachImage();
       },
     });
+    addItem("Video", "video", {
+      title: "Attach a video — all models receive a visual frame summary",
+      onClick: () => {
+        this.closeMenus();
+        void this.attachVideo();
+      },
+    });
     addItem("Files", "file", {
       title: "Attach files to the message",
       onClick: () => {
@@ -889,7 +916,8 @@ export class ModelBar {
     status: string,
   ) {
     this.settings.permission_mode = mode;
-    this.settings.auto_approve = mode === "auto" || mode === "full";
+    this.settings.auto_approve =
+      mode === "auto" || mode === "full" || mode === "multi_agent";
     this.syncCapabilityDefault();
     if (capability && CAPABILITIES[mode].some((c) => c.id === capability)) {
       this.capabilityId = capability;
@@ -936,6 +964,29 @@ export class ModelBar {
     } catch (e) {
       console.error(e);
       this.setStatus("Could not attach images", true);
+    }
+  }
+
+  private async attachVideo() {
+    try {
+      const paths = await api.openVideoPicker();
+      if (!paths.length) return;
+      let ok = 0;
+      for (const path of paths) {
+        try {
+          const imported = await api.importVideoPath(path);
+          window.dispatchEvent(
+            new CustomEvent("horma:composer-attach-video", { detail: { path: imported } }),
+          );
+          ok += 1;
+        } catch (err) {
+          console.error(err);
+        }
+      }
+      this.setStatus(ok === 1 ? "Video attached" : ok > 1 ? `${ok} videos attached` : "Could not attach videos", ok === 0);
+    } catch (e) {
+      console.error(e);
+      this.setStatus("Could not attach videos", true);
     }
   }
 

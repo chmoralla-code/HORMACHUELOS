@@ -4,15 +4,19 @@ use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 const MAX_FILE_READ_BYTES: usize = 200_000;
 const MAX_COMMAND_OUTPUT_BYTES: usize = 50_000;
 const MAX_CONSOLE_LINE_BYTES: usize = 8_192;
 const MAX_DOWNLOAD_BYTES: u64 = 100 * 1024 * 1024;
 const MAX_WEB_REDIRECTS: usize = 5;
+const MAX_VIDEO_BYTES: u64 = 750 * 1024 * 1024;
+const MAX_VIDEO_DURATION_SECS: f64 = 20.0 * 60.0;
+const VIDEO_SAMPLE_FRAMES: usize = 6;
 
 pub type ConsoleLineCallback = dyn Fn(&str, &str) + Send + Sync;
 
@@ -35,7 +39,104 @@ impl ToolRunContext {
     }
 }
 
+/// Convert a provider-emitted name to the one and only tool identifier the
+/// desktop runtime accepts. Providers do occasionally change casing, use an
+/// older terminal alias, or concatenate two read-only names. Repair only
+/// clear, well-known spellings here; unknown and potentially destructive
+/// names must still be rejected by the dispatcher.
+pub fn normalize_tool_name(name: &str) -> String {
+    canonical_tool_name(name)
+        .unwrap_or_else(|| name.trim())
+        .to_string()
+}
+
+/// True when `name` is a registered dispatcher name or an explicitly safe
+/// compatibility spelling. This lets tests keep the advertised schemas and
+/// implementation in lockstep.
+pub fn is_supported_tool_name(name: &str) -> bool {
+    canonical_tool_name(name).is_some()
+}
+
+fn canonical_tool_name(name: &str) -> Option<&'static str> {
+    let compact: String = name
+        .trim()
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect();
+
+    match compact.as_str() {
+        // Registered tool names. Accepting compact spellings keeps providers
+        // that emit camelCase, kebab-case, or accidental whitespace working.
+        "readfile" => Some("read_file"),
+        "writefile" => Some("write_file"),
+        "editfile" => Some("edit_file"),
+        "listdir" => Some("list_dir"),
+        "glob" => Some("glob"),
+        "grep" => Some("grep"),
+        "runcommand" => Some("run_command"),
+        "startdevserver" | "startlocalserver" => Some("start_dev_server"),
+        "gitinit" => Some("git_init"),
+        "gitaddall" => Some("git_add_all"),
+        "gitcommit" => Some("git_commit"),
+        "gitstatus" => Some("git_status"),
+        "listdrives" => Some("list_drives"),
+        "sysinfo" => Some("sys_info"),
+        "envvars" => Some("env_vars"),
+        "listprocesses" => Some("list_processes"),
+        "killprocess" => Some("kill_process"),
+        "openurl" => Some("open_url"),
+        "connectaccount" => Some("connect_account"),
+        "integrationstatus" => Some("integration_status"),
+        "openpath" => Some("open_path"),
+        "downloadfile" => Some("download_file"),
+        "movefile" => Some("move_file"),
+        "copyfile" => Some("copy_file"),
+        "deletefile" => Some("delete_file"),
+        "makedir" => Some("make_dir"),
+        "fileinfo" => Some("file_info"),
+        "viewimage" => Some("view_image"),
+        "viewvideo" | "watchvideo" | "analyzevideo" => Some("view_video"),
+        "websearch" => Some("web_search"),
+        "browsepage" => Some("browse_page"),
+        "exportclientpack" => Some("export_client_pack"),
+        "askuser" => Some("ask_user"),
+        "done" => Some("done"),
+        "computerlistwindows" => Some("computer_list_windows"),
+        "computerobserve" => Some("computer_observe"),
+        "computerfocuswindow" => Some("computer_focus_window"),
+        "computerclick" => Some("computer_click"),
+        "computertypetext" => Some("computer_type_text"),
+        "computerpresskey" => Some("computer_press_key"),
+        "computerscroll" => Some("computer_scroll"),
+        "computerdrag" => Some("computer_drag"),
+        "computergamesequence" => Some("computer_game_sequence"),
+
+        // Safe inspection aliases emitted by some OpenAI-compatible models.
+        "readfilecontents" | "readtextfile" | "fileread" => Some("read_file"),
+        "listfiles" | "listdirectory" | "listfolder" | "readdir" => Some("list_dir"),
+        "searchfiles" | "searchtext" => Some("grep"),
+        "getprocesses" | "processlist" => Some("list_processes"),
+        "getsysteminfo" | "systeminfo" => Some("sys_info"),
+        "getenvvars" | "environmentvariables" => Some("env_vars"),
+        "getfileinfo" => Some("file_info"),
+
+        // These shell aliases are already recognized by the Smart Agent
+        // ledger. Normalize them before permission checks so they receive the
+        // same approval policy as run_command.
+        "runterminal" | "runterminalcmd" | "executecommand" | "shell" => Some("run_command"),
+
+        // Exact malformed call seen from provider tool-use: it merged the
+        // requested read_file with list_processes while keeping a file path.
+        // Resolving it to the read-only file operation prevents a visible
+        // failure without ever choosing a write or computer-control action.
+        "readfilelistprocesses" => Some("read_file"),
+        _ => None,
+    }
+}
+
 fn is_readonly_tool(name: &str) -> bool {
+    let name = canonical_tool_name(name).unwrap_or(name);
     matches!(
         name,
         "read_file"
@@ -49,6 +150,7 @@ fn is_readonly_tool(name: &str) -> bool {
             | "list_processes"
             | "file_info"
             | "view_image"
+            | "view_video"
             | "ask_user"
             | "done"
             | "connect_account"
@@ -66,6 +168,7 @@ fn is_readonly_tool(name: &str) -> bool {
 /// computer tools have ordering or interaction semantics even when they do not
 /// mutate the workspace.
 pub fn is_parallel_safe_readonly_tool(name: &str) -> bool {
+    let name = canonical_tool_name(name).unwrap_or(name);
     matches!(
         name,
         "read_file"
@@ -120,9 +223,10 @@ fn arg_path<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
 
 /// True if any path-like arg for this tool points outside the project root.
 fn tool_targets_outside_project(name: &str, args: &Value, root: &Path) -> bool {
+    let name = canonical_tool_name(name).unwrap_or(name);
     match name {
         "read_file" | "write_file" | "edit_file" | "make_dir" | "delete_file" | "file_info"
-        | "open_path" | "list_dir" | "view_image" => {
+        | "open_path" | "list_dir" | "view_image" | "view_video" => {
             if let Some(p) = arg_path(args, "path") {
                 return path_escapes_project(root, p);
             }
@@ -142,7 +246,7 @@ fn tool_targets_outside_project(name: &str, args: &Value, root: &Path) -> bool {
             (!src.is_empty() && path_escapes_project(root, src))
                 || (!dst.is_empty() && path_escapes_project(root, dst))
         }
-        "run_command" => {
+        "run_command" | "start_dev_server" => {
             if let Some(cwd) = arg_path(args, "cwd") {
                 return path_escapes_project(root, cwd);
             }
@@ -162,8 +266,9 @@ fn tool_targets_outside_project(name: &str, args: &Value, root: &Path) -> bool {
 /// - plan: confirm every mutating / system tool (reads free)
 /// - research: same as plan for mutations; investigate with free reads
 /// - auto: auto-run in-project work; confirm high-risk + outside-project paths
-/// - full: never confirm
+/// - full / multi_agent: follow the Ship full-permission policy
 pub fn needs_tool_confirm(name: &str, args: &Value, root: &Path, mode: &str) -> bool {
+    let name = canonical_tool_name(name).unwrap_or(name);
     let mode = mode.trim().to_ascii_lowercase();
     if is_computer_tool(name) {
         return matches!(
@@ -171,7 +276,7 @@ pub fn needs_tool_confirm(name: &str, args: &Value, root: &Path, mode: &str) -> 
             "computer_click" | "computer_type_text" | "computer_press_key" | "computer_drag"
         );
     }
-    if mode == "full" {
+    if mode == "full" || mode == "multi_agent" {
         return false;
     }
     if is_readonly_tool(name) {
@@ -196,7 +301,10 @@ pub fn needs_tool_confirm(name: &str, args: &Value, root: &Path, mode: &str) -> 
 
 #[cfg(test)]
 mod permission_mode_tests {
-    use super::{is_parallel_safe_readonly_tool, needs_tool_confirm, schemas};
+    use super::{
+        is_parallel_safe_readonly_tool, is_supported_tool_name, needs_tool_confirm,
+        normalize_tool_name, schemas,
+    };
     use serde_json::json;
     use std::path::Path;
 
@@ -214,6 +322,23 @@ mod permission_mode_tests {
             &json!({ "path": "x.txt" }),
             root,
             "full"
+        ));
+    }
+
+    #[test]
+    fn multi_agent_uses_the_same_permission_policy_as_full() {
+        let root = Path::new("C:\\proj");
+        assert!(!needs_tool_confirm(
+            "run_command",
+            &json!({ "command": "npm test" }),
+            root,
+            "multi_agent"
+        ));
+        assert!(!needs_tool_confirm(
+            "delete_file",
+            &json!({ "path": "x.txt" }),
+            root,
+            "multi_agent"
         ));
     }
 
@@ -261,6 +386,12 @@ mod permission_mode_tests {
             root,
             "plan"
         ));
+        assert!(needs_tool_confirm(
+            "start_dev_server",
+            &json!({ "command": "npm run dev" }),
+            root,
+            "plan"
+        ));
         assert!(!needs_tool_confirm(
             "read_file",
             &json!({ "path": "a.txt" }),
@@ -268,6 +399,51 @@ mod permission_mode_tests {
             "plan"
         ));
         assert!(!needs_tool_confirm("list_dir", &json!({}), root, "plan"));
+        assert!(needs_tool_confirm(
+            "run_terminal",
+            &json!({ "command": "echo hi" }),
+            root,
+            "plan"
+        ));
+        assert!(!needs_tool_confirm(
+            "read_filelist_processes",
+            &json!({ "path": "a.txt" }),
+            root,
+            "plan"
+        ));
+    }
+
+    #[test]
+    fn registered_schemas_always_have_a_supported_dispatch_name() {
+        for computer_use_enabled in [false, true] {
+            for schema in schemas(computer_use_enabled) {
+                let name = schema["function"]["name"]
+                    .as_str()
+                    .expect("all tool schemas need a function name");
+                assert!(
+                    is_supported_tool_name(name),
+                    "schema {name} has no dispatcher entry"
+                );
+                assert_eq!(normalize_tool_name(name), name);
+            }
+        }
+    }
+
+    #[test]
+    fn safe_provider_tool_aliases_are_repaired_before_execution() {
+        for (received, expected) in [
+            ("Read-File", "read_file"),
+            ("read_filelist_processes", "read_file"),
+            ("get_processes", "list_processes"),
+            ("run_terminal_cmd", "run_command"),
+            ("start-local-server", "start_dev_server"),
+        ] {
+            assert_eq!(normalize_tool_name(received), expected, "{received}");
+        }
+        assert_eq!(
+            normalize_tool_name("delete_everything"),
+            "delete_everything"
+        );
     }
 
     #[test]
@@ -288,6 +464,7 @@ mod permission_mode_tests {
         for name in [
             "write_file",
             "run_command",
+            "start_dev_server",
             "web_search",
             "ask_user",
             "done",
@@ -530,6 +707,27 @@ fn resolve_image_read_path(root: &Path, raw: &str) -> Result<PathBuf> {
     resolve_project_read_path(root, raw)
 }
 
+/// Resolve a video path with the same boundaries as `view_image`. Directly
+/// selected media lives in the app's private paste directory; project-relative
+/// paths remain constrained to the active workspace.
+fn resolve_video_read_path(root: &Path, raw: &str) -> Result<PathBuf> {
+    let p = Path::new(raw);
+    if p.is_absolute() {
+        let paste_dir = std::env::temp_dir().join("hormachuelos-paste");
+        let canonical = p
+            .canonicalize()
+            .with_context(|| format!("Could not resolve video path: {}", p.display()))?;
+        let Ok(paste_canon) = paste_dir.canonicalize() else {
+            anyhow::bail!("Video path is not inside the app paste directory.");
+        };
+        if canonical.starts_with(&paste_canon) {
+            return Ok(canonical);
+        }
+        anyhow::bail!("Video path resolves outside the project and the paste directory.");
+    }
+    resolve_project_read_path(root, raw)
+}
+
 pub fn path_escapes_project(root: &Path, rel: &str) -> bool {
     let p = Path::new(rel);
     let Ok(canonical_root) = root.canonicalize() else {
@@ -667,13 +865,29 @@ pub fn schemas(computer_use_enabled: bool) -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "run_command",
-                "description": "Run a shell command (PowerShell), hidden from the user. Use this to scaffold, build, install packages, run tests, start dev servers, manage the system — anything. Stream stdout/stderr back. Default timeout 120s.",
+                "description": "Run a shell command (PowerShell), hidden from the user. Use this to scaffold, build, install packages, run tests, and manage the system. Stream stdout/stderr back. For a local web dev server, use start_dev_server instead so the agent never waits for a server process. Default timeout 120s.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "command": { "type": "string", "description": "Full shell command. Run as `powershell -NoProfile -Command <command>`." },
                         "cwd": { "type": "string", "description": "Working directory (absolute path or relative to project root). Defaults to project root." },
                         "timeout_secs": { "type": "integer", "default": 120 }
+                    },
+                    "required": ["command"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "start_dev_server",
+                "description": "Start a local web development server in a safe detached background process. Use this for npm/pnpm/yarn/Vite/Next/etc. dev servers instead of Start-Process, cmd.exe, start /b, or background shell tricks. The host handles Windows .cmd shims, redirects server output to a project log, and returns immediately so the agent can continue.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string", "description": "Server command, e.g. npm run dev -- --host 127.0.0.1" },
+                        "cwd": { "type": "string", "description": "Working directory, absolute or project-relative. Defaults to the project root." },
+                        "port": { "type": "integer", "description": "Optional local port to reuse or report, e.g. 5173 or 3000." }
                     },
                     "required": ["command"]
                 }
@@ -917,6 +1131,18 @@ pub fn schemas(computer_use_enabled: bool) -> Vec<Value> {
                 "parameters": {
                     "type": "object",
                     "properties": { "path": { "type": "string", "description": "Absolute or project-relative path to the image file" } },
+                    "required": ["path"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "view_video",
+                "description": "View and summarize a local video by sampling six chronological frames. Supports MP4, MOV, WEBM, MKV, AVI, WMV, FLV, MPEG, and 3GP. Use for a project video that was not attached in the chat; attached videos are auto-sampled already. Visual summary only — it does not transcribe audio.",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "path": { "type": "string", "description": "Absolute pasted-video path or a path relative to the active project" } },
                     "required": ["path"]
                 }
             }
@@ -1876,6 +2102,199 @@ pub fn view_image_file(root: &Path, raw_path: &str) -> Result<String> {
     anyhow::bail!("Vision endpoint failed ({}).", errors.join(" · "))
 }
 
+fn supported_video_extension(ext: &str) -> bool {
+    matches!(
+        ext,
+        "mp4" | "mov" | "m4v" | "webm" | "mkv" | "avi" | "wmv" | "flv" | "mpeg" | "mpg" | "3gp"
+    )
+}
+
+/// Run a bounded media command without shell interpolation. The video viewer
+/// never passes user paths through a shell, keeps stderr out of a potentially
+/// unbounded pipe, and kills hung codecs instead of holding the agent forever.
+fn run_media_process(
+    program: &str,
+    args: &[&std::ffi::OsStr],
+    timeout: Duration,
+) -> Result<Vec<u8>> {
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = command.spawn().with_context(|| {
+        format!("Could not start {program}. Install FFmpeg, or attach the video through + → Video.")
+    })?;
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            let mut stdout = Vec::new();
+            if let Some(mut pipe) = child.stdout.take() {
+                pipe.read_to_end(&mut stdout)?;
+            }
+            if !status.success() {
+                anyhow::bail!("{program} could not read this video.");
+            }
+            return Ok(stdout);
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!("{program} timed out while sampling the video.");
+        }
+        std::thread::sleep(Duration::from_millis(35));
+    }
+}
+
+fn probe_video_duration(path: &Path) -> Result<f64> {
+    let output = run_media_process(
+        "ffprobe",
+        &[
+            std::ffi::OsStr::new("-v"),
+            std::ffi::OsStr::new("error"),
+            std::ffi::OsStr::new("-show_entries"),
+            std::ffi::OsStr::new("format=duration"),
+            std::ffi::OsStr::new("-of"),
+            std::ffi::OsStr::new("default=noprint_wrappers=1:nokey=1"),
+            path.as_os_str(),
+        ],
+        Duration::from_secs(12),
+    )?;
+    let duration = String::from_utf8_lossy(&output)
+        .trim()
+        .parse::<f64>()
+        .context("FFmpeg could not determine the video duration.")?;
+    if !duration.is_finite() || duration < 0.1 {
+        anyhow::bail!("The video has no usable duration.");
+    }
+    if duration > MAX_VIDEO_DURATION_SECS {
+        anyhow::bail!("Videos longer than 20 minutes are not sampled automatically.");
+    }
+    Ok(duration)
+}
+
+fn create_video_contact_sheet(frame_paths: &[PathBuf], output_dir: &Path) -> Result<PathBuf> {
+    use image::imageops::{overlay, FilterType};
+    use image::ImageEncoder;
+
+    if frame_paths.is_empty() {
+        anyhow::bail!("FFmpeg did not produce video frames.");
+    }
+    const COLUMNS: u32 = 3;
+    const CELL_WIDTH: u32 = 384;
+    const CELL_HEIGHT: u32 = 216;
+    let rows = (frame_paths.len() as u32).div_ceil(COLUMNS);
+    let mut sheet = image::RgbImage::from_pixel(
+        COLUMNS * CELL_WIDTH,
+        rows * CELL_HEIGHT,
+        image::Rgb([16, 21, 31]),
+    );
+    for (index, path) in frame_paths.iter().enumerate() {
+        let frame = image::open(path)
+            .with_context(|| format!("Could not read sampled frame: {}", path.display()))?
+            .resize_to_fill(CELL_WIDTH, CELL_HEIGHT, FilterType::Triangle)
+            .to_rgb8();
+        let x = (index as u32 % COLUMNS) * CELL_WIDTH;
+        let y = (index as u32 / COLUMNS) * CELL_HEIGHT;
+        overlay(&mut sheet, &frame, i64::from(x), i64::from(y));
+    }
+
+    let contact = output_dir.join("contact-sheet.jpg");
+    let mut file = std::fs::File::create(&contact)?;
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut file, 82).write_image(
+        sheet.as_raw(),
+        sheet.width(),
+        sheet.height(),
+        image::ExtendedColorType::Rgb8,
+    )?;
+    file.flush()?;
+    Ok(contact)
+}
+
+/// View a project video through FFmpeg and pass one chronological contact
+/// sheet to the shared image-vision bridge. This keeps the result model-agnostic
+/// while the composer attachment path handles the common user-facing case with
+/// Windows' built-in media decoder.
+pub fn view_video_file(root: &Path, raw_path: &str) -> Result<String> {
+    let full = resolve_video_read_path(root, raw_path)?;
+    let ext = full
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    if !supported_video_extension(&ext) {
+        anyhow::bail!(
+            "view_video supports MP4, MOV, WEBM, MKV, AVI, WMV, FLV, MPEG, and 3GP files (got .{ext})."
+        );
+    }
+    let metadata = std::fs::metadata(&full)
+        .with_context(|| format!("Could not inspect video: {}", full.display()))?;
+    if metadata.len() == 0 {
+        anyhow::bail!("Video file is empty.");
+    }
+    if metadata.len() > MAX_VIDEO_BYTES {
+        anyhow::bail!("Video is too large (max 750 MB).");
+    }
+
+    let duration = probe_video_duration(&full)?;
+    let work_dir = std::env::temp_dir()
+        .join("hormachuelos-paste")
+        .join(format!("video-view-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&work_dir)?;
+    let result = (|| -> Result<String> {
+        let mut frames = Vec::with_capacity(VIDEO_SAMPLE_FRAMES);
+        for index in 0..VIDEO_SAMPLE_FRAMES {
+            let fraction = 0.04 + (index as f64 / (VIDEO_SAMPLE_FRAMES - 1) as f64) * 0.92;
+            let seconds = (duration * fraction).clamp(0.001, duration - 0.001);
+            let seek = format!("{seconds:.3}");
+            let frame = work_dir.join(format!("frame-{index:02}.jpg"));
+            run_media_process(
+                "ffmpeg",
+                &[
+                    std::ffi::OsStr::new("-hide_banner"),
+                    std::ffi::OsStr::new("-v"),
+                    std::ffi::OsStr::new("error"),
+                    std::ffi::OsStr::new("-nostdin"),
+                    std::ffi::OsStr::new("-y"),
+                    std::ffi::OsStr::new("-ss"),
+                    std::ffi::OsStr::new(&seek),
+                    std::ffi::OsStr::new("-i"),
+                    full.as_os_str(),
+                    std::ffi::OsStr::new("-frames:v"),
+                    std::ffi::OsStr::new("1"),
+                    std::ffi::OsStr::new("-vf"),
+                    std::ffi::OsStr::new("scale=384:-2"),
+                    std::ffi::OsStr::new("-q:v"),
+                    std::ffi::OsStr::new("4"),
+                    frame.as_os_str(),
+                ],
+                Duration::from_secs(20),
+            )?;
+            if !frame.is_file() {
+                anyhow::bail!("FFmpeg did not produce a frame at {seconds:.1}s.");
+            }
+            frames.push(frame);
+        }
+        let contact = create_video_contact_sheet(&frames, &work_dir)?;
+        let visual_summary = view_image_file(root, &contact.to_string_lossy())?;
+        let label = full
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("video");
+        Ok(format!(
+            "Video visual summary for {label} ({duration:.1}s; {VIDEO_SAMPLE_FRAMES} chronological frames):\n{visual_summary}\n\nAudio was not transcribed; this result covers visible sampled frames only."
+        ))
+    })();
+    let _ = std::fs::remove_dir_all(&work_dir);
+    result
+}
+
 /// Shrink large screenshots before the vision round-trip so Gemini/Grok respond
 /// quickly. Falls back to the original bytes when decode/re-encode fails.
 fn prepare_vision_payload(bytes: &[u8], mime: &str) -> (String, String) {
@@ -2167,6 +2586,24 @@ pub fn attached_image_paths(prompt: &str) -> Vec<String> {
     out
 }
 
+/// Extract `[Attached video: …]` paths from a user prompt. Video files are
+/// sampled in the WebView before the agent starts; this marker lets the agent
+/// explain exactly what its generated contact-sheet context represents.
+pub fn attached_video_paths(prompt: &str) -> Vec<String> {
+    let re = regex::Regex::new(r"(?i)\[Attached video:\s*(.+?)\]").ok();
+    let Some(re) = re else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for cap in re.captures_iter(prompt) {
+        let path = cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
+        if !path.is_empty() && !out.iter().any(|p: &String| p == path) {
+            out.push(path.to_string());
+        }
+    }
+    out
+}
+
 pub fn execute(
     name: &str,
     args: &Value,
@@ -2174,6 +2611,7 @@ pub fn execute(
     timeout_secs: u64,
     ctx: &ToolRunContext,
 ) -> Result<String> {
+    let name = canonical_tool_name(name).unwrap_or_else(|| name.trim());
     match name {
         "read_file" => {
             let p = args
@@ -2324,7 +2762,61 @@ pub fn execute(
                 Some(p) => resolve_path(root, p)?,
                 None => root.to_path_buf(),
             };
+            // A background process spawned through PowerShell inherits the
+            // stdout/stderr pipes owned by `run_hidden`. PowerShell can exit
+            // while npm/Vite keeps those handles open, which made the agent
+            // wait forever at a seemingly completed Start-Process command.
+            // Preserve the compatibility path for models that still emit it,
+            // but launch it without pipes and return as soon as it starts.
+            if is_background_shell_command(cmd) {
+                let (pid, log_path) = start_detached_command(
+                    &work_dir,
+                    cmd,
+                    ".hormachuelos-background.log",
+                    false,
+                    ctx,
+                )?;
+                return Ok(format!(
+                    "Started background command (PID {pid}) without waiting for its child process. Output is redirected to {}.",
+                    log_path.display()
+                ));
+            }
             run_hidden(&work_dir, cmd, timeout, ctx)
+        }
+        "start_dev_server" => {
+            let command = args
+                .get("command")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("missing command"))?;
+            let cwd = args.get("cwd").and_then(|v| v.as_str());
+            let work_dir = match cwd {
+                Some(path) => resolve_path(root, path)?,
+                None => root.to_path_buf(),
+            };
+            let port = match args.get("port").and_then(|v| v.as_u64()) {
+                Some(port @ 1..=65_535) => Some(port as u16),
+                Some(_) => anyhow::bail!("port must be between 1 and 65535"),
+                None => None,
+            };
+            if let Some(port) = port.filter(|port| local_port_is_open(*port)) {
+                return Ok(format!(
+                    "A local development server is already reachable at http://127.0.0.1:{port}; reusing it instead of starting another."
+                ));
+            }
+            let (pid, log_path) = start_detached_command(
+                &work_dir,
+                command,
+                ".hormachuelos-dev-server.log",
+                true,
+                ctx,
+            )?;
+            let preview = port
+                .map(|port| format!(" Preview: http://127.0.0.1:{port}."))
+                .unwrap_or_default();
+            Ok(format!(
+                "Started local development server in background (PID {pid}).{preview} The agent can continue without waiting for the server process. Output is redirected to {}.",
+                log_path.display()
+            ))
         }
         "git_init" => run_hidden(root, "git init", 30, ctx),
         "git_add_all" => run_hidden(root, "git add -A", 60, ctx),
@@ -2581,6 +3073,13 @@ pub fn execute(
                 .ok_or_else(|| anyhow::anyhow!("missing path"))?;
             view_image_file(root, p)
         }
+        "view_video" => {
+            let p = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("missing path"))?;
+            view_video_file(root, p)
+        }
         "done" => {
             let summary = args
                 .get("summary")
@@ -2650,7 +3149,9 @@ pub fn execute(
             let result = crate::computer_use::execute_tool(name, args)?;
             Ok(serde_json::to_string_pretty(&result)?)
         }
-        other => Err(anyhow::anyhow!("Unknown tool: {other}")),
+        other => Err(anyhow::anyhow!(
+            "Unknown tool: {other}. Call exactly one registered snake_case tool name per request."
+        )),
     }
 }
 
@@ -2798,6 +3299,102 @@ fn run_git_commit(root: &Path, message: &str, ctx: &ToolRunContext) -> Result<St
     let result = wait_child_with_pipes(child, 60, ctx);
     clear_pid(ctx);
     result
+}
+
+/// Detect the older background-server patterns emitted by models. These must
+/// never use the normal piped command runner because a descendant can inherit
+/// its pipe handles after PowerShell itself exits.
+fn is_background_shell_command(command: &str) -> bool {
+    let normalized = command.trim().to_ascii_lowercase();
+    (normalized.contains("start-process") && !normalized.contains("-wait"))
+        || normalized.contains("start-job")
+        || normalized.contains("cmd.exe /c start")
+        || normalized.contains("cmd /c start")
+        || normalized.contains("start /b ")
+}
+
+/// Start a long-lived local process without connecting it to the tool's live
+/// output pipes. This is intentionally separate from `run_hidden`: dev
+/// servers should outlive the individual agent tool call, while ordinary
+/// commands must remain awaited and streamed back to the model.
+fn start_detached_command(
+    root: &Path,
+    command: &str,
+    log_name: &str,
+    use_cmd_shim: bool,
+    ctx: &ToolRunContext,
+) -> Result<(u32, PathBuf)> {
+    use std::fs::OpenOptions;
+    use std::process::Stdio;
+
+    if ctx.cancel.load(Ordering::SeqCst) {
+        anyhow::bail!("Command cancelled.");
+    }
+    if command.trim().is_empty() {
+        anyhow::bail!("command must not be empty");
+    }
+
+    let log_path = root.join(log_name);
+    let mut output = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&log_path)
+        .with_context(|| format!("Could not open {}", log_path.display()))?;
+    // Do not record the command itself: command arguments can contain
+    // credentials. The server's own stdout/stderr follows this safe marker.
+    writeln!(output, "Hormachuelos started a detached local process.")?;
+    let error_output = output.try_clone()?;
+
+    #[cfg(windows)]
+    let mut cmd = if use_cmd_shim {
+        // npm, pnpm, and yarn are `.cmd` shims on Windows. `cmd.exe /C`
+        // gives them the same launch semantics as a user terminal.
+        let mut cmd = Command::new("cmd.exe");
+        cmd.args(["/D", "/S", "/C", command]);
+        cmd
+    } else {
+        let mut cmd = Command::new("powershell");
+        cmd.arg("-NoProfile")
+            .arg("-NonInteractive")
+            .arg("-NoLogo")
+            .arg("-Command")
+            .arg(command);
+        cmd
+    };
+
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-lc", command]);
+        cmd
+    };
+
+    cmd.current_dir(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(output))
+        .stderr(Stdio::from(error_output));
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let child = cmd.spawn().with_context(|| {
+        if use_cmd_shim {
+            "Could not start the local development server"
+        } else {
+            "Could not start the background command"
+        }
+    })?;
+    Ok((child.id(), log_path))
+}
+
+fn local_port_is_open(port: u16) -> bool {
+    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_millis(150)).is_ok()
 }
 
 fn run_hidden(
@@ -3238,6 +3835,20 @@ mod security_tests {
     }
 
     #[test]
+    fn merged_read_file_tool_name_is_repaired_at_the_dispatch_boundary() {
+        let tree = TempTree::new();
+        let output = execute(
+            "read_filelist_processes",
+            &json!({ "path": "inside.txt" }),
+            &tree.root,
+            5,
+            &ToolRunContext::noop(),
+        )
+        .expect("the safe read alias should dispatch");
+        assert_eq!(output, "inside");
+    }
+
+    #[test]
     fn view_image_resolves_project_and_paste_paths_only() {
         let tree = TempTree::new();
         // Project-relative image path resolves inside the project.
@@ -3255,6 +3866,58 @@ mod security_tests {
         let outside_img = tree.outside.join("shot.png");
         std::fs::write(&outside_img, b"x").unwrap();
         assert!(resolve_image_read_path(&tree.root, &outside_img.to_string_lossy()).is_err());
+    }
+
+    #[test]
+    fn view_video_resolves_only_project_or_private_attachment_paths() {
+        let tree = TempTree::new();
+        let paste_dir = std::env::temp_dir().join("hormachuelos-paste");
+        std::fs::create_dir_all(&paste_dir).unwrap();
+        let pasted = paste_dir.join("video-resolution-test.mp4");
+        std::fs::write(&pasted, b"fake-mp4").unwrap();
+        assert!(resolve_video_read_path(&tree.root, &pasted.to_string_lossy()).is_ok());
+
+        let inside = tree.root.join("clip.mp4");
+        std::fs::write(&inside, b"fake-mp4").unwrap();
+        assert!(resolve_video_read_path(&tree.root, "clip.mp4").is_ok());
+
+        let outside = tree.outside.join("clip.mp4");
+        std::fs::write(&outside, b"fake-mp4").unwrap();
+        assert!(resolve_video_read_path(&tree.root, &outside.to_string_lossy()).is_err());
+    }
+
+    #[test]
+    fn attached_video_paths_are_deduplicated_without_matching_images() {
+        let prompt = "[Attached video: C:\\Temp\\clip.mp4]\n[Attached image: C:\\Temp\\grid.jpg]\n[Attached video: C:\\Temp\\clip.mp4]\n[Attached video: C:\\Temp\\second.webm]";
+        assert_eq!(
+            attached_video_paths(prompt),
+            vec![
+                "C:\\Temp\\clip.mp4".to_string(),
+                "C:\\Temp\\second.webm".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn video_contact_sheet_is_a_single_vision_ready_image() {
+        let tree = TempTree::new();
+        let frames_dir = tree.root.join("sampled");
+        std::fs::create_dir_all(&frames_dir).unwrap();
+        let mut paths = Vec::new();
+        for (index, color) in [[220, 50, 40], [35, 110, 230], [55, 190, 100]]
+            .into_iter()
+            .enumerate()
+        {
+            let path = frames_dir.join(format!("frame-{index}.jpg"));
+            image::RgbImage::from_pixel(80, 60, image::Rgb(color))
+                .save(&path)
+                .unwrap();
+            paths.push(path);
+        }
+        let contact = create_video_contact_sheet(&paths, &frames_dir).unwrap();
+        let sheet = image::open(contact).unwrap();
+        assert_eq!(sheet.width(), 1_152);
+        assert_eq!(sheet.height(), 216);
     }
 
     #[test]
@@ -3362,5 +4025,86 @@ mod security_tests {
         );
         assert_eq!(captured.bytes.len(), MAX_COMMAND_OUTPUT_BYTES);
         assert!(captured.truncated);
+    }
+
+    #[test]
+    fn background_shell_patterns_use_the_detached_launcher() {
+        assert!(is_background_shell_command(
+            "Start-Process -FilePath 'cmd.exe' -ArgumentList '/c npm run dev'"
+        ));
+        assert!(is_background_shell_command("Start-Job { npm run dev }"));
+        assert!(is_background_shell_command("cmd /c start /b npm run dev"));
+        assert!(!is_background_shell_command("Start-Process npm -Wait"));
+        assert!(!is_background_shell_command("npm run build"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dev_server_launcher_returns_before_the_server_exits() {
+        use std::time::{Duration, Instant};
+
+        let tree = TempTree::new();
+        let started = Instant::now();
+        let result = execute(
+            "start_dev_server",
+            &json!({ "command": "timeout /T 10 /NOBREAK > NUL" }),
+            &tree.root,
+            5,
+            &ToolRunContext::noop(),
+        )
+        .expect("the detached launcher should start");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the launcher waited for a long-running child: {result}"
+        );
+        assert!(result.contains("Started local development server in background"));
+        assert!(tree.root.join(".hormachuelos-dev-server.log").exists());
+
+        let pid = result
+            .split("PID ")
+            .nth(1)
+            .and_then(|tail| tail.split(')').next())
+            .and_then(|pid| pid.parse::<u32>().ok())
+            .expect("result should include the detached process PID");
+        kill_process_tree(pid);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn legacy_start_process_command_returns_without_waiting_for_its_descendant() {
+        use std::time::{Duration, Instant};
+
+        let tree = TempTree::new();
+        let pid_file = tree.root.join(".hormachuelos-child.pid");
+        let command = r#"$server = Start-Process -FilePath "cmd.exe" -ArgumentList "/D /S /C timeout /T 10 /NOBREAK > NUL" -PassThru; Set-Content -Path ".hormachuelos-child.pid" -Value $server.Id"#;
+        let started = Instant::now();
+        let result = execute(
+            "run_command",
+            &json!({ "command": command }),
+            &tree.root,
+            5,
+            &ToolRunContext::noop(),
+        )
+        .expect("legacy background command should be detached");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the legacy command waited for its descendant: {result}"
+        );
+        assert!(result.contains("Started background command"));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let child_pid = loop {
+            if let Ok(value) = std::fs::read_to_string(&pid_file) {
+                if let Ok(pid) = value.trim().parse::<u32>() {
+                    break pid;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "legacy child PID was not written by Start-Process"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        };
+        kill_process_tree(child_pid);
     }
 }
