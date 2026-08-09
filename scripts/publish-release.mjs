@@ -142,12 +142,15 @@ function bumpVersions(version, notes = "") {
   if (existsSync(webPkg)) setJsonVersion(webPkg, version);
   setLockfileVersion(join(ROOT, "website", "package-lock.json"), version);
 
-  // Fallback download labels on the marketing site (API latest release is preferred).
-  // Installers are hosted on Supabase Storage; the static /downloads files are
-  // excluded from Vercel deploys, so the fallback URLs point at Storage.
+  // Keep first-paint marketing-site links aligned with the versioned GitHub
+  // Release mirror. The API latest release is still preferred when available.
   const appJs = join(ROOT, "website", "js", "app.js");
   if (existsSync(appJs)) {
     let src = readFileSync(appJs, "utf8");
+    src = src.replace(
+      /https:\/\/github\.com\/chmoralla-code\/HORMACHUELOS\/releases\/download\/v\d+\.\d+\.\d+/g,
+      `https://github.com/chmoralla-code/HORMACHUELOS/releases/download/v${version}`,
+    );
     src = src.replace(
       /(const DESKTOP_DOWNLOADS = \{\s*version:\s*")[^"]+(")/,
       `$1${version}$2`,

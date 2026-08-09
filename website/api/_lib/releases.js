@@ -28,6 +28,7 @@ const BUILTIN_RELEASE_VERSION = "0.1.55";
 const BUILTIN_MSI_SHA256 = "3464736d5ed3d9d89bde62ebd71f5b4999f9303964e9f542f5531e127cd1675f";
 const BUILTIN_EXE_SHA256 = "9f0579384ba44e19cfaf86a8eb5923f83414cd0cdca43b6dfc1e1ee71191d222";
 const BUILTIN_RELEASE_NOTES = "All models can now view attached videos through chronological visual summaries. Added project video viewing, safer media limits, and reliability improvements for long agent runs.";
+const GITHUB_RELEASES_BASE = "https://github.com/chmoralla-code/HORMACHUELOS/releases/download";
 
 /**
  * A deployment-bundled release keeps the download/update path available even
@@ -36,10 +37,10 @@ const BUILTIN_RELEASE_NOTES = "All models can now view attached videos through c
  */
 export function builtinLatestRelease() {
   // This release is bundled with the website as a verified fallback. Normal
-  // admin-published releases still use Supabase Storage and win at the same
-  // version, but an unavailable publishing credential must not advertise a
-  // download URL that has not been uploaded yet.
-  const downloadBase = "https://hormachuelos.vercel.app/downloads";
+  // admin-published releases still win at the same version. GitHub Release
+  // assets keep the fallback independently downloadable when Storage is
+  // temporarily unavailable during a release.
+  const downloadBase = `${GITHUB_RELEASES_BASE}/v${BUILTIN_RELEASE_VERSION}`;
   return {
     id: `builtin-${BUILTIN_RELEASE_VERSION}`,
     version: BUILTIN_RELEASE_VERSION,

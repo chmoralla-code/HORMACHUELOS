@@ -11,22 +11,16 @@ const STORAGE_PAYMENT_REQUESTS = "horma:payment_requests";
 const STORAGE_DESKTOP_CODE = "horma:desktop_code";
 const STORAGE_DESKTOP_FLOW = "horma:desktop_flow";
 
-/**
- * Desktop installer files are uploaded to Supabase Storage by the release
- * pipeline (`npm run release`), which is also the source of truth for
- * /api/update. The static /downloads files are excluded from Vercel deploys
- * (see .vercelignore), so the fallback URLs must point at Supabase Storage to
- * stay downloadable.
- */
+/** Hosted marketing media, such as the product demo video. */
 const ASSET_BASE =
   "https://mketkzycxmtvgdbwzsvh.supabase.co/storage/v1/object/public/public-assets";
 
 /**
- * The current release is bundled with the production site as a verified
- * fallback. Keep the first paint download buttons on this same origin; the
- * update API can still replace them with a database-published asset URL.
+ * The verified GitHub Release mirror is the website's first-paint fallback.
+ * The update API can still replace it with an admin-published asset URL.
  */
-const RELEASE_DOWNLOAD_BASE = "/downloads";
+const RELEASE_DOWNLOAD_BASE =
+  "https://github.com/chmoralla-code/HORMACHUELOS/releases/download/v0.1.55";
 
 /** Desktop installer files for the current production release. */
 const DESKTOP_DOWNLOADS = {

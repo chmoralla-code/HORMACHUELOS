@@ -21,8 +21,8 @@ test("bundled release supersedes an older database release", () => {
   });
   assert.equal(release.version, builtin.version);
   assert.equal(release.msiUrl, builtin.msiUrl);
-  assert.match(release.msiUrl, /^https:\/\/hormachuelos\.vercel\.app\/downloads\/Hormachuelos_\d+\.\d+\.\d+_x64_en-US\.msi$/);
-  assert.match(release.exeUrl, /^https:\/\/hormachuelos\.vercel\.app\/downloads\/Hormachuelos_\d+\.\d+\.\d+_x64-setup\.exe$/);
+  assert.match(release.msiUrl, /^https:\/\/github\.com\/chmoralla-code\/HORMACHUELOS\/releases\/download\/v\d+\.\d+\.\d+\/Hormachuelos_\d+\.\d+\.\d+_x64_en-US\.msi$/);
+  assert.match(release.exeUrl, /^https:\/\/github\.com\/chmoralla-code\/HORMACHUELOS\/releases\/download\/v\d+\.\d+\.\d+\/Hormachuelos_\d+\.\d+\.\d+_x64-setup\.exe$/);
   assert.match(release.msiSha256, /^[a-f0-9]{64}$/);
   assert.match(release.exeSha256, /^[a-f0-9]{64}$/);
 });
