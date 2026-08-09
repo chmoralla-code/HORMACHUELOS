@@ -613,7 +613,15 @@ export class Chat {
 
   private isImageFile(file: File): boolean {
     if (file.type && file.type.startsWith("image/") && !file.type.includes("svg")) return true;
-    return /\.(png|jpe?g|gif|webp|bmp)$/i.test(file.name || "");
+    return this.isImagePath(file.name || "");
+  }
+
+  private isImagePath(path: string): boolean {
+    return /\.(png|jpe?g|gif|webp|bmp)$/i.test(path);
+  }
+
+  private isVideoPath(path: string): boolean {
+    return /\.(mp4|mov|m4v|webm|mkv|avi|wmv|flv|mpeg|mpg|3gp)$/i.test(path);
   }
 
   private pathFromClipboardText(raw: string): string | null {
@@ -630,46 +638,71 @@ export class Chat {
     // Windows absolute path or quoted path from Explorer.
     text = text.replace(/^"(.*)"$/, "$1");
     if (!/^[A-Za-z]:[\\/]/.test(text) && !text.startsWith("\\\\")) return null;
-    if (!/\.(png|jpe?g|gif|webp|bmp)$/i.test(text)) return null;
+    if (!this.isImagePath(text) && !this.isVideoPath(text)) return null;
     return text;
+  }
+
+  /**
+   * WebView clipboard File objects normally expose only bytes, but Windows
+   * Explorer can provide an absolute disk path as a non-standard property.
+   * Prefer it whenever available: native import keeps large videos off the
+   * JavaScript heap and applies the same type/size validation as + → Video.
+   */
+  private pathFromClipboardFile(file: File): string | null {
+    const candidate = (file as File & { path?: unknown }).path;
+    return typeof candidate === "string" ? this.pathFromClipboardText(candidate) : null;
   }
 
   private async handleComposerPaste(e: ClipboardEvent) {
     const cd = e.clipboardData;
     if (!cd) return;
 
-    const files: File[] = [];
+    const imageFiles: File[] = [];
+    const filePaths: string[] = [];
+    const inspectFile = (file: File) => {
+      const path = this.pathFromClipboardFile(file);
+      if (path) {
+        filePaths.push(path);
+      } else if (this.isImageFile(file)) {
+        imageFiles.push(file);
+      }
+    };
     if (cd.files?.length) {
       for (const file of Array.from(cd.files)) {
-        if (this.isImageFile(file)) files.push(file);
+        inspectFile(file);
       }
     }
-    if (!files.length && cd.items?.length) {
+    if (!cd.files?.length && cd.items?.length) {
       for (const item of Array.from(cd.items)) {
         if (item.kind !== "file") continue;
         const file = item.getAsFile();
-        if (file && this.isImageFile(file)) files.push(file);
+        if (file) inspectFile(file);
       }
     }
-    if (files.length) {
-      e.preventDefault();
-      await this.attachImageFiles(files);
-      return;
-    }
 
-    // Explorer "Copy" often puts a file path / URI, not image bytes.
+    // Explorer "Copy" often puts paths/URIs rather than media bytes. This
+    // handles one or many copied videos using the secure native import path.
     const uriList = cd.getData("text/uri-list") || "";
     const plain = cd.getData("text/plain") || "";
     const candidates = [...uriList.split(/\r?\n/), ...plain.split(/\r?\n/)]
       .map((line) => line.trim())
       .filter(Boolean);
-    const paths = [...new Set(candidates
-      .map((candidate) => this.pathFromClipboardText(candidate))
-      .filter((path): path is string => Boolean(path)))];
-    if (!paths.length) return;
+    const paths = [...new Set([
+      ...filePaths,
+      ...candidates
+        .map((candidate) => this.pathFromClipboardText(candidate))
+        .filter((path): path is string => Boolean(path)),
+    ])];
+    // Preserve the existing byte-paste behavior for images: some WebViews
+    // expose both image bytes and a matching URI for one clipboard item.
+    const imagePaths = imageFiles.length ? [] : paths.filter((path) => this.isImagePath(path));
+    const videoPaths = paths.filter((path) => this.isVideoPath(path));
+    if (!imageFiles.length && !imagePaths.length && !videoPaths.length) return;
 
     e.preventDefault();
-    await this.attachImagePaths(paths);
+    if (imageFiles.length) await this.attachImageFiles(imageFiles);
+    if (imagePaths.length) await this.attachImagePaths(imagePaths);
+    if (videoPaths.length) await this.attachVideoPaths(videoPaths);
   }
 
   private async handleComposerDrop(e: DragEvent) {
@@ -771,6 +804,21 @@ export class Chat {
     }
     this.addComposerAttachPreview(trimmed, file, "image");
     this.input?.focus();
+  }
+
+  /** Attach copied Explorer video paths using the same private importer as the picker. */
+  private async attachVideoPaths(paths: string[]) {
+    let attached = 0;
+    for (const path of paths) {
+      try {
+        const imported = await api.importVideoPath(path);
+        this.addComposerVideoAttachment(imported);
+        attached += 1;
+      } catch (err) {
+        console.error(err);
+      }
+    }
+    if (!attached) this.showAttachmentToast("Could not attach video files");
   }
 
   /** Attach a video by path. It is converted to a six-frame contact sheet only when sent. */

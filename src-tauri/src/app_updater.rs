@@ -9,6 +9,7 @@ use tokio::io::AsyncWriteExt;
 const MAX_BACKUP_BYTES: usize = 64 * 1024 * 1024;
 const MAX_INSTALLER_BYTES: u64 = 300 * 1024 * 1024;
 const MIN_INSTALLER_BYTES: u64 = 1024 * 1024;
+const MAX_DOWNLOAD_REDIRECTS: usize = 5;
 static UPDATE_RUNNING: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Serialize)]
@@ -163,28 +164,47 @@ fn validate_sha256(expected_sha256: &str) -> Result<String, String> {
     Ok(checksum)
 }
 
+fn is_strict_https_url(url: &reqwest::Url) -> bool {
+    url.scheme() == "https"
+        && url.port_or_known_default() == Some(443)
+        && url.username().is_empty()
+        && url.password().is_none()
+}
+
+fn lowercase_host(url: &reqwest::Url) -> String {
+    url.host_str().unwrap_or_default().to_ascii_lowercase()
+}
+
+fn is_owned_download_host(host: &str) -> bool {
+    matches!(
+        host,
+        "hormachuelos.vercel.app" | "mketkzycxmtvgdbwzsvh.supabase.co"
+    )
+}
+
+fn is_trusted_redirect_host(host: &str) -> bool {
+    is_owned_download_host(host)
+        || matches!(
+            host,
+            "github.com" | "objects.githubusercontent.com" | "release-assets.githubusercontent.com"
+        )
+}
+
+fn validate_redirect_url(url: &reqwest::Url) -> Result<(), String> {
+    if !is_strict_https_url(url) || !is_trusted_redirect_host(&lowercase_host(url)) {
+        return Err("The update download was redirected to an untrusted URL.".into());
+    }
+    Ok(())
+}
+
 fn validate_download_url(
     download_url: &str,
     version: &str,
 ) -> Result<(reqwest::Url, &'static str), String> {
     let url = reqwest::Url::parse(download_url)
         .map_err(|_| "The update download URL is invalid.".to_string())?;
-    if url.scheme() != "https"
-        || url.port_or_known_default() != Some(443)
-        || !url.username().is_empty()
-        || url.password().is_some()
-    {
+    if !is_strict_https_url(&url) {
         return Err("Updates must use a trusted HTTPS download URL.".into());
-    }
-    let trusted = matches!(
-        url.host_str()
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .as_str(),
-        "hormachuelos.vercel.app" | "mketkzycxmtvgdbwzsvh.supabase.co"
-    );
-    if !trusted {
-        return Err("The update download host is not trusted.".into());
     }
     let filename = url
         .path_segments()
@@ -192,13 +212,27 @@ fn validate_download_url(
         .unwrap_or_default();
     let exe_name = format!("Hormachuelos_{version}_x64-setup.exe");
     let msi_name = format!("Hormachuelos_{version}_x64_en-US.msi");
-    if filename.eq_ignore_ascii_case(&exe_name) {
-        Ok((url, "exe"))
+    let extension = if filename.eq_ignore_ascii_case(&exe_name) {
+        "exe"
     } else if filename.eq_ignore_ascii_case(&msi_name) {
-        Ok((url, "msi"))
+        "msi"
     } else {
-        Err("The update filename does not match the published version.".into())
+        return Err("The update filename does not match the published version.".into());
+    };
+
+    let host = lowercase_host(&url);
+    if is_owned_download_host(&host) {
+        return Ok((url, extension));
     }
+    if host == "github.com" {
+        let expected_path =
+            format!("/chmoralla-code/HORMACHUELOS/releases/download/v{version}/{filename}");
+        if url.path() == expected_path {
+            return Ok((url, extension));
+        }
+        return Err("The GitHub release URL does not match the published version.".into());
+    }
+    Err("The update download host is not trusted.".into())
 }
 
 fn has_expected_file_header(path: &Path, extension: &str) -> Result<bool, String> {
@@ -232,12 +266,62 @@ async fn download_installer(
         .build()
         .map_err(|error| format!("Could not initialize the update download: {error}"))?;
     emit_progress(app, "downloading", None, "Downloading the update…");
-    let mut response = client
-        .get(url)
-        .header(reqwest::header::ACCEPT, "application/octet-stream")
-        .send()
-        .await
-        .map_err(|error| format!("Could not download the update: {error}"))?;
+    let mut current_url = url;
+    let mut redirects = 0_usize;
+    let mut response = loop {
+        let response = client
+            .get(current_url.clone())
+            .header(reqwest::header::ACCEPT, "application/octet-stream")
+            .send()
+            .await
+            .map_err(|error| format!("Could not download the update: {error}"))?;
+        if !response.status().is_redirection() {
+            break response;
+        }
+        if redirects >= MAX_DOWNLOAD_REDIRECTS {
+            return Err("The update server redirected too many times.".into());
+        }
+        redirects = redirects.saturating_add(1);
+        if current_url.path().is_empty() {
+            return Err("The update server returned an invalid redirect.".into());
+        }
+        let redirect = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| {
+                "The update server returned a redirect without a location.".to_string()
+            })?;
+        let next_url = current_url
+            .join(redirect)
+            .map_err(|_| "The update server returned an invalid redirect URL.".to_string())?;
+        validate_redirect_url(&next_url)?;
+        if current_url == next_url {
+            return Err("The update server returned a redirect loop.".into());
+        }
+        current_url = next_url;
+        if current_url.path().is_empty() {
+            return Err("The update server returned an invalid redirect.".into());
+        }
+        if current_url.as_str().len() > 8_192 {
+            return Err("The update server returned an oversized redirect URL.".into());
+        }
+        if current_url.fragment().is_some() {
+            return Err("The update server returned an invalid redirect URL.".into());
+        }
+        if current_url.query_pairs().count() > 128 {
+            return Err("The update server returned an invalid redirect URL.".into());
+        }
+        if current_url.path_segments().is_none() {
+            return Err("The update server returned an invalid redirect URL.".into());
+        }
+        // GitHub release assets use a short-lived signed redirect. Follow a
+        // bounded chain only after every destination has passed the host and
+        // HTTPS checks above.
+        if current_url.path().len() > 4_096 {
+            return Err("The update server returned an invalid redirect URL.".into());
+        }
+    };
     if !response.status().is_success() {
         return Err(format!(
             "The update server returned HTTP {}.",
@@ -325,7 +409,8 @@ param(
   [Parameter(Mandatory = $true)][ValidatePattern('^\d+\.\d+\.\d+$')][string]$ExpectedVersion,
   [Parameter(Mandatory = $true)][ValidatePattern('^[a-fA-F0-9]{64}$')][string]$ExpectedSha256,
   [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$ReadyPath,
-  [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$LogPath
+  [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$LogPath,
+  [Parameter(Mandatory = $false)][string]$BootstrapPath = ''
 )
 
 Set-StrictMode -Version Latest
@@ -425,6 +510,9 @@ function Assert-InstallerHash {
 function Remove-UpdateHelperFiles {
   Remove-Item -LiteralPath $ReadyPath -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+  if (![string]::IsNullOrWhiteSpace($BootstrapPath)) {
+    Remove-Item -LiteralPath $BootstrapPath -Force -ErrorAction SilentlyContinue
+  }
 }
 
 function Open-PreviousHormachuelos {
@@ -537,6 +625,64 @@ exit 12
 }
 
 #[cfg(windows)]
+fn elevation_bootstrap_script() -> &'static str {
+    r#"
+param(
+  [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$HelperPath,
+  [Parameter(Mandatory = $true)][ValidateRange(1, 2147483647)][int]$ParentProcessId,
+  [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$InstallerPath,
+  [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$AppPath,
+  [Parameter(Mandatory = $true)][ValidatePattern('^\d+\.\d+\.\d+$')][string]$ExpectedVersion,
+  [Parameter(Mandatory = $true)][ValidatePattern('^[a-fA-F0-9]{64}$')][string]$ExpectedSha256,
+  [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$ReadyPath,
+  [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$LogPath,
+  [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$BootstrapPath
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+function Write-BootstrapLog {
+  param([Parameter(Mandatory = $true)][string]$Message)
+  try {
+    $line = '{0} {1}' -f [DateTimeOffset]::Now.ToString('o'), $Message
+    Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8
+  } catch {}
+}
+
+function Quote-WindowsArgument {
+  param([Parameter(Mandatory = $true)][string]$Value)
+  # Windows file paths cannot contain a double quote, so wrapping the value is
+  # sufficient and preserves spaces in the cache and Program Files paths.
+  return '"' + $Value + '"'
+}
+
+try {
+  $arguments = @(
+    '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+    '-WindowStyle', 'Hidden', '-File', (Quote-WindowsArgument $HelperPath),
+    '-ParentProcessId', $ParentProcessId.ToString(),
+    '-InstallerPath', (Quote-WindowsArgument $InstallerPath),
+    '-AppPath', (Quote-WindowsArgument $AppPath),
+    '-ExpectedVersion', $ExpectedVersion,
+    '-ExpectedSha256', $ExpectedSha256,
+    '-ReadyPath', (Quote-WindowsArgument $ReadyPath),
+    '-LogPath', (Quote-WindowsArgument $LogPath),
+    '-BootstrapPath', (Quote-WindowsArgument $BootstrapPath)
+  ) -join ' '
+  Write-BootstrapLog 'Requesting administrator approval for the Windows installer.'
+  $child = Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -ArgumentList $arguments -PassThru -Wait
+  exit [int]$child.ExitCode
+} catch {
+  Write-BootstrapLog "Administrator approval was not granted: $($_.Exception.Message)"
+  Remove-Item -LiteralPath $ReadyPath -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $BootstrapPath -Force -ErrorAction SilentlyContinue
+  exit 20
+}
+"#
+}
+
+#[cfg(windows)]
 fn update_helper_log_path() -> Result<PathBuf, String> {
     let dirs = directories::ProjectDirs::from("com", "ai-forge", "AI-Forge")
         .ok_or_else(|| "Could not locate the Hormachuelos update log folder.".to_string())?;
@@ -549,6 +695,7 @@ fn update_helper_log_path() -> Result<PathBuf, String> {
 #[cfg(windows)]
 struct InstallHelperCommand<'a> {
     helper_path: &'a Path,
+    bootstrap_path: &'a Path,
     installer: &'a Path,
     current_exe: &'a Path,
     expected_version: &'a str,
@@ -559,7 +706,7 @@ struct InstallHelperCommand<'a> {
 }
 
 #[cfg(windows)]
-fn install_helper_command(options: InstallHelperCommand<'_>) -> std::process::Command {
+fn install_helper_command(options: &InstallHelperCommand<'_>) -> std::process::Command {
     use std::os::windows::process::CommandExt;
 
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -590,8 +737,58 @@ fn install_helper_command(options: InstallHelperCommand<'_>) -> std::process::Co
         .arg(options.ready_path)
         .arg("-LogPath")
         .arg(options.log_path)
+        .arg("-BootstrapPath")
+        .arg(options.bootstrap_path)
         .creation_flags(CREATE_NO_WINDOW);
     command
+}
+
+#[cfg(windows)]
+fn elevation_bootstrap_command(options: &InstallHelperCommand<'_>) -> std::process::Command {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut command = std::process::Command::new("powershell.exe");
+    command
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-File",
+        ])
+        .arg(options.bootstrap_path)
+        .arg("-HelperPath")
+        .arg(options.helper_path)
+        .arg("-ParentProcessId")
+        .arg(options.parent_id.to_string())
+        .arg("-InstallerPath")
+        .arg(options.installer)
+        .arg("-AppPath")
+        .arg(options.current_exe)
+        .arg("-ExpectedVersion")
+        .arg(options.expected_version)
+        .arg("-ExpectedSha256")
+        .arg(options.expected_sha256)
+        .arg("-ReadyPath")
+        .arg(options.ready_path)
+        .arg("-LogPath")
+        .arg(options.log_path)
+        .arg("-BootstrapPath")
+        .arg(options.bootstrap_path)
+        .creation_flags(CREATE_NO_WINDOW);
+    command
+}
+
+#[cfg(windows)]
+fn installer_requires_administrator_elevation(installer: &Path) -> bool {
+    installer
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("msi"))
 }
 
 #[cfg(windows)]
@@ -606,14 +803,22 @@ async fn launch_install_helper(
         .ok_or_else(|| "The downloaded installer has no parent folder.".to_string())?;
     let process_id = std::process::id();
     let helper_path = cache_directory.join(format!("update-helper-{process_id}.ps1"));
+    let bootstrap_path = cache_directory.join(format!("update-elevation-{process_id}.ps1"));
     let ready_path = cache_directory.join(format!("update-helper-{process_id}.ready"));
     let log_path = update_helper_log_path()?;
     let _ = std::fs::remove_file(&ready_path);
     std::fs::write(&helper_path, install_helper_script())
         .map_err(|error| format!("Could not prepare the internal update helper: {error}"))?;
+    if let Err(error) = std::fs::write(&bootstrap_path, elevation_bootstrap_script()) {
+        let _ = std::fs::remove_file(&helper_path);
+        return Err(format!(
+            "Could not prepare the administrator approval helper: {error}"
+        ));
+    }
 
-    let mut command = install_helper_command(InstallHelperCommand {
+    let options = InstallHelperCommand {
         helper_path: &helper_path,
+        bootstrap_path: &bootstrap_path,
         installer,
         current_exe,
         expected_version,
@@ -621,12 +826,19 @@ async fn launch_install_helper(
         ready_path: &ready_path,
         log_path: &log_path,
         parent_id: process_id,
-    });
+    };
+    let requires_elevation = installer_requires_administrator_elevation(installer);
+    let mut command = if requires_elevation {
+        elevation_bootstrap_command(&options)
+    } else {
+        install_helper_command(&options)
+    };
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
             let _ = std::fs::remove_file(&ready_path);
             let _ = std::fs::remove_file(&helper_path);
+            let _ = std::fs::remove_file(&bootstrap_path);
             return Err(format!(
                 "Could not start the internal update helper: {error}"
             ));
@@ -634,7 +846,12 @@ async fn launch_install_helper(
     };
 
     let expected_ready = format!("ready:{expected_version}");
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+    // A Windows UAC consent prompt is intentionally shown before the app
+    // exits. Give the user enough time to review and approve it instead of
+    // treating a normal approval delay as an updater failure.
+    let helper_startup_timeout = if requires_elevation { 120 } else { 8 };
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_secs(helper_startup_timeout);
     loop {
         if let Ok(value) = std::fs::read_to_string(&ready_path) {
             if value.trim() == expected_ready {
@@ -644,6 +861,7 @@ async fn launch_install_helper(
                 })? {
                     let _ = std::fs::remove_file(&ready_path);
                     let _ = std::fs::remove_file(&helper_path);
+                    let _ = std::fs::remove_file(&bootstrap_path);
                     return Err(format!(
                         "The update helper stopped before the app could close (exit code {}). Hormachuelos stayed open. Details: {}",
                         status.code().unwrap_or(-1),
@@ -660,6 +878,13 @@ async fn launch_install_helper(
         {
             let _ = std::fs::remove_file(&ready_path);
             let _ = std::fs::remove_file(&helper_path);
+            let _ = std::fs::remove_file(&bootstrap_path);
+            if status.code() == Some(20) {
+                return Err(
+                    "Windows administrator approval was not granted. The update was cancelled and Hormachuelos stayed open."
+                        .into(),
+                );
+            }
             return Err(format!(
                 "The update helper could not initialize (exit code {}). Hormachuelos stayed open. Details: {}",
                 status.code().unwrap_or(-1),
@@ -671,6 +896,7 @@ async fn launch_install_helper(
             let _ = child.wait();
             let _ = std::fs::remove_file(&ready_path);
             let _ = std::fs::remove_file(&helper_path);
+            let _ = std::fs::remove_file(&bootstrap_path);
             return Err(format!(
                 "The update helper did not become ready. Hormachuelos stayed open. Details: {}",
                 log_path.display()
@@ -719,7 +945,12 @@ async fn install_app_update_inner(
     );
     let current_exe = std::env::current_exe()
         .map_err(|error| format!("Could not locate the running Hormachuelos app: {error}"))?;
-    emit_progress(app, "installing", None, "Starting the internal installer…");
+    let installation_message = if extension == "msi" {
+        "Waiting for Windows administrator approval…"
+    } else {
+        "Starting the internal installer…"
+    };
+    emit_progress(app, "installing", None, installation_message);
     launch_install_helper(&installer, &current_exe, &version, &sha256).await?;
     state.stop_all_runs();
     emit_progress(
@@ -788,6 +1019,11 @@ mod tests {
         )
         .is_ok());
         assert!(validate_download_url(
+            "https://github.com/chmoralla-code/HORMACHUELOS/releases/download/v0.1.9/Hormachuelos_0.1.9_x64-setup.exe",
+            "0.1.9"
+        )
+        .is_ok());
+        assert!(validate_download_url(
             "http://hormachuelos.vercel.app/downloads/Hormachuelos_0.1.9_x64-setup.exe",
             "0.1.9"
         )
@@ -799,6 +1035,11 @@ mod tests {
         .is_err());
         assert!(validate_download_url(
             "https://hormachuelos.vercel.app/downloads/Hormachuelos_0.1.8_x64-setup.exe",
+            "0.1.9"
+        )
+        .is_err());
+        assert!(validate_download_url(
+            "https://github.com/example/HORMACHUELOS/releases/download/v0.1.9/Hormachuelos_0.1.9_x64-setup.exe",
             "0.1.9"
         )
         .is_err());
@@ -833,15 +1074,32 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn msi_updates_request_administrator_approval_before_closing_the_app() {
+        let bootstrap = super::elevation_bootstrap_script();
+        assert!(bootstrap.contains("-Verb RunAs"));
+        assert!(bootstrap.contains("-PassThru -Wait"));
+        assert!(bootstrap.contains("Administrator approval was not granted"));
+        assert!(super::installer_requires_administrator_elevation(
+            std::path::Path::new(r"C:\Temp\Hormachuelos.msi")
+        ));
+        assert!(!super::installer_requires_administrator_elevation(
+            std::path::Path::new(r"C:\Temp\Hormachuelos.exe")
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn update_helper_is_started_as_a_real_powershell_file() {
         let helper = std::path::Path::new(r"C:\Temp Folder\update-helper.ps1");
         let installer = std::path::Path::new(r"C:\Temp Folder\Hormachuelos update.exe");
         let app = std::path::Path::new(r"C:\Program Files\Hormachuelos\ai-forge.exe");
+        let bootstrap = std::path::Path::new(r"C:\Temp Folder\update-elevation.ps1");
         let ready = std::path::Path::new(r"C:\Temp Folder\update.ready");
         let log = std::path::Path::new(r"C:\Temp Folder\update.log");
         let sha256 = "a".repeat(64);
-        let command = super::install_helper_command(super::InstallHelperCommand {
+        let options = super::InstallHelperCommand {
             helper_path: helper,
+            bootstrap_path: bootstrap,
             installer,
             current_exe: app,
             expected_version: "0.1.12",
@@ -849,7 +1107,8 @@ mod tests {
             ready_path: ready,
             log_path: log,
             parent_id: 4321,
-        });
+        };
+        let command = super::install_helper_command(&options);
         let args: Vec<String> = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -877,6 +1136,23 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|pair| pair == ["-ExpectedSha256", sha256.as_str()]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-BootstrapPath", bootstrap.to_string_lossy().as_ref()]));
+
+        let elevated = super::elevation_bootstrap_command(&options);
+        let elevated_args: Vec<String> = elevated
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let elevated_file_index = elevated_args.iter().position(|arg| arg == "-File").unwrap();
+        assert_eq!(
+            elevated_args[elevated_file_index + 1],
+            bootstrap.to_string_lossy()
+        );
+        assert!(elevated_args
+            .windows(2)
+            .any(|pair| pair == ["-HelperPath", helper.to_string_lossy().as_ref()]));
     }
 
     #[cfg(windows)]

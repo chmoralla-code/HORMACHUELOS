@@ -801,6 +801,43 @@ test("video picker attaches video chips before frame sampling", async ({ page })
   expect(await page.evaluate(() => window.__HORMA_LAST_DIALOG_OPTIONS__?.multiple)).toBe(true);
 });
 
+test("pastes every copied video from Explorer into the composer", async ({ page }) => {
+  await installMock(page);
+  await page.route("https://hormachuelos.vercel.app/api/update?*", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ updateAvailable: false, forceUpdate: false, currentVersion: "0.1.5", latest: null }),
+    }),
+  );
+  await page.route("https://hormachuelos.vercel.app/api/auth/me", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ ok: true, user: { email: "copied-videos@example.com", plan: "pro" } }),
+    }),
+  );
+  await page.goto(APP, { waitUntil: "networkidle" });
+  await openProjectViaUI(page);
+
+  await page.evaluate(() => {
+    const input = document.querySelector("#forge-prompt");
+    if (!(input instanceof HTMLTextAreaElement)) throw new Error("Composer input not found");
+    const clipboard = new DataTransfer();
+    clipboard.setData(
+      "text/uri-list",
+      "file:///C:/fixtures/copied-demo-one.mp4\r\nfile:///C:/fixtures/copied-demo-two.webm",
+    );
+    input.dispatchEvent(
+      new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: clipboard }),
+    );
+  });
+
+  await expect(page.locator(".composer-attach-video")).toHaveCount(2);
+  await expect(page.locator(".composer-attach-video").first()).toContainText("copied-demo-one.mp4");
+  await expect(page.locator(".composer-attach-video").last()).toContainText("copied-demo-two.webm");
+});
+
 test("local preview launch completes instead of remaining as a running shell command", async ({ page }) => {
   await page.addInitScript(() => {
     window.__HORMA_DEV_SERVER_FIXTURE__ = true;

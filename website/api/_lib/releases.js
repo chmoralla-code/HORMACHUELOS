@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.55";
-const BUILTIN_MSI_SHA256 = "3464736d5ed3d9d89bde62ebd71f5b4999f9303964e9f542f5531e127cd1675f";
-const BUILTIN_EXE_SHA256 = "9f0579384ba44e19cfaf86a8eb5923f83414cd0cdca43b6dfc1e1ee71191d222";
-const BUILTIN_RELEASE_NOTES = "All models can now view attached videos through chronological visual summaries. Added project video viewing, safer media limits, and reliability improvements for long agent runs.";
+const BUILTIN_RELEASE_VERSION = "0.1.56";
+const BUILTIN_MSI_SHA256 = "b0e23e414617d6b6b77a05aa954da7ab038ada62daaa6a18785d1605ff551eca";
+const BUILTIN_EXE_SHA256 = "9278a033b2c56f178900b189ea8a48a8e2f62cf01bcc72c4629e3ca58c281515";
+const BUILTIN_RELEASE_NOTES = "Paste copied video files from Windows Explorer directly into chat, including multiple files at once. Video attachments are imported privately and sampled for every model. Improved Windows installer updates with administrator approval before restart.";
 const GITHUB_RELEASES_BASE = "https://github.com/chmoralla-code/HORMACHUELOS/releases/download";
 
 /**

@@ -39,3 +39,21 @@ test("the in-app updater downloads once and automatically restarts", async ({ pa
   const fatal = consoleErrors.filter((entry) => !/favicon|vite/i.test(entry));
   expect(fatal, fatal.join("\n")).toEqual([]);
 });
+
+test("the updater keeps the app open and explains a Windows approval failure", async ({ page }) => {
+  await page.goto(`${APP}/update-harness.html`, { waitUntil: "networkidle" });
+  await page.evaluate(() => {
+    window.__installError = "Windows administrator approval was not granted.";
+  });
+
+  await page.getByRole("button", { name: /Update available: v0\.1\.5/i }).click();
+  const dialog = page.getByRole("dialog", { name: "Update available" });
+  const install = dialog.getByRole("button", { name: "Download v0.1.5 and restart" });
+  await install.click();
+
+  await expect(dialog.locator(".update-install-status")).toHaveText(
+    "Update failed: Windows administrator approval was not granted.",
+  );
+  await expect(install).toBeEnabled();
+  await expect(page.locator("body")).not.toHaveAttribute("data-installed-version", /.+/);
+});

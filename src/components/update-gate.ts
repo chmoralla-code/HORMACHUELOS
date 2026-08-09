@@ -112,6 +112,18 @@ function progressMessage(event: AppUpdateProgress): string {
   return `${String(event.message || fallback).replace(/…$/, "")}…`;
 }
 
+function updateFailureMessage(error: unknown): string {
+  const raw = error instanceof Error
+    ? error.message
+    : typeof error === "string"
+      ? error
+      : error && typeof error === "object" && "message" in error
+        ? String((error as { message?: unknown }).message || "")
+        : "";
+  const message = raw.replace(/\s+/g, " ").trim().slice(0, 420);
+  return message ? `Update failed: ${message}` : "Update failed. Please try again.";
+}
+
 function buildVersionSummary(currentVersion: string, latestVersion: string): HTMLElement {
   const summary = el("div", {
     class: "update-version-summary",
@@ -319,9 +331,7 @@ export function showUpdateDialog(options: UpdateInstallOptions = {}): HTMLElemen
           status.hidden = false;
           status.classList.add("is-error");
           status.dataset.phase = "error";
-          status.textContent = error instanceof Error
-            ? `Update failed: ${error.message}`
-            : "Update failed. Please try again.";
+          status.textContent = updateFailureMessage(error);
           installBtn.focus({ preventScroll: true });
         });
       });
@@ -408,9 +418,7 @@ export function showUpdateGate(
       updateBtn.disabled = false;
       status.classList.add("is-error");
       status.dataset.phase = "error";
-      status.textContent = error instanceof Error
-        ? `Update failed: ${error.message}`
-        : "Update failed. Please try again.";
+      status.textContent = updateFailureMessage(error);
       updateBtn.focus({ preventScroll: true });
     });
   });

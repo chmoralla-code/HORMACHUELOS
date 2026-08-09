@@ -24,6 +24,7 @@
       import { checkDesktopUpdate, showUpdateDialog } from "./components/update-gate.ts";
 
       window.__updateMode = "available";
+      window.__installError = "";
       api.appVersion = async () => "0.1.4";
       api.appInstallKind = async () => "msi";
       api.openExternalUrl = async (url) => {
@@ -33,6 +34,7 @@
         document.body.dataset.updateBackup = stateJson;
       };
       api.installAppUpdate = async (downloadUrl, version, sha256) => {
+        if (window.__installError) throw window.__installError;
         document.body.dataset.installedUrl = downloadUrl;
         document.body.dataset.installedVersion = version;
         document.body.dataset.installedSha256 = sha256;
