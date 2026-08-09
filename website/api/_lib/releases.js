@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.52";
-const BUILTIN_MSI_SHA256 = "3e5e5d284703d43a8f66494b60df6a7fd4fb8fbdb60f521578f50b4c08c312e1";
-const BUILTIN_EXE_SHA256 = "8b01e6db950b2b604d091ac5a81ac490215c090b11540dcf840fe952c9e32f63";
-const BUILTIN_RELEASE_NOTES = "Client Success Center with persistent project outcomes, build-to-proof workflows, QA readiness, and tailored client delivery packs. Design mode now selects and captures exact live-preview features for AI edits.";
+const BUILTIN_RELEASE_VERSION = "0.1.53";
+const BUILTIN_MSI_SHA256 = "bd240e7c6fda2b9dffa7a8a539cda549f0465dca004dc4d3f65da0e5102deb25";
+const BUILTIN_EXE_SHA256 = "ea61fe0bb3df7f47e9509b753f54cc745b6cfdd8beeb9c9684ebba9856976310";
+const BUILTIN_RELEASE_NOTES = "Cleaner project and session sidebar, better build summaries, folder-free Quick Sessions, and reliability improvements for long tasks and updates.";
 
 /**
  * A deployment-bundled release keeps the download/update path available even

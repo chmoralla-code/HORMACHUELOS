@@ -30,6 +30,8 @@ export class Sidebar {
   onOpenProject: () => void;
   onSelectProject: (path: string) => void;
   onAddAnotherProject: () => void;
+  /** Open Hormachuelos' app-managed workspace (no folder picker required). */
+  onOpenQuickSessions: () => void;
   onOpenSettings: () => void;
   /** Check the hosted release feed and offer the latest installer. */
   onCheckForUpdates: () => void;
@@ -50,6 +52,8 @@ export class Sidebar {
   private projectPath: string | null = null;
   private projectWorkspaces: ProjectWorkspace[] = [];
   private activeProjectPath: string | null = null;
+  private quickSessionWorkspacePath: string | null = null;
+  private quickSessionsActive = false;
   private runningProjectPaths = new Set<string>();
   private usageMeta: UsageDisplayMeta = {};
   private usageRoot: HTMLElement | null = null;
@@ -64,6 +68,7 @@ export class Sidebar {
     onOpenProject: () => void;
     onSelectProject: (path: string) => void;
     onAddAnotherProject: () => void;
+    onOpenQuickSessions: () => void;
     onOpenSettings: () => void;
     onCheckForUpdates: () => void;
     onNewSession: () => void;
@@ -80,6 +85,7 @@ export class Sidebar {
     this.onOpenProject = handlers.onOpenProject;
     this.onSelectProject = handlers.onSelectProject;
     this.onAddAnotherProject = handlers.onAddAnotherProject;
+    this.onOpenQuickSessions = handlers.onOpenQuickSessions;
     this.onOpenSettings = handlers.onOpenSettings;
     this.onCheckForUpdates = handlers.onCheckForUpdates;
     this.onNewSession = handlers.onNewSession;
@@ -270,9 +276,17 @@ export class Sidebar {
   }
 
   /** Keep project path in sync (UI lives on the composer chip, not the left drawer). */
-  setProject(path: string | null) {
+  setProject(path: string | null, options: { quickSession?: boolean } = {}) {
     this.projectPath = path;
-    this.activeProjectPath = path;
+    this.quickSessionsActive = options.quickSession === true;
+    this.activeProjectPath = this.quickSessionsActive ? null : path;
+  }
+
+  /** Keep the folder-free Quick Sessions shortcut visible beside real projects. */
+  setQuickSessionWorkspace(path: string | null, active = false) {
+    this.quickSessionWorkspacePath = path;
+    this.quickSessionsActive = active;
+    if (active) this.activeProjectPath = null;
   }
 
   /** Render an active workspace plus every other project already open in the app. */
@@ -302,16 +316,36 @@ export class Sidebar {
         title: "Add another project",
         "aria-label": "Add another project",
       },
-      ["+ Add another project"],
+      ["+ Add project"],
     ) as HTMLButtonElement;
     add.addEventListener("click", () => this.onAddAnotherProject());
     header.appendChild(add);
     section.appendChild(header);
 
     const list = el("div", { class: "sb-projects-list", role: "list", "aria-label": "Open projects" });
-    if (this.projectWorkspaces.length === 0) {
+    if (this.quickSessionWorkspacePath) {
+      const quick = el(
+        "button",
+        {
+          class: `sb-project-workspace sb-quick-session${this.quickSessionsActive ? " active" : ""}`,
+          type: "button",
+          title: this.quickSessionsActive
+            ? "Quick sessions are active — no folder was selected"
+            : "Open Quick sessions — no folder is needed",
+          "aria-current": this.quickSessionsActive ? "page" : "false",
+        },
+      ) as HTMLButtonElement;
+      quick.appendChild(el("span", { class: "sb-project-mark", "aria-hidden": "true" }, ["Q"]));
+      const copy = el("span", { class: "sb-project-copy" });
+      copy.appendChild(el("strong", {}, ["Quick sessions"]));
+      copy.appendChild(el("span", {}, [this.quickSessionsActive ? "No folder needed" : "App-managed workspace"]));
+      quick.appendChild(copy);
+      quick.addEventListener("click", () => this.onOpenQuickSessions());
+      list.appendChild(quick);
+    }
+    if (this.projectWorkspaces.length === 0 && !this.quickSessionWorkspacePath) {
       list.appendChild(el("div", { class: "sb-project-empty" }, ["Create or open a project to keep it here."]));
-    } else {
+    } else if (this.projectWorkspaces.length > 0) {
       const activeKey = String(this.activeProjectPath || "").replace(/[\\/]+$/, "").toLocaleLowerCase();
       for (const workspace of this.projectWorkspaces) {
         const key = workspace.path.replace(/[\\/]+$/, "").toLocaleLowerCase();

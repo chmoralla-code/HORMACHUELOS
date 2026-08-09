@@ -422,17 +422,6 @@ function Assert-InstallerHash {
   }
 }
 
-function Test-HormachuelosRunning {
-  param([Parameter(Mandatory = $true)][string]$Path)
-  try { $expectedPath = [IO.Path]::GetFullPath($Path) } catch { return $false }
-  foreach ($process in @(Get-Process -Name 'ai-forge' -ErrorAction SilentlyContinue)) {
-    try {
-      if ([IO.Path]::GetFullPath($process.Path) -ieq $expectedPath) { return $true }
-    } catch {}
-  }
-  return $false
-}
-
 function Remove-UpdateHelperFiles {
   Remove-Item -LiteralPath $ReadyPath -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
@@ -496,17 +485,16 @@ try {
 $exitCode = -1
 try {
   $extension = [IO.Path]::GetExtension($InstallerPath).ToLowerInvariant()
-  Write-UpdateLog "Starting $extension installer."
+  Write-UpdateLog "Installing $extension update silently."
   if ($extension -eq '.msi') {
     $quotedInstaller = '"' + $InstallerPath + '"'
     $result = Start-Process -FilePath 'msiexec.exe' -ArgumentList @(
-      '/i', $quotedInstaller, '/passive', '/norestart',
-      'AUTOLAUNCHAPP=True', 'LAUNCHAPPARGS=""'
-    ) -Wait -PassThru
+      '/i', $quotedInstaller, '/quiet', '/norestart'
+    ) -WindowStyle Hidden -Wait -PassThru
   } elseif ($extension -eq '.exe') {
     $result = Start-Process -FilePath $InstallerPath -ArgumentList @(
-      '/P', '/UPDATE', '/R'
-    ) -Wait -PassThru
+      '/S', '/UPDATE'
+    ) -WindowStyle Hidden -Wait -PassThru
   } else {
     throw "Unsupported installer type: $extension"
   }
@@ -523,24 +511,14 @@ if ($exitCode -in @(0, 1641, 3010)) {
   $launchPath = Resolve-HormachuelosPath -RequireExpectedVersion $true
   if (![string]::IsNullOrWhiteSpace($launchPath)) {
     try {
-      $nativeRestarted = $false
-      for ($attempt = 0; $attempt -lt 20; $attempt += 1) {
-        if (Test-HormachuelosRunning -Path $launchPath) {
-          $nativeRestarted = $true
-          break
-        }
-        Start-Sleep -Milliseconds 250
+      # The silent installer never launches the app. Restart it exactly once
+      # here so the user only experiences the original app closing and opening.
+      $startedProcess = Start-Process -FilePath $launchPath -PassThru
+      Start-Sleep -Milliseconds 500
+      if ($startedProcess.HasExited) {
+        throw "Updated app exited immediately with code $($startedProcess.ExitCode)."
       }
-      if ($nativeRestarted) {
-        Write-UpdateLog "Installer opened updated app: $launchPath"
-      } else {
-        $startedProcess = Start-Process -FilePath $launchPath -PassThru
-        Start-Sleep -Milliseconds 500
-        if ($startedProcess.HasExited) {
-          throw "Updated app exited immediately with code $($startedProcess.ExitCode)."
-        }
-        Write-UpdateLog "Helper opened updated app: $launchPath"
-      }
+      Write-UpdateLog "Restarted updated app: $launchPath"
       Remove-Item -LiteralPath $InstallerPath -Force -ErrorAction SilentlyContinue
       Remove-UpdateHelperFiles
       exit 0
@@ -828,7 +806,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn update_helper_uses_named_parameters_and_validates_the_restarted_version() {
+    fn update_helper_runs_silently_and_restarts_the_app_once() {
         let script = super::install_helper_script();
         assert!(script.contains("param("));
         assert!(!script.contains("$args["));
@@ -836,9 +814,20 @@ mod tests {
         assert!(script.contains("ready:$ExpectedVersion"));
         assert!(script.contains("Assert-InstallerHash"));
         assert!(script.contains("Resolve-HormachuelosPath -RequireExpectedVersion $true"));
-        assert!(script.contains("'/P', '/UPDATE', '/R'"));
-        assert!(script.contains("'AUTOLAUNCHAPP=True'"));
+        assert!(script.contains("'/i', $quotedInstaller, '/quiet', '/norestart'"));
+        assert!(script.contains("'/S', '/UPDATE'"));
+        assert!(script.contains("-WindowStyle Hidden"));
+        assert!(!script.contains("'/passive'"));
+        assert!(!script.contains("'AUTOLAUNCHAPP=True'"));
+        assert!(!script.contains("'/R'"));
+        assert!(!script.contains("$nativeRestarted"));
         assert!(script.contains("Start-Process -FilePath $launchPath"));
+        assert_eq!(
+            script
+                .matches("Start-Process -FilePath $launchPath")
+                .count(),
+            1
+        );
         assert!(script.contains("update failure"));
     }
 
@@ -867,6 +856,8 @@ mod tests {
             .collect();
 
         assert_eq!(command.get_program(), "powershell.exe");
+        assert!(args.iter().any(|arg| arg == "-WindowStyle"));
+        assert!(args.iter().any(|arg| arg == "Hidden"));
         assert!(args.iter().any(|arg| arg == "-File"));
         assert!(!args.iter().any(|arg| arg == "-Command"));
         let file_index = args.iter().position(|arg| arg == "-File").unwrap();

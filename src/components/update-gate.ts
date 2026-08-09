@@ -95,10 +95,21 @@ function progressMessage(event: AppUpdateProgress): string {
   const percent = Number.isFinite(event.percent) && Number(event.percent) >= 0
     ? Math.min(100, Math.round(Number(event.percent)))
     : null;
+  // Keep the update experience intentionally small: a download indicator and
+  // then one automatic restart. The native updater still verifies the package
+  // and performs the replacement silently, but that does not need a separate
+  // user-facing installation step.
+  if (event.phase === "downloading") {
+    return `Downloading update${percent === null ? "" : ` ${percent}%`}…`;
+  }
+  if (event.phase === "preparing" || event.phase === "verifying") {
+    return "Preparing update…";
+  }
+  if (event.phase === "installing" || event.phase === "restarting") {
+    return "Restarting Hormachuelos…";
+  }
   const fallback = `${event.phase[0].toUpperCase()}${event.phase.slice(1)}`;
-  const message = String(event.message || fallback).replace(/…$/, "");
-  const showPercent = percent !== null && !(event.phase === "preparing" && percent === 0);
-  return `${message}${showPercent ? ` ${percent}%` : ""}…`;
+  return `${String(event.message || fallback).replace(/…$/, "")}…`;
 }
 
 function buildVersionSummary(currentVersion: string, latestVersion: string): HTMLElement {
@@ -152,11 +163,11 @@ async function installInsideApp(
     (event) => onProgress(progressMessage(event), event),
   ).catch(() => null);
   try {
-    onProgress("Downloading the update inside Hormachuelos…");
+    onProgress("Preparing update…");
     await api.installAppUpdate(installer.url, release.version, installer.sha256);
-    onProgress("Installer is ready. Hormachuelos will restart automatically…", {
+    onProgress("Restarting Hormachuelos…", {
       phase: "restarting",
-      message: "Installer is ready. Hormachuelos will restart automatically",
+      message: "Restarting Hormachuelos",
     });
   } finally {
     unlisten?.();
@@ -271,7 +282,7 @@ export function showUpdateDialog(options: UpdateInstallOptions = {}): HTMLElemen
       content.appendChild(buildReleaseNotes(latest));
 
       const dataHint = el("p", { class: "auth-gate-hint update-data-hint" }, [
-        "Sessions, projects, settings, and account data stay on this device.",
+        "Your sessions, projects, settings, and account data stay on this device.",
       ]);
       content.appendChild(dataHint);
       const status = el("div", {
@@ -283,7 +294,7 @@ export function showUpdateDialog(options: UpdateInstallOptions = {}): HTMLElemen
       content.appendChild(status);
 
       const installBtn = el("button", { class: "btn primary", type: "button" }, [
-        `Install v${latest.version} and restart`,
+        `Download v${latest.version} and restart`,
       ]) as HTMLButtonElement;
       const laterBtn = el("button", { class: "btn", type: "button" }, ["Not now"]);
       laterBtn.addEventListener("click", close);
@@ -369,13 +380,13 @@ export function showUpdateGate(
   card.appendChild(buildReleaseNotes(latest));
   card.appendChild(
     el("p", { class: "auth-gate-hint update-data-hint" }, [
-      "Sessions, projects, settings, and account data stay on this device.",
+      "Your sessions, projects, settings, and account data stay on this device.",
     ]),
   );
 
   const actions = el("div", { style: "display:flex;flex-direction:column;gap:8px;margin-top:8px" });
   const updateBtn = el("button", { class: "btn primary", type: "button" }, [
-    `Install v${latest.version} and restart`,
+    `Download v${latest.version} and restart`,
   ]) as HTMLButtonElement;
   const status = el("div", {
     class: "update-install-status",
@@ -408,7 +419,7 @@ export function showUpdateGate(
   card.appendChild(actions);
   card.appendChild(
     el("p", { class: "auth-gate-hint" }, [
-      "Hormachuelos installs this update internally and restarts automatically when it is ready.",
+      "The update downloads here, then Hormachuelos restarts automatically.",
     ]),
   );
   overlay.appendChild(card);

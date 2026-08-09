@@ -998,13 +998,13 @@ pub fn schemas(computer_use_enabled: bool) -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "done",
-                "description": "Call when the task is fully complete. Write a short, plain summary — simple sentences, no hype or markdown.",
+                "description": "Call when the task is fully complete. Write a compact delivery summary with distinct fields — simple sentences, no hype or markdown.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "summary": { "type": "string", "description": "One plain sentence recap." },
+                        "summary": { "type": "string", "description": "Exactly one plain result sentence. Do not repeat it in the other fields." },
                         "title": { "type": "string", "description": "Short name only (e.g. Snake game, Portfolio site)." },
-                        "description": { "type": "string", "description": "1–2 simple sentences: what it is and how to open or use it." },
+                        "description": { "type": "string", "description": "Optional: one or two additional details that do not repeat summary or features. Use an empty string if there are none." },
                         "files": {
                             "type": "array",
                             "items": { "type": "string" },
@@ -1018,7 +1018,7 @@ pub fn schemas(computer_use_enabled: bool) -> Vec<Value> {
                         "features": {
                             "type": "array",
                             "items": { "type": "string" },
-                            "description": "Up to 5 short phrases. No marketing language."
+                            "description": "Up to 5 short, distinct facts or verification results not already stated in summary or description. No marketing language."
                         }
                     },
                     "required": ["summary", "title", "description"]

@@ -54,6 +54,10 @@ let sitePreview: SitePreview;
 let smartAgentPanel: SmartAgentPanel | null = null;
 let clientSuccessCenter: ClientSuccessCenter | null = null;
 let currentProjectPath: string | null = null;
+/** Quick Sessions use an app-managed workspace, never a user-selected folder. */
+type WorkspaceMode = "project" | "quick";
+let currentWorkspaceMode: WorkspaceMode = "project";
+let quickSessionWorkspacePath: string | null = null;
 let sessions: Session[] = [];
 let activeSessionId: string | null = null;
 /** Loaded sessions remain addressable after switching to another project. */
@@ -91,6 +95,10 @@ function projectPathKey(path: string | null | undefined): string {
 function sameProjectPath(a: string | null | undefined, b: string | null | undefined): boolean {
   const aKey = projectPathKey(a);
   return !!aKey && aKey === projectPathKey(b);
+}
+
+function isQuickSessionWorkspace(path: string | null | undefined): boolean {
+  return sameProjectPath(path, quickSessionWorkspacePath);
 }
 
 function normalizeToolName(name: string): string {
@@ -389,7 +397,12 @@ function refreshSidebar() {
       .map((sessionId) => sessionRegistry.get(sessionId)?.projectId || runProjectPaths.get(sessionId) || "")
       .filter(Boolean),
   );
-  sidebar.setProjectWorkspaces(listProjectWorkspaces(), currentProjectPath, runningProjectPaths);
+  sidebar.setProjectWorkspaces(
+    listProjectWorkspaces(),
+    currentWorkspaceMode === "quick" ? null : currentProjectPath,
+    runningProjectPaths,
+  );
+  sidebar.setQuickSessionWorkspace(quickSessionWorkspacePath, currentWorkspaceMode === "quick");
   sidebar.render(sessions, activeSessionId, runningSessions).catch((e) => console.error("sidebar render failed", e));
 }
 
@@ -784,11 +797,16 @@ function persistSessionById(id: string, deferred = false) {
   else saveSession(s);
 }
 
-function createNewSession() {
+async function createNewSession() {
   if (!currentProjectPath) {
-    openNewProjectPicker();
-    return;
+    try {
+      await openQuickSessionWorkspace();
+    } catch (error) {
+      reportError(`Could not start a Quick session: ${String(error)}`);
+      return;
+    }
   }
+  if (!currentProjectPath) return;
   // Other sessions may keep running in the background
   persistCurrentSession();
   persistActiveSessionModelPreference();
@@ -1321,20 +1339,31 @@ function bindDrawerButtons() {
 }
 
 async function refreshHeader() {
-  sidebar?.setProject(currentProjectPath);
-  chat?.setComposerProject(currentProjectPath);
+  const quickSession = currentWorkspaceMode === "quick";
+  sidebar?.setProject(currentProjectPath, { quickSession });
+  sidebar?.setQuickSessionWorkspace(quickSessionWorkspacePath, quickSession);
+  chat?.setComposerProject(currentProjectPath, { quickSession });
   bindDrawerButtons();
   renderWorkspaceMenu();
 }
 
-async function selectProject(path: string) {
-  if (sameProjectPath(currentProjectPath, path)) return;
+async function openQuickSessionWorkspace() {
+  const path = await api.ensureQuickSessionWorkspace();
+  quickSessionWorkspacePath = path;
+  await selectProject(path, { quickSession: true });
+}
+
+async function selectProject(path: string, options: { quickSession?: boolean } = {}) {
+  const quickSession = options.quickSession === true || isQuickSessionWorkspace(path);
+  const nextMode: WorkspaceMode = quickSession ? "quick" : "project";
+  if (sameProjectPath(currentProjectPath, path) && currentWorkspaceMode === nextMode) return;
   persistCurrentSession();
   flushSessionSaves();
-  await api.setProjectRoot(path);
-  const canonicalPath = (await api.getProjectRoot()) || path;
+  if (!quickSession) await api.setProjectRoot(path);
+  const canonicalPath = quickSession ? path : (await api.getProjectRoot()) || path;
   currentProjectPath = canonicalPath;
-  activateProjectWorkspace(canonicalPath);
+  currentWorkspaceMode = nextMode;
+  if (!quickSession) activateProjectWorkspace(canonicalPath);
   loadProjectSessions();
   refreshSidebar();
   chat.setProjectReady(true);
@@ -1348,6 +1377,7 @@ async function createProject(path: string, templateId?: string) {
   await api.createProjectDir(path, templateId);
   const canonicalPath = (await api.getProjectRoot()) || path;
   currentProjectPath = canonicalPath;
+  currentWorkspaceMode = "project";
   activateProjectWorkspace(canonicalPath);
   sessions = [];
   activeSessionId = null;
@@ -1997,13 +2027,16 @@ async function init() {
   sidebar = new Sidebar({
     onNewProject: openNewProjectPicker,
     onOpenProject: openOpenProjectPicker,
-    onSelectProject: (path) => void selectProject(path).catch((error) => reportError(String(error))),
+    onSelectProject: (path) => void selectProject(path, {
+      quickSession: isQuickSessionWorkspace(path),
+    }).catch((error) => reportError(String(error))),
     onAddAnotherProject: openNewProjectPicker,
+    onOpenQuickSessions: () => void openQuickSessionWorkspace().catch((error) => reportError(String(error))),
     onOpenSettings: openSettings,
     onCheckForUpdates: () => document.body.appendChild(showUpdateDialog({
       beforeInstall: prepareForAppUpdate,
     })),
-    onNewSession: createNewSession,
+    onNewSession: () => void createNewSession(),
     onSelectSession: switchSession,
     onDeleteSession: removeSession,
     onDeleteAllSessions: removeAllSessions,
@@ -2103,7 +2136,7 @@ async function init() {
   window.addEventListener("horma:ultra-effort", () => {
     chat.applyUltraChrome();
   });
-  window.addEventListener("horma:new-session", () => createNewSession());
+  window.addEventListener("horma:new-session", () => void createNewSession());
   window.addEventListener("horma:composer-insert", ((e: CustomEvent<{ text?: string }>) => {
     const text = e.detail?.text;
     if (typeof text === "string" && text) chat.insertComposerText(text);
@@ -2134,13 +2167,23 @@ async function init() {
       workspaces.find((workspace) => workspace.path === rememberedActive)?.path ||
       recent[0] ||
       workspaces[0]?.path;
+    // Prepare the app-managed option even when a real project is restored, so
+    // the user can switch to a folder-free session at any time.
+    const quickWorkspace = await api.ensureQuickSessionWorkspace().catch((error) => {
+      console.warn("Quick Sessions workspace is unavailable", error);
+      return null;
+    });
+    if (quickWorkspace) quickSessionWorkspacePath = quickWorkspace;
     if (initialProject) {
       await selectProject(initialProject);
+    } else if (quickWorkspace) {
+      await selectProject(quickWorkspace, { quickSession: true });
     } else {
       refreshSidebar();
     }
   } catch (e) {
     console.error("restore recent project failed", e);
+    refreshSidebar();
   }
 
   syncUsageBar();

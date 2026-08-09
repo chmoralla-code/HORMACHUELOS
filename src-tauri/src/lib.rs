@@ -75,6 +75,28 @@ fn set_project_root(path: String, state: tauri::State<'_, state::AppState>) -> R
     Ok(())
 }
 
+/// Return Hormachuelos' app-managed workspace for sessions that do not need a
+/// user-chosen folder. It deliberately stays out of the recent user-projects
+/// list: this is a private, durable scratch area rather than an opened project.
+fn quick_session_workspace_in(base: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let path = base.join("Quick Sessions");
+    std::fs::create_dir_all(&path)
+        .map_err(|error| format!("Could not create the Quick Sessions workspace: {error}"))?;
+    workspace::canonical_project_root(&path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn ensure_quick_session_workspace(
+    state: tauri::State<'_, state::AppState>,
+) -> Result<String, String> {
+    let directories = directories::ProjectDirs::from("com", "ai-forge", "AI-Forge")
+        .ok_or_else(|| "Could not determine the Hormachuelos data folder.".to_string())?;
+    let root = quick_session_workspace_in(directories.data_local_dir())?;
+    let canonical = root.to_string_lossy().to_string();
+    *state.project_root.lock().unwrap() = Some(canonical.clone());
+    Ok(canonical)
+}
+
 #[tauri::command]
 fn list_recent_projects(state: tauri::State<'_, state::AppState>) -> Vec<String> {
     state.recent_projects.lock().unwrap().clone()
@@ -1065,6 +1087,7 @@ pub fn run() {
             app_updater::app_install_kind,
             app_updater::install_app_update,
             set_project_root,
+            ensure_quick_session_workspace,
             list_recent_projects,
             get_settings,
             save_settings,
@@ -1120,6 +1143,24 @@ pub fn run() {
 
 #[cfg(test)]
 mod desktop_config_tests {
+    use super::quick_session_workspace_in;
+
+    #[test]
+    fn quick_sessions_workspace_is_created_under_its_managed_root() {
+        let base =
+            std::env::temp_dir().join(format!("ai-forge-quick-session-{}", uuid::Uuid::new_v4()));
+        let root = quick_session_workspace_in(&base).expect("create quick-session workspace");
+
+        assert!(root.is_dir());
+        assert_eq!(
+            root.file_name().and_then(|name| name.to_str()),
+            Some("Quick Sessions")
+        );
+        assert!(root.starts_with(base.canonicalize().expect("canonical base directory")));
+
+        std::fs::remove_dir_all(base).expect("remove quick-session test directory");
+    }
+
     #[test]
     fn packaged_csp_allows_the_hosted_account_api() {
         let config: serde_json::Value =

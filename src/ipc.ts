@@ -163,6 +163,8 @@ export const api = {
     invoke("list_hosted_provider_catalog"),
   createProjectDir: (path: string, templateId?: string): Promise<void> =>
     invoke("create_project_dir", { path, templateId: templateId ?? null }),
+  /** Create or reopen Hormachuelos' private no-folder workspace for quick sessions. */
+  ensureQuickSessionWorkspace: (): Promise<string> => invoke("ensure_quick_session_workspace"),
   listProjectTemplates: (): Promise<ProjectTemplate[]> => invoke("list_project_templates"),
   listProjectFiles: (maxDepth = 8): Promise<ProjectTree> => invoke("list_project_files", { maxDepth }),
   readProjectFile: (relativePath: string): Promise<FilePreview> => invoke("read_project_file", { relativePath }),

@@ -110,26 +110,28 @@
    headings remain visible while each individual list scrolls. */
 .sb-workspace-sections {
   display: flex;
-  flex: 1 1 172px;
+  flex: 1 1 224px;
   flex-direction: column;
-  min-height: 132px;
+  min-height: 176px;
   overflow: hidden;
 }
 .sb-workspace-sections > .sb-section { min-width: 0; }
 .sb-sessions-section {
-  flex: 1 1 92px;
-  min-height: 72px;
+  flex: 1 1 124px;
+  min-height: 104px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  padding-bottom: 8px;
+  padding: 9px 12px 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
 }
 .sb-section-label {
-  font-size: 10px;
-  color: var(--fg-4);
+  font-size: 9px;
+  color: rgba(230, 235, 240, 0.68);
   text-transform: uppercase;
-  letter-spacing: 0.06em;
-  margin-bottom: 6px;
+  letter-spacing: 0.09em;
+  margin-bottom: 7px;
+  font-weight: 700;
 }
 
 .sb-actions {
@@ -146,8 +148,11 @@
 }
 #sidebar .sb-actions > .sb-action-menu > .sb-actions-toggle,
 #sidebar .sb-actions > .sb-update-action {
-  min-height: 35px;
-  padding: 7px 9px;
+  min-height: 36px;
+  padding: 7px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.025);
 }
 .sb-action {
   display: flex;
@@ -287,22 +292,21 @@
 /* Persistent multi-project switcher — folders stay local and runs may continue in another project. */
 .sb-projects-section {
   display: flex;
-  flex: 0 1 154px;
+  flex: 0 0 176px;
   flex-direction: column;
-  min-height: 52px;
+  min-height: 96px;
   overflow: hidden;
-  padding-top: 2px;
-  padding-bottom: 4px;
+  padding: 9px 12px 6px;
 }
-.sb-projects-head { margin: 0 8px 6px 0; }
+.sb-projects-head { margin: 0 0 7px; }
 .sb-add-project {
   border: 0;
-  padding: 3px 5px;
+  padding: 3px 4px;
   border-radius: 5px;
-  background: rgba(114, 200, 255, 0.08);
-  color: #8fd4ff;
+  background: transparent;
+  color: #9bd8ff;
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 10px;
   line-height: 1.2;
   letter-spacing: 0.01em;
   cursor: pointer;
@@ -311,18 +315,18 @@
 }
 .sb-add-project:hover,
 .sb-add-project:focus-visible {
-  background: rgba(114, 200, 255, 0.17);
+  background: rgba(114, 200, 255, 0.12);
   color: #d2f0ff;
   outline: none;
 }
 .sb-projects-list {
   display: grid;
   flex: 1 1 auto;
-  gap: 4px;
+  gap: 5px;
   min-height: 0;
-  max-height: 142px;
+  max-height: 154px;
   overflow-y: auto;
-  padding: 0 8px 4px 0;
+  padding: 0 2px 2px 0;
   scrollbar-width: thin;
 }
 .sb-project-empty {
@@ -337,12 +341,13 @@
   width: 100%;
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
   min-width: 0;
-  padding: 7px 8px;
+  min-height: 42px;
+  padding: 6px 8px;
   border: 1px solid transparent;
   border-radius: 7px;
-  background: rgba(255, 255, 255, 0.018);
+  background: rgba(255, 255, 255, 0.025);
   color: var(--fg-2);
   text-align: left;
   cursor: pointer;
@@ -355,7 +360,7 @@
 }
 .sb-project-workspace.active {
   border-color: rgba(114, 200, 255, 0.34);
-  background: linear-gradient(90deg, rgba(80, 170, 255, 0.14), rgba(80, 170, 255, 0.035));
+  background: linear-gradient(90deg, rgba(80, 170, 255, 0.16), rgba(80, 170, 255, 0.035));
   color: #eef9ff;
 }
 .sb-project-workspace:focus-visible {
@@ -393,12 +398,12 @@
 }
 .sb-project-copy strong {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
 }
 .sb-project-copy span {
   color: var(--fg-4);
-  font-size: 9px;
+  font-size: 10px;
 }
 .sb-project-live {
   flex: 0 0 auto;
@@ -535,10 +540,13 @@
   .update-version-value { font-size: 12px; }
 }
 
-.sb-recent { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 0 8px 12px; }
+.sb-recent { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 0 2px 2px 0; }
 .sb-recent-item {
-  padding: 6px 10px;
-  border-radius: var(--radius-sm);
+  min-height: 36px;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.02);
   color: var(--fg-2);
   font-size: 11px;
   font-family: var(--font-mono);
@@ -551,8 +559,8 @@
   align-items: center;
   gap: 6px;
 }
-.sb-recent-item:hover { background: var(--bg-2); color: var(--fg-1); }
-.sb-recent-item.active { color: var(--fg-0); background: var(--bg-3); }
+.sb-recent-item:hover { background: rgba(255, 255, 255, 0.06); border-color: rgba(255, 255, 255, 0.08); color: var(--fg-1); }
+.sb-recent-item.active { color: #eef9ff; border-color: rgba(114, 200, 255, 0.22); background: rgba(80, 170, 255, 0.1); }
 .sb-recent-item .dot { width: 4px; height: 4px; border-radius: 50%; background: var(--fg-4); flex-shrink: 0; }
 .sb-recent-item.active .dot { background: var(--accent); }
 
@@ -560,7 +568,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 6px;
+  margin-bottom: 7px;
 }
 .sb-section-row .sb-section-label { margin-bottom: 0; }
 .sb-new-session,
@@ -2398,25 +2406,25 @@
   margin-bottom: 6px;
 }
 .sb-usage-section {
-  margin-top: 2px;
-  padding: 0 12px 8px;
+  margin-top: 0;
+  padding: 0 12px 9px;
   flex: 0 1 auto;
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
 }
 .sb-usage-section .sb-section-label {
-  margin-bottom: 8px;
-  color: rgba(235, 235, 235, 0.88);
+  margin-bottom: 7px;
+  color: rgba(235, 235, 235, 0.74);
 }
 .sb-usage {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 7px;
   padding: 9px 10px;
-  border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  background: rgba(255, 255, 255, 0.05);
+  border-radius: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.035);
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
 }
@@ -2482,7 +2490,7 @@
   gap: 8px;
 }
 .sb-usage-sub-name {
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 700;
   color: #f7f7f7;
   letter-spacing: 0.02em;
@@ -2556,7 +2564,7 @@
   margin-top: 3px;
   width: 100%;
   padding: 6px 8px;
-  border-radius: 8px;
+  border-radius: 7px;
   border: 1px solid rgba(255, 255, 255, 0.18);
   background: rgba(255, 255, 255, 0.08);
   color: rgba(245, 245, 245, 0.95);
@@ -2575,7 +2583,7 @@
 
 .sb-account-section {
   margin-top: 0;
-  padding: 0 12px 10px;
+  padding: 0 12px 9px;
   flex-shrink: 0;
 }
 .sb-account-refresh {
@@ -2595,10 +2603,10 @@
   background: rgba(255, 255, 255, 0.06);
 }
 .sb-account {
-  padding: 10px 11px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.03);
+  padding: 9px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.025);
   cursor: pointer;
   transition: border-color 0.15s ease, background 0.15s ease;
 }
@@ -2640,7 +2648,7 @@
   white-space: nowrap;
 }
 .sb-account-meta {
-  margin-top: 6px;
+  margin-top: 4px;
   padding-left: 17px;
   font-size: 10px;
   color: var(--text-faint);
@@ -2676,6 +2684,32 @@
   50% { opacity: 1; }
 }
 
+/* Keep the active session reachable in compact desktop windows.  The sidebar
+   itself can scroll instead of letting the projects block squeeze sessions out. */
+@media (max-height: 780px) {
+  #sidebar.sidebar { overflow-x: hidden; overflow-y: auto; }
+  .sb-workspace-sections {
+    flex: 0 0 270px;
+    min-height: 270px;
+    overflow: visible;
+  }
+  .sb-projects-section {
+    flex: 0 0 164px;
+    min-height: 164px;
+  }
+  .sb-projects-list { max-height: 142px; }
+  .sb-sessions-section {
+    flex: 1 1 106px;
+    min-height: 106px;
+  }
+  .sb-recent { max-height: 112px; }
+  .sb-usage-section {
+    flex: 0 0 auto;
+    overflow: visible;
+  }
+  #sidebar .sb-footer { margin-top: 0; }
+}
+
 @media (max-height: 680px) {
   #sidebar .sb-brand { min-height: 50px; padding: 8px 12px; }
   .sb-actions {
@@ -2685,23 +2719,6 @@
     padding: 6px 8px;
   }
   .sb-action { padding: 6px 8px; }
-  .sb-workspace-sections { min-height: 110px; }
-  .sb-projects-section {
-    flex: 0 0 80px;
-    min-height: 56px;
-    padding-top: 0;
-  }
-  .sb-projects-list {
-    max-height: 104px;
-    gap: 3px;
-  }
-  .sb-project-workspace { padding: 5px 7px; }
-  .sb-sessions-section {
-    min-height: 64px;
-    padding-top: 8px;
-    padding-bottom: 4px;
-  }
-  .sb-recent { padding-bottom: 4px; }
   .sb-usage-section {
     max-height: 205px;
     margin-top: 0;
@@ -3284,54 +3301,127 @@
 
 
 
-/* ===== Build summary card (simple prose) ===== */
+/* ===== Build summary card ===== */
 .summary-card {
+  position: relative;
   max-width: 880px;
   margin: 12px auto;
-  padding: 0;
-  background: transparent;
-  border: none;
+  padding: 14px 16px 15px 18px;
+  overflow: hidden;
+  background: linear-gradient(135deg, rgba(76, 106, 118, 0.18), rgba(29, 33, 37, 0.32));
+  border: 1px solid rgba(158, 209, 226, 0.16);
+  border-radius: 10px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
+}
+.summary-card::before {
+  content: "";
+  position: absolute;
+  inset: 13px auto 13px 0;
+  width: 2px;
+  border-radius: 0 2px 2px 0;
+  background: linear-gradient(180deg, #73d3d7, rgba(115, 211, 215, 0.16));
 }
 .summary-card.summary-enter {
   animation: msgEnter 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 .summary-header {
   display: flex;
-  align-items: baseline;
-  gap: 8px;
-  margin-bottom: 6px;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 8px;
+}
+.summary-status {
+  flex: 0 0 auto;
+  padding: 3px 6px 2px;
+  color: #8be4bb;
+  border: 1px solid rgba(105, 218, 162, 0.32);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  line-height: 1;
+  text-transform: uppercase;
 }
 .summary-title {
+  margin: 0;
   font-size: 15px;
-  font-weight: 600;
+  font-weight: 650;
   color: var(--fg-0);
   letter-spacing: -0.01em;
   line-height: 1.35;
 }
 .summary-desc {
   font-size: 13px;
-  color: var(--fg-2);
-  line-height: 1.65;
+  color: var(--fg-1);
+  line-height: 1.58;
   white-space: pre-wrap;
-  margin: 0 0 10px;
+  margin: 0 0 12px;
+}
+.summary-section {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 10px;
+  padding: 8px 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.065);
+}
+.summary-section-label {
+  padding-top: 2px;
+  color: var(--fg-4);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  line-height: 1.5;
+  text-transform: uppercase;
+}
+.summary-list {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  color: var(--fg-2);
+  font-size: 12px;
+  line-height: 1.5;
+  list-style: none;
+}
+.summary-list li {
+  position: relative;
+  padding-left: 14px;
+}
+.summary-list li::before {
+  position: absolute;
+  left: 0;
+  top: 0;
+  color: #8caeba;
+  content: "•";
+}
+.summary-section.is-verified .summary-list li::before {
+  color: #87dfb4;
+  content: "✓";
 }
 .summary-meta {
-  font-size: 11px;
-  font-family: var(--font-mono);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
   color: var(--fg-4);
-  margin-bottom: 10px;
+  font-family: var(--font-mono);
+  font-size: 10px;
   letter-spacing: 0.01em;
 }
-.summary-features {
-  margin: 0;
-  padding-left: 1.15em;
-  font-size: 12px;
-  color: var(--fg-2);
-  line-height: 1.65;
+.summary-meta-chip {
+  padding: 3px 7px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.12);
 }
-.summary-features li {
-  list-style: disc;
-  margin: 0.2em 0;
+.summary-export-btn {
+  margin-top: 12px;
+}
+@media (max-width: 560px) {
+  .summary-section { grid-template-columns: 1fr; gap: 3px; }
+  .summary-section-label { padding-top: 0; }
 }
 
 /* ===== Question card (Plan mode chooser) ===== */

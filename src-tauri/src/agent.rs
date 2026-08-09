@@ -1351,7 +1351,7 @@ BASE RULES (mode rules above win on conflict):\n\
 4. After scaffolding, read generated files before editing. Use edit_file for precise edits; write_file for new files.\n\
 5. Verify work with build/test commands when possible.\n\
 {execution_style}\
-7. When the task is COMPLETE, call `done` with a short plain summary: title, description, summary, key files, tech, features (up to 5). No hype. Pure conversation can end without done.\n\
+7. When the task is COMPLETE, call `done` with a short plain delivery summary: a 2–6 word title, one result sentence in `summary`, and only distinct supporting details in `description` and `features`. Do not repeat the same action, verification, files, or wording across fields. Leave `description` empty when it adds nothing new. Use up to 5 concise features. No hype. Pure conversation can end without done.\n\
 8. If a command fails, read the error, fix the cause, and retry — don't give up immediately.\n\
 9. For an active build, fix, release, deployment, website, APK, app, or software task: keep taking concrete tool steps until all requested work is implemented and verified. Do NOT stop at a progress update, partial response, or an unfinished plan, and never ask the user to type \"continue\". If the provider reaches an output limit, the host will resume this same run automatically with its current workspace and tool history.\n\
 10. Only do what the user asked (or what they approved in Plan mode). No unrelated changes.\n\

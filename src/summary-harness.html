@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>Completion summary test harness</title>
+    <link rel="stylesheet" href="/theme/tokens.css" />
+    <link rel="stylesheet" href="/theme/globals.css" />
+    <link rel="stylesheet" href="/app.css" />
+    <link rel="stylesheet" href="/theme/workspace.css" />
+    <style>
+      #app {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-rows: minmax(0, 1fr) auto;
+        height: 100vh;
+      }
+      #chat { min-height: 0; }
+    </style>
+  </head>
+  <body>
+    <main id="app" aria-label="Completion summary harness">
+      <section id="chat" class="chat" aria-live="polite"></section>
+      <section id="forge-dock" class="forge-dock" aria-label="Composer"></section>
+    </main>
+    <script type="module">
+      import { Chat } from "./components/chat.ts";
+
+      const noop = () => {};
+      const chat = new Chat({
+        onSend: noop,
+        onStop: noop,
+        onNeedProject: noop,
+        onOpenProject: noop,
+        onNewProject: noop,
+        onRevealProject: noop,
+        onOpenSettings: noop,
+        getSessionId: () => "summary-harness",
+      });
+
+      chat.startSession("Rename the Gantt heading.");
+      chat.appendDone({
+        title: "Gantt Heading Rename",
+        summary: "Updated the Gantt chart heading to PRAJEK MANEJIR and verified the page renders cleanly.",
+        description: "Changed the Gantt chart page heading from PROJECT MANAGEMENT to PRAJEK MANEJIR. Verified headless: the heading renders correctly, all 17 chart rows still load, and there are zero console errors. Updated the Gantt chart heading to PRAJEK MANEJIR and verified the page renders cleanly.",
+        files: ["gantt-chart/index.html"],
+        tech: ["HTML"],
+        features: [
+          "Renamed page heading to PRAJEK MANEJIR.",
+          "Verified page still renders with no errors.",
+        ],
+      });
+      window.__summaryHarness = { chat };
+    </script>
+  </body>
+</html>

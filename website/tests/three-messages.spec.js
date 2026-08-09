@@ -32,6 +32,7 @@ async function installMock(page) {
     const callbacks = new Map();
     const eventHandlers = new Map(); // event -> callback ids
     let projectRoot = null;
+    const quickSessionRoot = "C:\\\\Users\\\\Cyrhiel\\\\AppData\\\\Local\\\\AI-Forge\\\\Quick Sessions";
 
     const settings = {
       provider: "deepseek",
@@ -180,6 +181,9 @@ async function installMock(page) {
           case "plugin:event|unlisten":
             return null;
           case "list_recent_projects":
+            if (Array.isArray(window.__HORMA_RECENT_PROJECTS_FIXTURE__)) {
+              return window.__HORMA_RECENT_PROJECTS_FIXTURE__;
+            }
             return projectRoot ? [projectRoot] : ["C:\\\\Users\\\\Cyrhiel\\\\Documents\\\\INVENTIONS\\\\AI-Forge"];
           case "get_project_root":
             return projectRoot;
@@ -189,6 +193,10 @@ async function installMock(page) {
           case "create_project_dir":
             projectRoot = args.path;
             return null;
+          case "ensure_quick_session_workspace":
+            projectRoot = quickSessionRoot;
+            window.__HORMA_QUICK_SESSION_ROOT__ = projectRoot;
+            return projectRoot;
           case "app_version":
             return "0.1.5";
           case "get_website_session":
@@ -226,6 +234,7 @@ async function installMock(page) {
             return String(args.path || "");
           case "agent_run":
             window.__HORMA_LAST_AGENT_PROMPT__ = args.prompt;
+            window.__HORMA_LAST_AGENT_PROJECT_ROOT__ = args.projectRoot;
             await simulateAgent(args.prompt, args.sessionId);
             return null;
           case "agent_stop":
@@ -366,6 +375,54 @@ test("legacy burst blocks cannot lock a healthy plan wallet", async ({ page }) =
 
   await sendMessage(page, "Confirm the healthy wallet can still send this message.");
   await expect(page.locator("#chat")).toContainText("Mock agent reply", { timeout: 10000 });
+});
+
+test("creates and uses a Quick session without asking for a folder", async ({ page }) => {
+  const consoleErrors = [];
+  page.on("pageerror", (error) => consoleErrors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+
+  await page.addInitScript(() => {
+    window.__HORMA_RECENT_PROJECTS_FIXTURE__ = [];
+  });
+  await installMock(page);
+  await page.route("https://hormachuelos.vercel.app/api/update?*", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ updateAvailable: false, forceUpdate: false, currentVersion: "0.1.5", latest: null }),
+    }),
+  );
+  await page.route("https://hormachuelos.vercel.app/api/auth/me", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ ok: true, user: { email: "quick-session@example.com", plan: "pro" } }),
+    }),
+  );
+
+  await page.goto(APP, { waitUntil: "networkidle" });
+  const quickWorkspace = page.getByRole("button", { name: /quick sessions/i });
+  await expect(quickWorkspace).toBeVisible();
+  await expect(quickWorkspace).toContainText("No folder needed");
+  await expect(page.locator("#project-parent")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "New session", exact: true }).click();
+  await expect(page.locator(".sb-session-item")).toHaveCount(1);
+  await expect(page.locator(".sb-session-item")).toContainText("New session");
+  await expect(page.locator("#project-parent")).toHaveCount(0);
+
+  const input = page.locator("#forge-prompt, .composer-input, textarea").first();
+  await expect(input).toBeEnabled();
+  await sendMessage(page, "Reply from a folder-free Quick session.");
+  await expect(page.locator("#chat")).toContainText("Mock agent reply", { timeout: 10000 });
+  const agentRoot = await page.evaluate(() => window.__HORMA_LAST_AGENT_PROJECT_ROOT__);
+  expect(agentRoot).toContain("Quick Sessions");
+
+  const fatal = consoleErrors.filter((entry) => !/favicon|vite|tauri/i.test(entry));
+  expect(fatal, fatal.join("\n")).toEqual([]);
 });
 
 test("send three messages and get mock agent replies", async ({ page }) => {
