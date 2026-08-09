@@ -25,6 +25,32 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+/**
+ * Local release credentials are deliberately ignored by Git.  Load them when
+ * present so `npm run release` works from this checkout without echoing any
+ * credential values, while explicit process environment values still win.
+ */
+function loadLocalReleaseEnv(path) {
+  if (!existsSync(path)) return;
+  for (const raw of readFileSync(path, "utf8").split(/\r?\n/)) {
+    const match = raw.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
+    if (!match) continue;
+    const key = match[1];
+    if (process.env[key]) continue;
+    let value = match[2].trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    if (value) process.env[key] = value;
+  }
+}
+
+loadLocalReleaseEnv(join(ROOT, "website", ".env.release"));
+
 const SITE_URL = (process.env.SITE_URL || "https://hormachuelos.vercel.app").replace(/\/$/, "");
 const PROJECT_REF = process.env.SUPABASE_PROJECT_REF || "mketkzycxmtvgdbwzsvh";
 const ASSET_PUBLIC = `https://${PROJECT_REF}.supabase.co/storage/v1/object/public/public-assets`;
@@ -196,7 +222,11 @@ function updateBundledReleaseHashes(msiSha256, exeSha256) {
 }
 
 async function resolveServiceKey() {
-  const configuredUrl = process.env.SUPABASE_URL || process.env.HORMACHUELOS_SUPABASE_URL;
+  const configuredUrl = (
+    process.env.SUPABASE_URL
+    || process.env.HORMACHUELOS_SUPABASE_URL
+    || `https://${PROJECT_REF}.supabase.co`
+  ).replace(/^['"]|['"]$/g, "");
   const configuredService =
     process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.HORMACHUELOS_SERVICE_ROLE;
   if (configuredService && configuredUrl) {
