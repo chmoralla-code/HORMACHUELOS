@@ -31,20 +31,25 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
  * present so `npm run release` works from this checkout without echoing any
  * credential values, while explicit process environment values still win.
  */
+function cleanEnvValue(value) {
+  let result = String(value || "").trim();
+  if (
+    (result.startsWith('"') && result.endsWith('"')) ||
+    (result.startsWith("'") && result.endsWith("'"))
+  ) {
+    result = result.slice(1, -1);
+  }
+  return result;
+}
+
 function loadLocalReleaseEnv(path) {
   if (!existsSync(path)) return;
   for (const raw of readFileSync(path, "utf8").split(/\r?\n/)) {
     const match = raw.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
     if (!match) continue;
     const key = match[1];
-    if (process.env[key]) continue;
-    let value = match[2].trim();
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1);
-    }
+    if (cleanEnvValue(process.env[key])) continue;
+    const value = cleanEnvValue(match[2]);
     if (value) process.env[key] = value;
   }
 }
@@ -222,11 +227,9 @@ function updateBundledReleaseHashes(msiSha256, exeSha256) {
 }
 
 async function resolveServiceKey() {
-  const configuredUrl = (
-    process.env.SUPABASE_URL
-    || process.env.HORMACHUELOS_SUPABASE_URL
-    || `https://${PROJECT_REF}.supabase.co`
-  ).replace(/^['"]|['"]$/g, "");
+  const configuredUrl = cleanEnvValue(
+    process.env.SUPABASE_URL || process.env.HORMACHUELOS_SUPABASE_URL,
+  ) || `https://${PROJECT_REF}.supabase.co`;
   const configuredService =
     process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.HORMACHUELOS_SERVICE_ROLE;
   if (configuredService && configuredUrl) {
