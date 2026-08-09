@@ -126,13 +126,46 @@ fn canonical_tool_name(name: &str) -> Option<&'static str> {
         // same approval policy as run_command.
         "runterminal" | "runterminalcmd" | "executecommand" | "shell" => Some("run_command"),
 
-        // Exact malformed call seen from provider tool-use: it merged the
-        // requested read_file with list_processes while keeping a file path.
-        // Resolving it to the read-only file operation prevents a visible
-        // failure without ever choosing a write or computer-control action.
-        "readfilelistprocesses" => Some("read_file"),
-        _ => None,
+        // A defensive recovery for an upstream stream that fused several
+        // *read-only* names. We keep the first requested inspection action,
+        // which matches the retained argument object, and never map a fused
+        // value to a write, system, browser, or computer-control tool.
+        _ => safe_concatenated_readonly_tool_name(&compact),
     }
+}
+
+/// Return the first inspection tool in a compact sequence of known read-only
+/// names. This is only a recovery layer; the stream parser keeps distinct calls
+/// separate before this function is normally reached.
+fn safe_concatenated_readonly_tool_name(compact: &str) -> Option<&'static str> {
+    const SAFE_NAMES: [(&str, &str); 10] = [
+        ("listprocesses", "list_processes"),
+        ("listdrives", "list_drives"),
+        ("readfile", "read_file"),
+        ("listdir", "list_dir"),
+        ("gitstatus", "git_status"),
+        ("fileinfo", "file_info"),
+        ("sysinfo", "sys_info"),
+        ("envvars", "env_vars"),
+        ("glob", "glob"),
+        ("grep", "grep"),
+    ];
+
+    let mut remaining = compact;
+    let mut first = None;
+    let mut parts = 0usize;
+    while !remaining.is_empty() {
+        let (raw, canonical) = SAFE_NAMES
+            .iter()
+            .find(|(raw, _)| remaining.starts_with(*raw))?;
+        if first.is_none() {
+            first = Some(*canonical);
+        }
+        remaining = &remaining[raw.len()..];
+        parts += 1;
+    }
+
+    (parts >= 2).then_some(first?)
 }
 
 fn is_readonly_tool(name: &str) -> bool {
@@ -434,6 +467,7 @@ mod permission_mode_tests {
         for (received, expected) in [
             ("Read-File", "read_file"),
             ("read_filelist_processes", "read_file"),
+            ("list_dirglobgit_status", "list_dir"),
             ("get_processes", "list_processes"),
             ("run_terminal_cmd", "run_command"),
             ("start-local-server", "start_dev_server"),

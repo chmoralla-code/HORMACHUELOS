@@ -147,10 +147,16 @@ async function installMock(page) {
         }
         await delay(12);
         for (const tool of parallelTools) {
+          const failed = window.__HORMA_MULTI_AGENT_FAILURE__ && tool.id === "multi-read";
           emit("agent", {
             kind: "tool_result",
             session_id: sessionId,
-            payload: { id: tool.id, name: tool.name, ok: true, content: "Mock inspection complete" },
+            payload: {
+              id: tool.id,
+              name: tool.name,
+              ok: !failed,
+              content: failed ? "Error: simulated inspection failure" : "Mock inspection complete",
+            },
           });
         }
       }
@@ -903,4 +909,37 @@ test("Multi-Agent mode saves Ship-level access and renders parallel tool roles",
   await expect(swarm).toContainText("Mapping");
   await expect(swarm).toContainText("Searching for scripts");
   await expect(page.locator(".multi-agent-tool.done")).toHaveCount(3);
+});
+
+test("Multi-Agent mode marks a failed spawned tool as needing attention", async ({ page }) => {
+  await installMock(page);
+  await page.route("https://hormachuelos.vercel.app/api/update?*", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ updateAvailable: false, forceUpdate: false, currentVersion: "0.1.5", latest: null }),
+    }),
+  );
+  await page.route("https://hormachuelos.vercel.app/api/auth/me", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ ok: true, user: { email: "multi-failure@example.com", plan: "pro" } }),
+    }),
+  );
+  await page.goto(APP, { waitUntil: "networkidle" });
+  await openProjectViaUI(page);
+
+  await page.getByRole("button", { name: "Mode: Auto" }).click();
+  await page.getByRole("option", { name: /multi-agent/i }).click();
+  await page.evaluate(() => {
+    window.__HORMA_MULTI_AGENT_FAILURE__ = true;
+  });
+
+  await sendMessage(page, "Inspect the project and show a failure state.");
+  const swarm = page.locator(".multi-agent-batch");
+  await expect(swarm).toHaveClass(/needs-attention/);
+  await expect(swarm.locator(".multi-agent-live")).toHaveText("NEEDS ATTENTION");
+  await expect(swarm.locator(".multi-agent-tool.failed")).toHaveCount(1);
+  await expect(page.locator(".tool-batch-label")).toContainText("agent needs attention");
 });

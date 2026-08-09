@@ -3,6 +3,7 @@ use crate::llm::{
 };
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::time::Duration;
 
 fn encode_message(message: &ChatMessage) -> Value {
@@ -371,6 +372,14 @@ struct StreamAccumulator {
     text: String,
     reasoning: String,
     tool_calls: Vec<StreamToolCall>,
+    /// Some OpenAI-compatible providers omit the numeric `index` from every
+    /// streamed tool-call delta. Keep their stable call IDs so separate calls
+    /// never collapse into a made-up concatenated name such as
+    /// `list_dirglobgit_status`.
+    tool_call_indices_by_id: HashMap<String, usize>,
+    /// Last call addressed by a delta. This is only a fallback for the rare
+    /// provider that omits both an index and an ID on a continuation chunk.
+    last_tool_call_index: Option<usize>,
     stop_reason: String,
     usage_tokens: u64,
     saw_event: bool,
@@ -379,6 +388,60 @@ struct StreamAccumulator {
 }
 
 impl StreamAccumulator {
+    fn resolve_tool_call_index(
+        &mut self,
+        position: usize,
+        call_count: usize,
+        call: &Value,
+    ) -> usize {
+        if let Some(index) = call
+            .get("index")
+            .and_then(Value::as_u64)
+            .map(|index| index as usize)
+        {
+            if let Some(id) = call
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+            {
+                self.tool_call_indices_by_id.insert(id.to_string(), index);
+            }
+            self.last_tool_call_index = Some(index);
+            return index;
+        }
+
+        if let Some(id) = call
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        {
+            if let Some(index) = self.tool_call_indices_by_id.get(id).copied() {
+                self.last_tool_call_index = Some(index);
+                return index;
+            }
+
+            // A new ID without an index denotes a new tool call. Do not use
+            // `position` here: across separate SSE events it is repeatedly
+            // zero, which was the source of merged tool names.
+            let index = self.tool_calls.len();
+            self.tool_call_indices_by_id.insert(id.to_string(), index);
+            self.last_tool_call_index = Some(index);
+            return index;
+        }
+
+        // Without either identifier, a single delta is most likely a
+        // continuation of the previous call. A multi-call delta can still be
+        // addressed by its array position, matching OpenAI's initial shape.
+        let index = if call_count == 1 {
+            self.last_tool_call_index
+                .unwrap_or_else(|| self.tool_calls.len().saturating_sub(1))
+        } else {
+            position
+        };
+        self.last_tool_call_index = Some(index);
+        index
+    }
+
     fn apply(
         &mut self,
         value: &Value,
@@ -437,18 +500,21 @@ impl StreamAccumulator {
 
         if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
             for (position, call) in calls.iter().enumerate() {
-                let index = call
-                    .get("index")
-                    .and_then(Value::as_u64)
-                    .map(|index| index as usize)
-                    .unwrap_or(position);
+                let index = self.resolve_tool_call_index(position, calls.len(), call);
                 while self.tool_calls.len() <= index {
                     self.tool_calls.push(StreamToolCall::default());
                 }
                 let target = &mut self.tool_calls[index];
                 if let Some(id) = call.get("id").and_then(Value::as_str) {
                     if !id.is_empty() {
-                        target.id.push_str(id);
+                        if target.id.is_empty() {
+                            target.id = id.to_string();
+                        } else if target.id != id && !target.id.ends_with(id) {
+                            // A few providers stream an ID in fragments. Keep
+                            // supporting that form without duplicating IDs
+                            // when a provider repeats the full value.
+                            target.id.push_str(id);
+                        }
                     }
                 }
                 let function = call.get("function").unwrap_or(&Value::Null);
@@ -1345,6 +1411,63 @@ mod tests {
             json!({ "path": "src/main.ts" })
         );
         assert_eq!(response.usage_tokens, 17);
+    }
+
+    #[test]
+    fn keeps_distinct_tool_calls_separate_when_a_provider_omits_indexes() {
+        let mut stream = StreamAccumulator::default();
+        for event in [
+            json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "id": "call_list",
+                            "function": { "name": "list_dir", "arguments": "{\"path\":\".\"}" }
+                        }]
+                    }
+                }]
+            }),
+            json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "id": "call_glob",
+                            "function": { "name": "glob", "arguments": "{\"pattern\":\"**/*\"}" }
+                        }]
+                    }
+                }]
+            }),
+            json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "id": "call_git",
+                            "function": { "name": "git_status", "arguments": "{}" }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            }),
+        ] {
+            stream.apply(&event, None, None, None);
+        }
+
+        let response = stream.into_response().expect("stream should assemble");
+        assert_eq!(response.tool_calls.len(), 3);
+        assert_eq!(
+            response
+                .tool_calls
+                .iter()
+                .map(|call| call.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["list_dir", "glob", "git_status"]
+        );
+        assert_eq!(response.tool_calls[0].arguments, json!({ "path": "." }));
+        assert_eq!(
+            response.tool_calls[1].arguments,
+            json!({ "pattern": "**/*" })
+        );
+        assert_eq!(response.tool_calls[2].arguments, json!({}));
     }
 
     #[test]

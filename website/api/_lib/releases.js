@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.56";
-const BUILTIN_MSI_SHA256 = "b0e23e414617d6b6b77a05aa954da7ab038ada62daaa6a18785d1605ff551eca";
-const BUILTIN_EXE_SHA256 = "9278a033b2c56f178900b189ea8a48a8e2f62cf01bcc72c4629e3ca58c281515";
-const BUILTIN_RELEASE_NOTES = "Paste copied video files from Windows Explorer directly into chat, including multiple files at once. Video attachments are imported privately and sampled for every model. Improved Windows installer updates with administrator approval before restart.";
+const BUILTIN_RELEASE_VERSION = "0.1.57";
+const BUILTIN_MSI_SHA256 = "9fcc35573dc22a1f025e2b452acab92cce8f1ca78309870d4e3e7de6a6d390a0";
+const BUILTIN_EXE_SHA256 = "e61716b2841974105fd7398d13123463c2f9a22e223d24c9cc346d7b58573277";
+const BUILTIN_RELEASE_NOTES = "Fixed Multi-Agent tool spawning: separate inspection calls no longer merge into invalid tool names. Improved safe recovery for malformed read-only calls and project-relative file access. Failed spawned tools now show a clear needs-attention state.";
 const GITHUB_RELEASES_BASE = "https://github.com/chmoralla-code/HORMACHUELOS/releases/download";
 
 /**

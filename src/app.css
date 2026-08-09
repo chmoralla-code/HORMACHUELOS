@@ -2355,6 +2355,11 @@
   border-color: rgba(141, 234, 184, 0.52);
   background: rgba(58, 196, 130, 0.2);
 }
+.multi-agent-batch.complete.needs-attention .multi-agent-live {
+  border-color: rgba(255, 151, 151, 0.62);
+  background: rgba(196, 58, 58, 0.18);
+  color: #ffb2b2;
+}
 .multi-agent-tools {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(185px, 1fr));

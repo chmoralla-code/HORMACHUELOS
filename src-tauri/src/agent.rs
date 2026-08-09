@@ -697,13 +697,58 @@ fn resolve_tool_preview_name(
     names.get(&index).cloned()
 }
 
-/// Normalize provider tool names before they reach history, permission checks,
-/// UI events, Smart Agent state, or the dispatcher. This keeps a harmless
-/// provider typo from becoming a visible failed command and ensures aliases
-/// for commands still receive the real command's approval policy.
-fn normalize_tool_calls(tool_calls: &mut [ToolCall]) {
+/// Normalize provider tool names and safe in-project inspection paths before
+/// they reach history, permission checks, UI events, Smart Agent state, or the
+/// dispatcher. This keeps a harmless provider typo from becoming a visible
+/// failed command and ensures aliases for commands receive the real command's
+/// approval policy.
+fn normalize_tool_calls(root: &Path, tool_calls: &mut [ToolCall]) {
     for tool_call in tool_calls {
         tool_call.name = tools::normalize_tool_name(&tool_call.name);
+        normalize_in_project_read_path(root, &tool_call.name, &mut tool_call.arguments);
+    }
+}
+
+/// Read-only workspace tools intentionally reject absolute paths at execution
+/// time. If a provider ignores their schema but points at an existing file or
+/// directory inside the current project, rebase it before the dispatcher sees
+/// it. Outside paths remain untouched and are still rejected by the tool.
+fn normalize_in_project_read_path(root: &Path, tool_name: &str, arguments: &mut Value) {
+    if !matches!(tool_name, "read_file" | "list_dir" | "grep" | "file_info") {
+        return;
+    }
+    let Some(path) = arguments
+        .as_object_mut()
+        .and_then(|args| args.get_mut("path"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+    else {
+        return;
+    };
+    let candidate = Path::new(&path);
+    if !candidate.is_absolute() {
+        return;
+    }
+    let Ok(project_root) = root.canonicalize() else {
+        return;
+    };
+    let Ok(candidate) = candidate.canonicalize() else {
+        return;
+    };
+    let Ok(relative) = candidate.strip_prefix(&project_root) else {
+        return;
+    };
+    let relative = relative.to_string_lossy().replace('\\', "/");
+    let relative = if relative.is_empty() {
+        ".".to_string()
+    } else {
+        relative
+    };
+    if let Some(Value::String(path)) = arguments
+        .as_object_mut()
+        .and_then(|args| args.get_mut("path"))
+    {
+        *path = relative;
     }
 }
 
@@ -1302,7 +1347,7 @@ BEHAVIOR:\n\
 You have the same full-permission policy as Ship. Move quickly, but coordinate independent work safely.\n\
 \n\
 BEHAVIOR:\n\
-- For each workspace discovery step, issue all independent local inspection tools in the SAME tool response before any command or edit. Good examples: list_dir + glob + grep + read_file + git_status.\n\
+- For each workspace discovery step, issue all independent local inspection tools in the SAME tool response before any command or edit. Good examples: list_dir + glob + grep + read_file + git_status. Each call must use one exact snake_case tool name and its own arguments; never merge tool names into a single call.\n\
 - The host starts that independent inspection pack together and preserves the results in the order you requested.\n\
 - Do NOT assume one tool's result while creating another call in that same pack.\n\
 - Keep writes, edits, shell commands, git mutations, browser actions, account flows, approvals, and computer actions strictly ordered after the information they need.\n\
@@ -1390,7 +1435,7 @@ BEHAVIOR:\n\
     let smart_agent_policy =
         crate::smart_agent::SmartAgentRun::system_instructions(smart_agent_enabled);
     let tool_scheduling_rules = if mode == "multi_agent" {
-        "15. MULTI-AGENT SCHEDULING: put independent, local, read-only discovery calls first in one tool response so the host can spawn them together. Use only read_file, list_dir, glob, grep, git_status, and file_info in that parallel pack. Never parallelize writes, commands, browser actions, approvals, account actions, or computer control."
+        "15. MULTI-AGENT SCHEDULING: put independent, local, read-only discovery calls first in one tool response so the host can spawn them together. Use only read_file, list_dir, glob, grep, git_status, and file_info in that parallel pack. Each is a distinct function call with one exact snake_case name and separate arguments. Never parallelize writes, commands, browser actions, approvals, account actions, or computer control."
     } else {
         "15. Work efficiently: group independent local inspection calls (read_file, list_dir, glob, grep, git_status, file_info) in one tool response. The host may run that safe read-only batch together. Never assume results from one tool call while constructing another call in the same batch; keep writes, commands, browser actions, approvals, and computer actions ordered."
     };
@@ -1410,7 +1455,7 @@ ACTIVE RUNTIME (report these values accurately when asked):\n\
 {computer_policy}\
 {smart_agent_policy}\
 CAPABILITIES:\n\
-- File tools accept ABSOLUTE paths (e.g. C:\\Users\\…) or paths relative to the project root.\n\
+- Workspace inspection tools — read_file, list_dir, glob, grep, git_status, and file_info — must use ONLY project-relative paths or patterns. The host already knows the root: use \".\" or \"src/main.ts\", never C:\\Users\\…. For other file tools, prefer project-relative paths and use an absolute path only when that tool explicitly permits it.\n\
 - run_command runs PowerShell hidden — scaffold, install, build, test, system tasks, CLIs. Use `cwd` when needed.\n\
 - start_dev_server starts a Vite/Next/npm/pnpm/yarn local server in a detached host-managed process. Give it a command plus optional `cwd` and `port`; it handles Windows `.cmd` shims, sends server output to `.hormachuelos-dev-server.log`, and returns immediately.\n\
 - NEVER use `Start-Process`, `Start-Job`, `cmd.exe`, `start /b`, `&`, or other background-shell tricks through run_command for a local server. Use start_dev_server, then continue with preview, inspection, and the requested work.\n\
@@ -1781,7 +1826,7 @@ The tool entries are historical summaries; use fresh tools for the current works
             emit_cancelled(&app, &session_id, iteration);
             return Ok(None);
         }
-        normalize_tool_calls(&mut resp.tool_calls);
+        normalize_tool_calls(root, &mut resp.tool_calls);
         total_tokens = total_tokens.saturating_add(resp.usage_tokens);
         let billable = crate::license::to_billable_tokens(
             &settings.provider,
@@ -2629,6 +2674,8 @@ mod tests {
     use crate::llm::{ChatMessage, LlmResponse, ToolCall};
     use anyhow::anyhow;
     use serde_json::json;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     const TYPED_SENTINEL: &str = "typed-secret-SENTINEL-agent-4b83";
 
@@ -2768,10 +2815,36 @@ mod tests {
             },
         ];
 
-        normalize_tool_calls(&mut calls);
+        normalize_tool_calls(std::path::Path::new("."), &mut calls);
 
         assert_eq!(calls[0].name, "read_file");
         assert_eq!(calls[1].name, "run_command");
+    }
+
+    #[test]
+    fn agent_rebases_existing_in_project_absolute_read_paths() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after Unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "hormachuelos-normalize-tool-path-{}-{nonce}",
+            std::process::id()
+        ));
+        let source = root.join("src").join("main.ts");
+        fs::create_dir_all(source.parent().expect("source has a parent"))
+            .expect("create test project");
+        fs::write(&source, "export const ready = true;\n").expect("write test source");
+
+        let mut calls = vec![ToolCall {
+            id: "absolute-read".into(),
+            name: "read_file".into(),
+            arguments: json!({ "path": source.to_string_lossy() }),
+        }];
+        normalize_tool_calls(&root, &mut calls);
+
+        assert_eq!(calls[0].arguments, json!({ "path": "src/main.ts" }));
+        fs::remove_dir_all(root).expect("remove test project");
     }
 
     #[test]

@@ -122,6 +122,8 @@ export class Chat {
   /** Cursor-style batch header: “Running N commands” / “Ran N commands”. */
   private toolBatchEl: HTMLElement | null = null;
   private toolBatchCount = 0;
+  private toolBatchFailures = 0;
+  private toolBatchResultIds = new Set<string>();
   private toolBatchOpen = false;
   /** Periodically re-kick water-wave dots — WebView can freeze CSS animations after heavy DOM updates. */
   private dotsPulseId: ReturnType<typeof setInterval> | null = null;
@@ -1597,6 +1599,8 @@ export class Chat {
     this.clearToolStreams();
     this.toolBatchEl = null;
     this.toolBatchCount = 0;
+    this.toolBatchFailures = 0;
+    this.toolBatchResultIds.clear();
     this.toolBatchOpen = false;
     this.setActivePermissionMode("plan");
     clear(this.node);
@@ -1620,6 +1624,8 @@ export class Chat {
     this.clearToolStreams();
     this.toolBatchEl = null;
     this.toolBatchCount = 0;
+    this.toolBatchFailures = 0;
+    this.toolBatchResultIds.clear();
     this.toolBatchOpen = false;
     this.setActivePermissionMode("plan");
     this.pendingAssistant = null;
@@ -1671,6 +1677,8 @@ export class Chat {
     this.clearToolStreams();
     this.toolBatchEl = null;
     this.toolBatchCount = 0;
+    this.toolBatchFailures = 0;
+    this.toolBatchResultIds.clear();
     this.toolBatchOpen = false;
     this.setActivePermissionMode("plan");
     this.pendingAssistant = null;
@@ -2063,8 +2071,10 @@ export class Chat {
       const batch = agent.closest<HTMLElement>(".multi-agent-batch");
       if (batch && !batch.querySelector(".multi-agent-tool.working")) {
         batch.classList.add("complete");
+        const failures = batch.querySelectorAll(".multi-agent-tool.failed").length;
+        batch.classList.toggle("needs-attention", failures > 0);
         const status = batch.querySelector(".multi-agent-live");
-        if (status) status.textContent = "DONE";
+        if (status) status.textContent = failures > 0 ? "NEEDS ATTENTION" : "DONE";
       }
     });
   }
@@ -2165,8 +2175,10 @@ export class Chat {
     } else {
       setShimmerText(
         label,
-        multiAgent
-          ? `✓ ${n} ${n === 1 ? "agent" : "agents"} finished`
+        multiAgent && this.toolBatchFailures > 0
+          ? `⚠ ${this.toolBatchFailures} ${this.toolBatchFailures === 1 ? "agent needs" : "agents need"} attention`
+          : multiAgent
+            ? `✓ ${n} ${n === 1 ? "agent" : "agents"} finished`
           : `${premium ? "Done" : "Ran"} ${n} ${unit}`,
         false,
       );
@@ -2184,6 +2196,8 @@ export class Chat {
     }
     this.sealToolBatch();
     this.toolBatchCount = 1;
+    this.toolBatchFailures = 0;
+    this.toolBatchResultIds.clear();
     this.toolBatchOpen = true;
     const head = el("button", {
       class: "tool-batch-head",
@@ -2247,6 +2261,8 @@ export class Chat {
     this.paintToolBatchLabel();
     this.toolBatchEl = null;
     this.toolBatchCount = 0;
+    this.toolBatchFailures = 0;
+    this.toolBatchResultIds.clear();
   }
 
   /**
@@ -3661,10 +3677,10 @@ export class Chat {
     const toolArgs = pending?.arguments ?? {};
 
     // Keep the wave row while more tools are still running; only clear when idle
-    if (this.pendingTools.size === 0) {
+    const completedBatch = this.pendingTools.size === 0;
+    if (completedBatch) {
       this.clearRunningIndicator();
       this.toolBatchOpen = false;
-      this.paintToolBatchLabel();
       if (this.running && !this.stopping && !this.userCancelled && !this.sealingTools) {
         this.scheduleIdleActivity();
       } else if (this.thinking) {
@@ -3698,6 +3714,11 @@ export class Chat {
     } else {
       this.buildFinishedToolCard(id, toolName, toolArgs, ok, content, stamp);
     }
+    if (!this.toolBatchResultIds.has(id)) {
+      this.toolBatchResultIds.add(id);
+      if (!ok) this.toolBatchFailures += 1;
+    }
+    if (completedBatch) this.paintToolBatchLabel();
     this.markMultiAgentToolDone(id, ok);
     this.multiAgentToolIds.delete(id);
     this.scrollToBottom();
