@@ -3,8 +3,8 @@
  * Cursor SDK local-agent bridge for Hormachuelos.
  * Reads one JSON request from stdin, streams NDJSON events to stdout.
  *
- * Request: { apiKey, model?, effort?, cwd, prompt, history?, agentId?, sessionId?, permissionMode? }
- * Events:  thinking | text | tool_call | tool_result | done | error
+ * Request: { apiKey, model?, effort?, cwd, prompt, history?, agentId?, sessionId?, permissionMode?, hostToolSchemas? }
+ * Events:  thinking | text | tool_call | tool_result | checkpoint | host_tool_request | done | error
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -31,9 +31,10 @@ function sessionAgentStore(sessionId) {
   return new JsonlLocalAgentStore(root);
 }
 
-function createDuplexProtocol(input = process.stdin) {
+function createDuplexProtocol(input = process.stdin, emit = write) {
   const lines = readline.createInterface({ input, crlfDelay: Infinity });
   const approvalWaiters = new Map();
+  const hostToolWaiters = new Map();
   let receivedInitialRequest = false;
   let initialResolve;
   let initialReject;
@@ -52,6 +53,11 @@ function createDuplexProtocol(input = process.stdin) {
       waiter.reject(error);
     }
     approvalWaiters.clear();
+    for (const waiter of hostToolWaiters.values()) {
+      clearTimeout(waiter.timer);
+      waiter.reject(error);
+    }
+    hostToolWaiters.clear();
   }
 
   lines.on("line", (line) => {
@@ -75,13 +81,25 @@ function createDuplexProtocol(input = process.stdin) {
       return;
     }
 
-    if (message?.type !== "approval_response") return;
     const requestId = String(message.requestId || "");
-    const waiter = approvalWaiters.get(requestId);
-    if (!waiter) return;
-    approvalWaiters.delete(requestId);
-    clearTimeout(waiter.timer);
-    waiter.resolve(message.approved === true);
+    if (message?.type === "approval_response") {
+      const waiter = approvalWaiters.get(requestId);
+      if (!waiter) return;
+      approvalWaiters.delete(requestId);
+      clearTimeout(waiter.timer);
+      waiter.resolve(message.approved === true);
+      return;
+    }
+    if (message?.type === "host_tool_response") {
+      const waiter = hostToolWaiters.get(requestId);
+      if (!waiter) return;
+      hostToolWaiters.delete(requestId);
+      clearTimeout(waiter.timer);
+      waiter.resolve({
+        ok: message.ok === true,
+        content: String(message.content || ""),
+      });
+    }
   });
   lines.on("close", () => rejectAll(new Error("AI-Forge closed the bridge input.")));
   lines.on("error", (error) => rejectAll(error));
@@ -102,12 +120,32 @@ function createDuplexProtocol(input = process.stdin) {
         }, 300_000);
         timer.unref?.();
         approvalWaiters.set(requestId, { resolve, reject, timer });
-        write({
+        emit({
           type: "approval_request",
           requestId,
           name,
           arguments: args,
           summary,
+        });
+      });
+    },
+    requestHostTool({ name, arguments: args }) {
+      if (closed) {
+        return Promise.reject(new Error("AI-Forge native tool channel is closed."));
+      }
+      const requestId = randomUUID();
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          hostToolWaiters.delete(requestId);
+          reject(new Error(`Native tool ${String(name || "tool")} timed out.`));
+        }, 900_000);
+        timer.unref?.();
+        hostToolWaiters.set(requestId, { resolve, reject, timer });
+        emit({
+          type: "host_tool_request",
+          requestId,
+          name,
+          arguments: args && typeof args === "object" ? args : {},
         });
       });
     },
@@ -155,8 +193,22 @@ const READ_ONLY_TOOLS = new Set([
   "grep",
   "glob",
   "ls",
+  "list_dir",
   "semsearch",
   "sem_search",
+  "git_status",
+  "list_drives",
+  "sys_info",
+  "env_vars",
+  "list_processes",
+  "file_info",
+  "view_image",
+  "view_video",
+  "ask_user",
+  "connect_account",
+  "integration_status",
+  "web_search",
+  "browse_page",
   "createplan",
   "create_plan",
   "todowrite",
@@ -166,6 +218,93 @@ const READ_ONLY_TOOLS = new Set([
   "computer_list_windows",
   "computer_observe",
 ]);
+
+// Cursor can keep its async event stream open after a built-in inspection
+// tool has started but stopped producing events. General reasoning remains
+// unbounded; only a visible search/read card gets this absolute deadline.
+const CURSOR_INSPECTION_TOOL_TIMEOUT_MS = 45_000;
+const CURSOR_INSPECTION_TOOLS = new Set([
+  "read",
+  "read_file",
+  "readlints",
+  "read_lints",
+  "grep",
+  "ripgrep",
+  "rg",
+  "glob",
+  "glob_file_search",
+  "ls",
+  "list_dir",
+  "semsearch",
+  "sem_search",
+  "file_info",
+  "git_status",
+]);
+
+function isCursorInspectionTool(name) {
+  const normalized = String(name || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+  return CURSOR_INSPECTION_TOOLS.has(normalized);
+}
+
+/** Return the nearest absolute deadline among currently open inspections. */
+function inspectionToolDeadline(
+  openTools,
+  nowMs = Date.now(),
+  timeoutMs = CURSOR_INSPECTION_TOOL_TIMEOUT_MS,
+) {
+  let nearest = null;
+  for (const [id, meta] of openTools.entries()) {
+    if (!isCursorInspectionTool(meta?.name)) continue;
+    const startedAt = Number(meta?.startedAt);
+    if (!Number.isFinite(startedAt)) continue;
+    const deadlineAt = startedAt + timeoutMs;
+    if (!nearest || deadlineAt < nearest.deadlineAt) {
+      nearest = {
+        id: String(id),
+        name: String(meta.name || "inspection tool"),
+        deadlineAt,
+      };
+    }
+  }
+  if (!nearest) return null;
+  return {
+    id: nearest.id,
+    name: nearest.name,
+    waitMs: Math.max(0, Math.ceil(nearest.deadlineAt - nowMs)),
+  };
+}
+
+async function nextCursorStreamEvent(iterator, openTools) {
+  // Attach both handlers immediately. If the deadline wins and the SDK later
+  // rejects its outstanding next(), the rejection is still observed.
+  const pending = Promise.resolve()
+    .then(() => iterator.next())
+    .then(
+      (result) => ({ kind: "event", result }),
+      (error) => ({ kind: "error", error }),
+    );
+  const deadline = inspectionToolDeadline(openTools);
+  if (!deadline) {
+    const outcome = await pending;
+    if (outcome.kind === "error") throw outcome.error;
+    return outcome;
+  }
+
+  let timer;
+  const timedOut = new Promise((resolve) => {
+    timer = setTimeout(
+      () => resolve({ kind: "inspection_timeout", tool: deadline }),
+      deadline.waitMs,
+    );
+  });
+  const outcome = await Promise.race([pending, timedOut]);
+  clearTimeout(timer);
+  if (outcome.kind === "error") throw outcome.error;
+  return outcome;
+}
 
 function resolveExecutionPolicy(value) {
   const mode = String(value || "").trim().toLowerCase();
@@ -189,10 +328,13 @@ function resolveSandboxOptions() {
   return { enabled: false };
 }
 
-function cursorRunFinishedSuccessfully(status, error) {
-  if (error) return false;
-  const normalized = String(status || "finished").trim().toLowerCase();
-  return ["finished", "completed", "success", "succeeded"].includes(normalized);
+function unresolvedCursorToolResult(status, error) {
+  const normalized = String(status || "unknown").trim().toLowerCase() || "unknown";
+  const detail = error ? `: ${safePreview(error, 300)}` : ` (run status: ${normalized})`;
+  return {
+    ok: false,
+    content: `Tool was interrupted before an explicit result${detail}. Correct or retry the call.`,
+  };
 }
 
 function isToolAllowed(policy, name) {
@@ -315,6 +457,92 @@ function mergeHostCustomTools(...groups) {
     Object.assign(merged, group);
   }
   return merged;
+}
+
+function normalizedHostToolSchemas(value) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  const schemas = [];
+  for (const raw of value) {
+    if (!raw || typeof raw !== "object") continue;
+    const name = String(raw.name || "").trim();
+    if (!name || seen.has(name)) continue;
+    const inputSchema =
+      raw.inputSchema && typeof raw.inputSchema === "object"
+        ? raw.inputSchema
+        : objectSchema({});
+    seen.add(name);
+    schemas.push({
+      name,
+      description: String(raw.description || `Run native AI-Forge tool ${name}.`),
+      inputSchema,
+    });
+  }
+  return schemas;
+}
+
+/** Register Rust-backed tools with Cursor's synthetic custom-user-tools MCP. */
+function createHostTools(schemas, policy, protocol, outcomes = new Map()) {
+  const tools = {};
+  const recordOutcome = (toolCallId, ok) => {
+    if (!toolCallId) return;
+    outcomes.set(toolCallId, ok);
+    while (outcomes.size > 512) {
+      outcomes.delete(outcomes.keys().next().value);
+    }
+  };
+  for (const schema of normalizedHostToolSchemas(schemas)) {
+    if (!isToolAllowed(policy, schema.name)) continue;
+    tools[schema.name] = {
+      description: schema.description,
+      inputSchema: schema.inputSchema,
+      execute: async (args, context = {}) => {
+        const toolCallId = String(context.toolCallId || "").trim();
+        try {
+          const result = await protocol.requestHostTool({
+            name: schema.name,
+            arguments: args && typeof args === "object" ? args : {},
+          });
+          recordOutcome(toolCallId, result.ok === true);
+          return {
+            content: [
+              {
+                type: "text",
+                text:
+                  result.content ||
+                  (result.ok ? `${schema.name} completed.` : `${schema.name} failed.`),
+              },
+            ],
+            isError: result.ok !== true,
+          };
+        } catch (error) {
+          recordOutcome(toolCallId, false);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Native tool error: ${safePreview(error?.message || error, 800)}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+      },
+    };
+  }
+  return tools;
+}
+
+function hostToolsPrompt(schemas) {
+  const names = normalizedHostToolSchemas(schemas).map((schema) => schema.name);
+  if (names.length === 0) return "";
+  return (
+    "NATIVE AI-FORGE TOOLS:\n" +
+    `- Available through the desktop host: ${names.join(", ")}.\n` +
+    '- For the project root, pass path "."; never pass an empty path or "..".\n' +
+    "- If a tool returns an error, correct the name or arguments and retry with a narrower query or a different tool. Do not only narrate the failure, and do not repeat an identical failing call.\n" +
+    "- Keep working until the request is actually complete; a tool error is recoverable unless the result explicitly says otherwise."
+  );
 }
 
 function safePreview(value, maxChars = 120) {
@@ -928,8 +1156,20 @@ async function runMain(protocol) {
 
   const model = resolveModelSelection(req.model, req.effort);
   const policy = resolveExecutionPolicy(req.permissionMode);
+  const hostToolSchemas = normalizedHostToolSchemas(req.hostToolSchemas);
+  const hostToolOutcomes = new Map();
+  const hostTools = createHostTools(
+    hostToolSchemas,
+    policy,
+    protocol,
+    hostToolOutcomes,
+  );
   const computerUseTools = createComputerUseTools(req, policy, protocol);
-  const customTools = mergeHostCustomTools(createProgressTools(), computerUseTools);
+  const customTools = mergeHostCustomTools(
+    createProgressTools(),
+    hostTools,
+    computerUseTools,
+  );
   const hasCustomTools = Object.keys(customTools).length > 0;
   const hasComputerUse = Object.keys(computerUseTools).length > 0;
   const sessionId = String(req.sessionId || "").trim();
@@ -974,12 +1214,24 @@ async function runMain(protocol) {
     agent = await Agent.create(options);
   }
 
+  // Persist the durable id before send/stream/wait. If a long SDK run becomes
+  // silent or a tool hangs, Rust can restart this exact agent instead of
+  // losing its workspace reasoning because `done` was never reached.
+  const checkpointAgentId = String(agent.agentId || agent.id || "").trim();
+  if (checkpointAgentId) {
+    write({ type: "checkpoint", agentId: checkpointAgentId });
+  }
+
   write({ type: "thinking" });
 
   // Fresh agents get Hormachuelos transcript only; resumed agents keep SDK memory.
   // Never inject another session's history into this agent.
   const basePrompt = buildAgentPrompt(prompt, resumed ? [] : req.history);
   const agentPromptParts = [progressTrackingPrompt()];
+  const nativeToolsPolicy = hostToolsPrompt(
+    Object.keys(hostTools).map((name) => ({ name })),
+  );
+  if (nativeToolsPolicy) agentPromptParts.push(nativeToolsPolicy);
   if (hasComputerUse) agentPromptParts.push(computerUsePrompt(policy));
   agentPromptParts.push(basePrompt);
   const agentPrompt = agentPromptParts.join("\n\n");
@@ -991,6 +1243,12 @@ async function runMain(protocol) {
   if (hasCustomTools) sendOptions.local.customTools = customTools;
   if (model) sendOptions.model = model;
   const run = await agent.send(agentPrompt, sendOptions);
+  const runCheckpointAgentId = String(
+    run.agentId || agent.agentId || agent.id || "",
+  ).trim();
+  if (runCheckpointAgentId && runCheckpointAgentId !== checkpointAgentId) {
+    write({ type: "checkpoint", agentId: runCheckpointAgentId });
+  }
   let sawText = false;
   let runError = null;
   let thinkingActive = false;
@@ -1000,6 +1258,7 @@ async function runMain(protocol) {
   let reasoningChars = 0;
   let usageEmitted = 0;
   const openTools = new Map();
+  const closedTools = new Set();
 
   function currentUsageEstimate() {
     const promptChars = agentPrompt.length;
@@ -1138,6 +1397,7 @@ async function runMain(protocol) {
   }
 
   function emitToolCall(id, name, args) {
+    if (openTools.has(id) || closedTools.has(id)) return;
     textOut.flush();
     flushHeldAssistant();
     const publicArgs = COMPUTER_ACTION_TOOLS.has(name)
@@ -1145,7 +1405,7 @@ async function runMain(protocol) {
       : args && typeof args === "object"
         ? args
         : {};
-    openTools.set(id, { name, args: publicArgs });
+    openTools.set(id, { name, args: publicArgs, startedAt: Date.now() });
     write({
       type: "tool_call",
       id,
@@ -1156,8 +1416,18 @@ async function runMain(protocol) {
   }
 
   function emitToolResult(id, name, ok, result) {
+    if (closedTools.has(id)) return;
+    if (!openTools.has(id)) emitToolCall(id, name, {});
+    // The SDK custom-tool callback carries an explicit isError result, but
+    // some SDK event versions report the surrounding MCP wrapper as merely
+    // "completed". Preserve the native result by its SDK tool-call id.
+    if (hostToolOutcomes.has(id)) {
+      ok = ok && hostToolOutcomes.get(id) === true;
+      hostToolOutcomes.delete(id);
+    }
     if (openTools.has(id)) toolsCompleted += 1;
     openTools.delete(id);
+    closedTools.add(id);
     write({
       type: "tool_result",
       id,
@@ -1188,8 +1458,29 @@ async function runMain(protocol) {
     }
   }
 
+  let inspectionInterruption = null;
   try {
-    eventLoop: for await (const event of run.stream()) {
+    const stream = run.stream()[Symbol.asyncIterator]();
+    eventLoop: while (true) {
+      const next = await nextCursorStreamEvent(stream, openTools);
+      if (next.kind === "inspection_timeout") {
+        const { id, name } = next.tool;
+        inspectionInterruption = `${name} stopped reporting progress for 45 seconds; retrying from the saved agent checkpoint.`;
+        write({ type: "status", message: inspectionInterruption });
+        write({
+          type: "recoverable_interruption",
+          message: inspectionInterruption,
+          id,
+          name,
+        });
+        // Do not wait for a wedged SDK cancellation acknowledgement. Rust
+        // stops this bridge after the terminal event and resumes the durable
+        // checkpoint in a fresh process.
+        void run.cancel().catch(() => {});
+        break;
+      }
+      if (next.result.done) break;
+      const event = next.result.value;
       if (!event || typeof event !== "object") continue;
       const kind = event.type;
 
@@ -1302,7 +1593,19 @@ async function runMain(protocol) {
   }
 
   flushHeldAssistant();
-  const result = await run.wait();
+  let result;
+  if (inspectionInterruption) {
+    result = { status: "cancelled" };
+  } else {
+    try {
+      result = await run.wait();
+    } catch (waitError) {
+      runError =
+        runError ||
+        `Cursor run wait failed: ${safePreview(waitError?.message || waitError, 800)}`;
+      result = { status: "error", error: { message: runError } };
+    }
+  }
   const finalText =
     (typeof result?.result === "string" && result.result) ||
     (typeof result?.text === "string" && result.text) ||
@@ -1334,13 +1637,16 @@ async function runMain(protocol) {
   // Seal any tools the SDK left open so the UI never keeps shimmering. An
   // error/cancelled run did not prove those tools succeeded, so report the
   // interrupted state instead of manufacturing a successful result.
-  const openToolsSucceeded = cursorRunFinishedSuccessfully(status, errMsg);
   for (const [id, meta] of openTools.entries()) {
+    const interrupted = unresolvedCursorToolResult(
+      status,
+      errMsg || inspectionInterruption,
+    );
     emitToolResult(
       id,
       meta.name,
-      openToolsSucceeded,
-      openToolsSucceeded ? "(completed)" : "(interrupted before a result)",
+      interrupted.ok,
+      interrupted.content,
     );
   }
 
@@ -1380,11 +1686,16 @@ export {
   computerApprovalSummary,
   createCompletionMarkerFilter,
   createComputerUseTools,
+  createDuplexProtocol,
+  createHostTools,
   createProgressTools,
-  cursorRunFinishedSuccessfully,
   helperEnvironment,
+  hostToolsPrompt,
+  inspectionToolDeadline,
   isToolAllowed,
+  isCursorInspectionTool,
   mergeHostCustomTools,
+  nextCursorStreamEvent,
   normalizeEffort,
   progressTrackingPrompt,
   resolveExecutionPolicy,
@@ -1392,6 +1703,7 @@ export {
   resolveSandboxOptions,
   sanitizeComputerToolArguments,
   summarizeTodoWrite,
+  unresolvedCursorToolResult,
 };
 
 const invokedAsScript =

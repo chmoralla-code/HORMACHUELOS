@@ -10,6 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const MAX_FILE_READ_BYTES: usize = 200_000;
+const MAX_LIST_DIR_ENTRIES: usize = 2_000;
+const MAX_INSPECTION_TIMEOUT_SECS: u64 = 45;
 const MAX_COMMAND_OUTPUT_BYTES: usize = 50_000;
 const MAX_CONSOLE_LINE_BYTES: usize = 8_192;
 const MAX_DOWNLOAD_BYTES: u64 = 100 * 1024 * 1024;
@@ -48,6 +50,128 @@ pub fn normalize_tool_name(name: &str) -> String {
     canonical_tool_name(name)
         .unwrap_or_else(|| name.trim())
         .to_string()
+}
+
+/// Repair a small set of unambiguous argument spellings commonly emitted by
+/// OpenAI-compatible and Cursor models. This runs before permission checks as
+/// well as inside the dispatcher, so a compatibility alias can never bypass
+/// the canonical tool's path or approval policy.
+pub fn normalize_tool_arguments(name: &str, arguments: &mut Value) {
+    let name = canonical_tool_name(name).unwrap_or_else(|| name.trim());
+    let Some(args) = arguments.as_object_mut() else {
+        return;
+    };
+
+    fn promote_alias(args: &mut serde_json::Map<String, Value>, canonical: &str, aliases: &[&str]) {
+        if args.contains_key(canonical) {
+            return;
+        }
+        if let Some(value) = aliases.iter().find_map(|alias| args.remove(*alias)) {
+            args.insert(canonical.to_string(), value);
+        }
+    }
+
+    fn is_implicit_project_root(path: &str) -> bool {
+        let path = path.trim();
+        if path.is_empty() {
+            return true;
+        }
+        let mut saw_parent = false;
+        for part in path.split(['/', '\\']) {
+            match part {
+                "" | "." => {}
+                ".." => saw_parent = true,
+                _ => return false,
+            }
+        }
+        saw_parent
+    }
+
+    match name {
+        "read_file" | "list_dir" | "file_info" | "open_path" | "view_image" | "view_video"
+        | "delete_file" | "make_dir" => {
+            promote_alias(args, "path", &["file", "file_path", "filepath"]);
+        }
+        "write_file" => {
+            promote_alias(args, "path", &["file", "file_path", "filepath"]);
+            promote_alias(args, "content", &["text", "body"]);
+        }
+        "edit_file" => {
+            promote_alias(args, "path", &["file", "file_path", "filepath"]);
+            promote_alias(args, "old_string", &["old", "search", "find"]);
+            promote_alias(args, "new_string", &["new", "replacement", "replace"]);
+        }
+        "grep" => {
+            promote_alias(args, "pattern", &["query", "regex", "search"]);
+            promote_alias(args, "path", &["directory", "dir", "root"]);
+        }
+        "glob" => promote_alias(args, "pattern", &["glob", "query"]),
+        "run_command" | "start_dev_server" => {
+            promote_alias(args, "command", &["cmd", "script"]);
+            promote_alias(args, "cwd", &["working_directory", "workdir"]);
+        }
+        "move_file" | "copy_file" => {
+            promote_alias(args, "src", &["source", "from"]);
+            promote_alias(args, "dst", &["dest", "destination", "to"]);
+        }
+        "download_file" => {
+            promote_alias(args, "url", &["uri"]);
+            promote_alias(args, "path", &["dest", "destination", "output_path"]);
+        }
+        "open_url" | "browse_page" => promote_alias(args, "url", &["uri", "link"]),
+        "web_search" => promote_alias(args, "query", &["q", "search", "pattern"]),
+        "git_commit" => promote_alias(args, "message", &["commit_message", "summary"]),
+        "connect_account" | "integration_status" => {
+            promote_alias(args, "service", &["provider", "integration"])
+        }
+        "export_client_pack" => {
+            promote_alias(args, "output_path", &["path", "dest", "destination"]);
+            promote_alias(args, "handoff_summary", &["summary", "notes"]);
+        }
+        "kill_process" => promote_alias(args, "pid", &["process_id", "processId"]),
+        "computer_observe"
+        | "computer_focus_window"
+        | "computer_click"
+        | "computer_type_text"
+        | "computer_press_key"
+        | "computer_scroll"
+        | "computer_drag"
+        | "computer_game_sequence" => {
+            promote_alias(args, "window_id", &["window", "windowId"]);
+            if name != "computer_observe" && name != "computer_focus_window" {
+                promote_alias(args, "observation_token", &["observationToken", "token"]);
+            }
+            match name {
+                "computer_type_text" => promote_alias(args, "text", &["content", "value"]),
+                "computer_press_key" => promote_alias(args, "keys", &["key", "combo", "shortcut"]),
+                "computer_scroll" => {
+                    promote_alias(args, "delta_y", &["amount", "scroll_y", "delta"])
+                }
+                "computer_drag" => {
+                    promote_alias(args, "start_x", &["from_x"]);
+                    promote_alias(args, "start_y", &["from_y"]);
+                    promote_alias(args, "end_x", &["to_x"]);
+                    promote_alias(args, "end_y", &["to_y"]);
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+
+    // Several providers serialize the project root as an empty string or the
+    // parent-only spelling `..`. Rooted directory/search tools mean `.` in
+    // those unambiguous cases; arbitrary traversal such as `../outside` stays
+    // untouched and is rejected by the normal containment checks.
+    if matches!(name, "list_dir" | "grep") {
+        let should_rebase = args
+            .get("path")
+            .and_then(Value::as_str)
+            .is_some_and(is_implicit_project_root);
+        if should_rebase {
+            args.insert("path".into(), Value::String(".".into()));
+        }
+    }
 }
 
 /// True when `name` is a registered dispatcher name or an explicitly safe
@@ -169,7 +293,7 @@ fn safe_concatenated_readonly_tool_name(compact: &str) -> Option<&'static str> {
     (parts >= 2).then_some(first?)
 }
 
-fn is_readonly_tool(name: &str) -> bool {
+pub fn is_readonly_tool(name: &str) -> bool {
     let name = canonical_tool_name(name).unwrap_or(name);
     matches!(
         name,
@@ -343,7 +467,7 @@ pub fn needs_tool_confirm(name: &str, args: &Value, root: &Path, mode: &str) -> 
 mod permission_mode_tests {
     use super::{
         execute, is_parallel_safe_readonly_tool, is_supported_tool_name, needs_tool_confirm,
-        normalize_tool_name, schemas, ToolRunContext,
+        normalize_tool_arguments, normalize_tool_name, schemas, ToolRunContext,
     };
     use serde_json::json;
     use std::collections::BTreeSet;
@@ -550,6 +674,53 @@ mod permission_mode_tests {
         assert_eq!(
             normalize_tool_name("delete_everything"),
             "delete_everything"
+        );
+    }
+
+    #[test]
+    fn common_provider_argument_aliases_and_blank_roots_are_repaired() {
+        let mut grep_args = json!({ "query": "needle", "path": "" });
+        normalize_tool_arguments("grep", &mut grep_args);
+        assert_eq!(grep_args, json!({ "pattern": "needle", "path": "." }));
+
+        let mut parent_root = json!({ "pattern": "needle", "path": ".." });
+        normalize_tool_arguments("grep", &mut parent_root);
+        assert_eq!(parent_root, json!({ "pattern": "needle", "path": "." }));
+
+        let mut real_traversal = json!({ "pattern": "needle", "path": "../outside" });
+        normalize_tool_arguments("grep", &mut real_traversal);
+        assert_eq!(
+            real_traversal,
+            json!({ "pattern": "needle", "path": "../outside" })
+        );
+
+        let mut move_args = json!({ "source": "a.txt", "destination": "b.txt" });
+        normalize_tool_arguments("move_file", &mut move_args);
+        assert_eq!(move_args, json!({ "src": "a.txt", "dst": "b.txt" }));
+
+        let mut command_args = json!({ "cmd": "npm test", "workdir": "src" });
+        normalize_tool_arguments("run_command", &mut command_args);
+        assert_eq!(command_args, json!({ "command": "npm test", "cwd": "src" }));
+
+        let mut drag_args = json!({
+            "windowId": "w1",
+            "token": "fresh",
+            "from_x": 1,
+            "from_y": 2,
+            "to_x": 3,
+            "to_y": 4,
+        });
+        normalize_tool_arguments("computer_drag", &mut drag_args);
+        assert_eq!(
+            drag_args,
+            json!({
+                "window_id": "w1",
+                "observation_token": "fresh",
+                "start_x": 1,
+                "start_y": 2,
+                "end_x": 3,
+                "end_y": 4,
+            })
         );
     }
 
@@ -2958,6 +3129,9 @@ pub fn execute(
     ctx: &ToolRunContext,
 ) -> Result<String> {
     let name = canonical_tool_name(name).unwrap_or_else(|| name.trim());
+    let mut normalized_arguments = args.clone();
+    normalize_tool_arguments(name, &mut normalized_arguments);
+    let args = &normalized_arguments;
     match name {
         "read_file" => {
             let p = args
@@ -2965,13 +3139,20 @@ pub fn execute(
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("missing path"))?;
             let full = resolve_project_read_path(root, p)?;
-            let bytes = std::fs::read(&full)?;
+            let total_bytes = std::fs::metadata(&full)?.len();
+            let mut bytes = Vec::with_capacity(
+                usize::try_from(total_bytes.min((MAX_FILE_READ_BYTES + 1) as u64))
+                    .unwrap_or(MAX_FILE_READ_BYTES + 1),
+            );
+            std::fs::File::open(&full)?
+                .take((MAX_FILE_READ_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)?;
             let content = String::from_utf8_lossy(&bytes).to_string();
-            if content.len() > MAX_FILE_READ_BYTES {
+            if total_bytes > MAX_FILE_READ_BYTES as u64 || content.len() > MAX_FILE_READ_BYTES {
                 Ok(format!(
-                    "{}...(truncated, {} bytes total)",
+                    "{}...(truncated, {} bytes total; narrow the read or use grep)",
                     utf8_prefix(&content, MAX_FILE_READ_BYTES),
-                    content.len()
+                    total_bytes
                 ))
             } else {
                 Ok(content)
@@ -3018,6 +3199,9 @@ pub fn execute(
             let full = resolve_project_read_path(root, rel)?;
             let mut entries = Vec::new();
             for e in std::fs::read_dir(&full)? {
+                if ctx.cancel.load(Ordering::SeqCst) {
+                    anyhow::bail!("Directory listing cancelled.");
+                }
                 let e = e?;
                 let meta = std::fs::symlink_metadata(e.path())?;
                 if metadata_is_link_like(&meta) {
@@ -3028,6 +3212,9 @@ pub fn execute(
                     "is_dir": meta.is_dir(),
                     "size": meta.len(),
                 }));
+                if entries.len() > MAX_LIST_DIR_ENTRIES {
+                    break;
+                }
             }
             entries.sort_by(|a, b| {
                 let ad = a.get("is_dir").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -3042,6 +3229,15 @@ pub fn execute(
                         .cmp(b.get("name").and_then(|v| v.as_str()).unwrap_or("")),
                 }
             });
+            if entries.len() > MAX_LIST_DIR_ENTRIES {
+                entries.truncate(MAX_LIST_DIR_ENTRIES);
+                entries.push(json!({
+                    "name": format!("… listing truncated after {MAX_LIST_DIR_ENTRIES} entries"),
+                    "is_dir": false,
+                    "size": 0,
+                    "truncated": true,
+                }));
+            }
             Ok(serde_json::to_string_pretty(&entries)?)
         }
         "glob" => {
@@ -3049,20 +3245,42 @@ pub fn execute(
                 .get("pattern")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("missing pattern"))?;
+            if pat.trim().is_empty() {
+                anyhow::bail!("glob pattern must not be empty; use a project-relative pattern such as src/**/*");
+            }
             let root = root
                 .canonicalize()
                 .context("Could not resolve project root")?;
             let safe_pattern = validate_project_relative_path(pat)?;
             let pat_full = root.join(safe_pattern).to_string_lossy().to_string();
             let mut matches: Vec<String> = Vec::new();
+            let deadline = Instant::now()
+                + Duration::from_secs(timeout_secs.clamp(1, MAX_INSPECTION_TIMEOUT_SECS));
             for entry in glob::glob(&pat_full)? {
+                if ctx.cancel.load(Ordering::SeqCst) {
+                    anyhow::bail!("Glob search cancelled.");
+                }
+                if Instant::now() > deadline {
+                    anyhow::bail!(
+                        "Glob search timed out; narrow the project-relative pattern and retry."
+                    );
+                }
                 let e = entry?;
                 let Ok(relative) = e.strip_prefix(&root) else {
                     continue;
                 };
                 let relative = relative.to_string_lossy();
                 if let Ok(safe) = resolve_project_read_path(&root, relative.as_ref()) {
-                    matches.push(safe.to_string_lossy().replace('\\', "/"));
+                    let relative = safe
+                        .strip_prefix(&root)
+                        .unwrap_or(&safe)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    matches.push(if relative.is_empty() {
+                        ".".into()
+                    } else {
+                        relative
+                    });
                 }
                 if matches.len() >= 500 {
                     break;
@@ -3075,17 +3293,35 @@ pub fn execute(
                 .get("pattern")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("missing pattern"))?;
+            if pat.trim().is_empty() {
+                anyhow::bail!(
+                    "grep pattern must not be empty; provide a distinctive text or regex"
+                );
+            }
             let search_root = args.get("path").and_then(|v| v.as_str());
             let dir = match search_root {
                 Some(p) => resolve_project_read_path(root, p)?,
                 None => resolve_project_read_path(root, ".")?,
             };
-            let re = regex::Regex::new(pat)?;
+            // Weak providers sometimes send plain text containing an unmatched
+            // `[` or `(`. Fall back to a literal search instead of turning a
+            // harmless inspection request into a dead tool loop.
+            let re = regex::Regex::new(pat).or_else(|_| regex::Regex::new(&regex::escape(pat)))?;
             let mut hits: Vec<Value> = Vec::new();
             let project_root = root
                 .canonicalize()
                 .context("Could not resolve project root")?;
-            walk(&dir, &project_root, &dir, &re, &mut hits, 1000)?;
+            let deadline = Instant::now()
+                + Duration::from_secs(timeout_secs.clamp(1, MAX_INSPECTION_TIMEOUT_SECS));
+            GrepWalk {
+                display_root: &dir,
+                project_root: &project_root,
+                re: &re,
+                limit: 1000,
+                ctx,
+                deadline,
+            }
+            .walk(&dir, &mut hits)?;
             Ok(serde_json::to_string_pretty(&hits)?)
         }
         "run_command" => {
@@ -3546,71 +3782,87 @@ pub fn list_dir_json(path: &str, max_depth: u32) -> Result<Value> {
     Ok(serde_json::to_value(&node)?)
 }
 
-fn walk(
-    display_root: &Path,
-    project_root: &Path,
-    dir: &Path,
-    re: &regex::Regex,
-    hits: &mut Vec<Value>,
+struct GrepWalk<'a> {
+    display_root: &'a Path,
+    project_root: &'a Path,
+    re: &'a regex::Regex,
     limit: usize,
-) -> Result<()> {
-    if hits.len() >= limit {
-        return Ok(());
-    }
-    let canonical_dir = dir.canonicalize()?;
-    if !canonical_dir.starts_with(project_root) {
-        anyhow::bail!("Search directory resolves outside the active project.");
-    }
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        let meta = std::fs::symlink_metadata(&path)?;
-        if metadata_is_link_like(&meta) {
-            continue;
+    ctx: &'a ToolRunContext,
+    deadline: Instant,
+}
+
+impl GrepWalk<'_> {
+    fn walk(&self, dir: &Path, hits: &mut Vec<Value>) -> Result<()> {
+        if self.ctx.cancel.load(Ordering::SeqCst) {
+            anyhow::bail!("Search cancelled.");
         }
-        let canonical = path.canonicalize()?;
-        if !canonical.starts_with(project_root) {
-            continue;
+        if Instant::now() > self.deadline {
+            anyhow::bail!("Search timed out; narrow the path or pattern and retry.");
         }
-        if meta.is_dir() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.')
-                || name == "node_modules"
-                || name == "target"
-                || name == ".git"
-                || name == "dist"
-                || name == "build"
-                || name == "__pycache__"
-            {
+        if hits.len() >= self.limit {
+            return Ok(());
+        }
+        let canonical_dir = dir.canonicalize()?;
+        if !canonical_dir.starts_with(self.project_root) {
+            anyhow::bail!("Search directory resolves outside the active project.");
+        }
+        for entry in std::fs::read_dir(dir)? {
+            if self.ctx.cancel.load(Ordering::SeqCst) {
+                anyhow::bail!("Search cancelled.");
+            }
+            if Instant::now() > self.deadline {
+                anyhow::bail!("Search timed out; narrow the path or pattern and retry.");
+            }
+            let entry = entry?;
+            let path = entry.path();
+            let meta = std::fs::symlink_metadata(&path)?;
+            if metadata_is_link_like(&meta) {
                 continue;
             }
-            walk(display_root, project_root, &canonical, re, hits, limit)?;
-        } else if meta.is_file() {
-            if meta.len() > 2_000_000 {
+            let canonical = path.canonicalize()?;
+            if !canonical.starts_with(self.project_root) {
                 continue;
             }
-            if let Ok(text) = std::fs::read_to_string(&path) {
-                let rel = canonical
-                    .strip_prefix(display_root)
-                    .unwrap_or(&canonical)
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                for (i, line) in text.lines().enumerate() {
-                    if re.is_match(line) {
-                        hits.push(json!({
-                            "path": rel,
-                            "line": i + 1,
-                            "text": line.chars().take(500).collect::<String>(),
-                        }));
-                        if hits.len() >= limit {
-                            return Ok(());
+            if meta.is_dir() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with('.')
+                    || name == "node_modules"
+                    || name == "target"
+                    || name == ".git"
+                    || name == "dist"
+                    || name == "build"
+                    || name == "__pycache__"
+                {
+                    continue;
+                }
+                self.walk(&canonical, hits)?;
+            } else if meta.is_file() {
+                if meta.len() > 2_000_000 {
+                    continue;
+                }
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    let rel = canonical
+                        .strip_prefix(self.display_root)
+                        .unwrap_or(&canonical)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    for (i, line) in text.lines().enumerate() {
+                        if self.re.is_match(line) {
+                            hits.push(json!({
+                                "path": rel,
+                                "line": i + 1,
+                                "text": line.chars().take(500).collect::<String>(),
+                            }));
+                            if hits.len() >= self.limit {
+                                return Ok(());
+                            }
                         }
                     }
                 }
             }
         }
+        Ok(())
     }
-    Ok(())
 }
 
 /// Run `git commit -m <msg>` with separate argv (no shell interpolation).
@@ -4187,6 +4439,51 @@ mod security_tests {
         )
         .expect("the safe read alias should dispatch");
         assert_eq!(output, "inside");
+    }
+
+    #[test]
+    fn root_searches_and_literal_invalid_regexes_execute_successfully() {
+        let tree = TempTree::new();
+        std::fs::write(tree.root.join("brackets.txt"), "value [literal\n").unwrap();
+        let context = ToolRunContext::noop();
+
+        let listed = execute("list_dir", &json!({ "path": "" }), &tree.root, 5, &context)
+            .expect("empty directory roots should mean the active project");
+        assert!(listed.contains("inside.txt"));
+
+        let searched = execute(
+            "grep",
+            &json!({ "query": "[literal", "path": "" }),
+            &tree.root,
+            5,
+            &context,
+        )
+        .expect("plain text with an unmatched bracket should use literal search");
+        assert!(searched.contains("brackets.txt"));
+        assert!(searched.contains("[literal"));
+    }
+
+    #[test]
+    fn safe_backend_tool_smoke_executes_real_dispatch_paths() {
+        let tree = TempTree::new();
+        let context = ToolRunContext::noop();
+        let cases = [
+            ("read_file", json!({ "file_path": "inside.txt" })),
+            ("list_dir", json!({ "path": "." })),
+            ("glob", json!({ "pattern": "*.txt" })),
+            ("grep", json!({ "pattern": "inside", "path": "." })),
+            ("file_info", json!({ "path": "inside.txt" })),
+            ("sys_info", json!({})),
+            ("env_vars", json!({ "filter": "PATH" })),
+            ("list_drives", json!({})),
+            ("todo_write", json!({ "todos": [] })),
+        ];
+
+        for (name, args) in cases {
+            let output = execute(name, &args, &tree.root, 5, &context)
+                .unwrap_or_else(|error| panic!("{name} failed its backend smoke test: {error}"));
+            assert!(!output.trim().is_empty(), "{name} returned no result");
+        }
     }
 
     #[test]

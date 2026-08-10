@@ -51,16 +51,17 @@ const ADVERTISED_TOOL_PLAN = [
   { name: "browse_page", arguments: { url: "https://example.com" } },
   { name: "export_client_pack", arguments: { handoff_summary: "Ready" } },
   { name: "ask_user", arguments: { question: "Continue?", options: ["Yes", "No"] } },
+  { name: "todo_write", arguments: { todos: [{ id: "verify", content: "Verify all tools", status: "completed" }] } },
   { name: "done", arguments: { title: "Verified", summary: "All tools checked" } },
   { name: "computer_list_windows", arguments: {} },
   { name: "computer_observe", arguments: { window_id: "window-1" } },
   { name: "computer_focus_window", arguments: { window_id: "window-1" } },
   { name: "computer_click", arguments: { window_id: "window-1", observation_token: "token", x: 10, y: 10 } },
   { name: "computer_type_text", arguments: { window_id: "window-1", observation_token: "token", text: "hidden" } },
-  { name: "computer_press_key", arguments: { window_id: "window-1", observation_token: "token", key: "Enter" } },
+  { name: "computer_press_key", arguments: { window_id: "window-1", observation_token: "token", keys: "Enter" } },
   { name: "computer_scroll", arguments: { window_id: "window-1", observation_token: "token", delta_y: 120 } },
-  { name: "computer_drag", arguments: { window_id: "window-1", observation_token: "token", from_x: 10, from_y: 10, to_x: 30, to_y: 30 } },
-  { name: "computer_game_sequence", arguments: { window_id: "window-1", observation_token: "token", steps: [{ keys: ["W"], delay_ms: 16 }] } },
+  { name: "computer_drag", arguments: { window_id: "window-1", observation_token: "token", start_x: 10, start_y: 10, end_x: 30, end_y: 30 } },
+  { name: "computer_game_sequence", arguments: { window_id: "window-1", observation_token: "token", steps: [{ keys: "W", delay_ms: 16 }] } },
 ];
 
 test.use({
@@ -169,7 +170,7 @@ async function installHormachuelosLongRunMock(page, { lifecycleScenario = false 
         event("tool_preview", {
           id: "tool-preview-0-0",
           name: "grep",
-          arguments_delta: "{\"path\":\"\"}",
+          arguments_delta: "{\"path\":\"..\"}",
         });
         window.__HORMA_LIFECYCLE__.secondPreview = true;
         await delay(220);
@@ -430,6 +431,7 @@ test("long HORMACHUELOS task recovers without a manual Continue message", async 
 });
 
 test("Multi-Agent UI completes every advertised tool without leaving a pending card", async ({ page }) => {
+  expect(ADVERTISED_TOOL_PLAN).toHaveLength(44);
   await page.addInitScript(() => {
     window.__HORMA_LONG_PERMISSION_MODE__ = "multi_agent";
   });
