@@ -66,6 +66,140 @@ test("Design mode keeps exact element selection for project-file previews", asyn
   expect(incidentCandidates).not.toContain("node_modules/example/pages/incident-reports.tsx");
 });
 
+test("Source Lens is a separate mode with source hover and screenshot-only chat", async ({ page }) => {
+  await page.route("https://asset.localhost/**", (route) =>
+    route.fulfill({ status: 200, contentType: "image/png", body: "" }),
+  );
+  await page.goto(`${APP}/preview-harness.html`, { waitUntil: "networkidle" });
+
+  const design = page.getByRole("button", { name: "Design", exact: true });
+  const sourceLens = page.getByRole("button", { name: "Toggle Source Lens" });
+  await sourceLens.click();
+  await expect(sourceLens).toHaveAttribute("aria-pressed", "true");
+  await expect(design).toHaveAttribute("aria-pressed", "false");
+  await expect(page.locator(".site-preview-status")).toContainText("hover to identify code");
+
+  const frame = page.frameLocator(".site-preview-frame");
+  const target = frame.getByRole("button", { name: "Preview target" });
+  await target.hover();
+  const sourceHud = frame.locator(".horma-source-hud");
+  await expect(sourceHud).toContainText("Frontend · src/components/PublishButton.tsx:42");
+  await expect(sourceHud).toContainText("Style · src/styles/actions.css:18");
+  await expect(sourceHud).toContainText("Backend · src/server/routes/publish.ts:27");
+
+  await target.click();
+  await expect(frame.locator(".horma-edit-chip")).toContainText("Edit this source");
+  await page.getByRole("textbox", { name: "Describe the change" }).fill(
+    "Make the button smaller and simpler.",
+  );
+  await page.getByRole("button", { name: "Ask AI", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => window.__previewPromptDispatches?.length || 0)).toBe(1);
+
+  const request = await page.evaluate(() => window.__previewPromptDispatches[0]);
+  expect(request.visibleText).toBe("");
+  expect(request.imagePath).toContain("design-feature-reference.png");
+  expect(request.prompt).toContain("Resolved frontend source (exact): src/components/PublishButton.tsx:42:7");
+  expect(request.prompt).toContain("Resolved style source (strong): src/styles/actions.css:18:1");
+  expect(request.prompt).toContain("Resolved backend source (strong): src/server/routes/publish.ts:27:1");
+  expect(request.prompt).toContain("do not broadly search the project");
+  expect(request.prompt).toContain("Requested change: Make the button smaller and simpler.");
+
+  const privateState = await page.evaluate((previewRequest) => {
+    const probe = document.getElementById("chat-queue-probe");
+    probe.style.display = "grid";
+    probe.style.gridTemplateRows = "minmax(0, 1fr) auto";
+    probe.style.height = "560px";
+    const chat = document.getElementById("chat");
+    chat.classList.add("chat");
+    window.__chatQueueSends.length = 0;
+    const dispatch = window.__chatQueueProbe.submitPreviewPrompt(previewRequest);
+    const submission = window.__chatQueueSends.at(-1);
+    window.__chatQueueProbe.startSession(submission.visibleText, submission.modelText);
+    return { dispatch, submission, messages: window.__chatQueueProbe.getMessages() };
+  }, request);
+  expect(privateState.dispatch).toBe("sent");
+  expect(privateState.submission.visibleText).toMatch(/^\[Attached image:/);
+  expect(privateState.submission.visibleText).not.toContain("Requested change");
+  expect(privateState.submission.modelText).toContain("Requested change: Make the button smaller");
+  expect(privateState.messages[0].text).toMatch(/^\[Attached image:/);
+  expect(privateState.messages[0].agentText).toContain("Resolved backend source");
+  await expect(page.locator("#chat-queue-probe .msg.user .msg-attach-thumb")).toBeVisible();
+  await expect(page.locator("#chat-queue-probe .msg.user .msg-body")).not.toContainText(
+    "Make the button smaller",
+  );
+  await expect(page.locator("#chat-queue-probe .msg.user .msg-body")).not.toContainText(
+    "src/server/routes/publish.ts",
+  );
+  await expect(page.locator(".site-preview-status")).toContainText("private source context");
+});
+
+test("chat shows a Down button when the user leaves the latest message", async ({ page }) => {
+  await page.goto(`${APP}/preview-harness.html`, { waitUntil: "networkidle" });
+  await page.evaluate(async () => {
+    document.getElementById("preview-test-host").style.display = "none";
+    const probe = document.getElementById("chat-queue-probe");
+    probe.style.display = "grid";
+    probe.style.gridTemplateRows = "minmax(0, 1fr) auto";
+    probe.style.height = "620px";
+    const chat = document.getElementById("chat");
+    chat.classList.add("chat");
+    chat.style.minHeight = "0";
+    window.__chatQueueProbe.loadSession(Array.from({ length: 55 }, (_, index) => ({
+      type: "user",
+      text: `Long session message ${index + 1}: ${"details ".repeat(18)}`,
+      at: Date.now() + index,
+    })));
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    chat.scrollTop = 0;
+    chat.dispatchEvent(new Event("scroll"));
+  });
+
+  const down = page.getByRole("button", { name: "Jump to the latest message" });
+  await expect(down).toBeVisible();
+  await down.click();
+  await expect.poll(() => page.evaluate(() => {
+    const chat = document.getElementById("chat");
+    return chat.scrollHeight - chat.scrollTop - chat.clientHeight;
+  })).toBeLessThan(8);
+  await expect(down).toBeHidden();
+});
+
+test("Source Lens resolves an exact target inside a live localhost preview", async ({ page }) => {
+  await page.route("https://asset.localhost/**", (route) =>
+    route.fulfill({ status: 200, contentType: "text/plain", body: "" }),
+  );
+  await page.route("http://localhost:1421/**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "text/html",
+      body: "<!doctype html><style>body{margin:0}button{margin:92px 84px;width:128px;height:52px}</style><button>Publish</button>",
+    }),
+  );
+  await page.goto(`${APP}/preview-harness.html`, { waitUntil: "networkidle" });
+  const omnibox = page.getByRole("textbox", { name: "Preview path" });
+  await omnibox.fill("http://localhost:1421/dashboard");
+  await omnibox.press("Enter");
+  await page.getByRole("button", { name: "Toggle Source Lens" }).click();
+
+  const overlay = page.getByTestId("design-visual-overlay");
+  const bounds = await overlay.boundingBox();
+  expect(bounds).not.toBeNull();
+  await page.mouse.move(bounds.x + 120, bounds.y + 112);
+  await expect(page.locator(".site-preview-source-hud")).toContainText(
+    "Frontend · src/components/PublishButton.tsx:42",
+  );
+  const selected = page.getByTestId("design-feature-selection");
+  await expect(selected).toHaveCSS("width", "128px");
+  await expect(selected).toHaveCSS("height", "52px");
+
+  await page.mouse.down();
+  await page.mouse.up();
+  await expect(page.locator(".site-preview-status")).toContainText("screenshot ready");
+  const captures = await page.evaluate(() => window.__previewCaptureRequests || []);
+  expect(captures.at(-1).width).toBe(128);
+  expect(captures.at(-1).height).toBe(52);
+});
+
 test("Design mode outlines and captures a selected cross-origin live-preview feature", async ({ page }) => {
   const consoleErrors = [];
   page.on("pageerror", (error) => consoleErrors.push(error.message));
@@ -182,7 +316,12 @@ test("a Design edit queued during another run retains its fast task profile", as
 
   expect(result.dispatch).toBe("queued");
   expect(result.sends).toEqual([
-    { prompt: "Apply the selected button color.", taskProfile: "design_edit_fast" },
+    {
+      modelText: "Apply the selected button color.",
+      visibleText: "Apply the selected button color.",
+      titleHint: "Apply the selected button color.",
+      taskProfile: "design_edit_fast",
+    },
   ]);
 });
 

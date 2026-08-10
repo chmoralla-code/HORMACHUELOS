@@ -35,12 +35,30 @@ export type ComposerPromptDispatch =
   | "usage_exhausted"
   | "stopping";
 
+/** Separates private model context from the text rendered in the transcript. */
+export type ChatPromptSubmission = {
+  modelText: string;
+  visibleText: string;
+  titleHint: string;
+  taskProfile: AgentTaskProfile;
+};
+
+export type PreviewPromptSubmission = {
+  prompt: string;
+  imagePath?: string | null;
+  taskProfile?: AgentTaskProfile;
+  /** When omitted, the full prompt is visible as it was in earlier releases. */
+  visibleText?: string;
+  titleHint?: string;
+};
+
 export class Chat {
   node: HTMLElement;
   composer: HTMLElement;
   input!: HTMLTextAreaElement;
   sendBtn!: HTMLButtonElement;
   stopBtn!: HTMLButtonElement;
+  private jumpToLatestBtn!: HTMLButtonElement;
   /** Compact strip above the chat box for queued (pending) messages. */
   private pendingRail!: HTMLElement;
   running = false;
@@ -58,8 +76,7 @@ export class Chat {
   /** Messages queued while the agent is still working on the current run. */
   private pendingQueue: {
     id: string;
-    text: string;
-    taskProfile: AgentTaskProfile;
+    submission: ChatPromptSubmission;
     el: HTMLElement;
   }[] = [];
   private drainingPending = false;
@@ -77,7 +94,7 @@ export class Chat {
   thinking: HTMLElement | null = null;
   thinkingBody: HTMLElement | null = null;
   thinkingText: string = "";
-  onSend: (prompt: string, taskProfile?: AgentTaskProfile) => void;
+  onSend: (submission: ChatPromptSubmission) => void;
   onStop: () => void;
   onNeedProject: () => void;
   /** Open an existing project folder (change AI work directory). */
@@ -162,7 +179,7 @@ export class Chat {
   private multiAgentToolIds = new Set<string>();
 
   constructor(handlers: {
-    onSend: (p: string, taskProfile?: AgentTaskProfile) => void;
+    onSend: (submission: ChatPromptSubmission) => void;
     onStop: () => void;
     onNeedProject: () => void;
     onOpenProject: () => void;
@@ -185,6 +202,7 @@ export class Chat {
       () => {
         // User is free to leave the bottom while the agent runs
         this.pinToBottom = this.isNearBottom();
+        this.syncJumpToLatestButton();
       },
       { passive: true },
     );
@@ -192,6 +210,17 @@ export class Chat {
     this.composer = this.buildComposer();
     this.setComposerProject(null);
     const dock = document.getElementById("forge-dock")!;
+    this.jumpToLatestBtn = el("button", {
+      class: "chat-jump-latest",
+      type: "button",
+      title: "Jump to the latest message",
+      "aria-label": "Jump to the latest message",
+      "aria-hidden": "true",
+      tabindex: "-1",
+      html: icon("chevronDown", 16),
+    }) as HTMLButtonElement;
+    this.jumpToLatestBtn.addEventListener("click", () => this.jumpToLatest());
+    dock.appendChild(this.jumpToLatestBtn);
     dock.appendChild(this.composer);
     this.escHandler = (e: KeyboardEvent) => {
       if (e.key === "Escape" && this.running && !this.stopping) {
@@ -1251,31 +1280,61 @@ export class Chat {
    * (and auto-describe) can see the clicked preview control.
    */
   submitPreviewPrompt(
-    prompt: string,
+    request: string | PreviewPromptSubmission,
     imagePath?: string | null,
     taskProfile: AgentTaskProfile = "default",
   ): ComposerPromptDispatch {
-    const trimmedImage = String(imagePath || "").trim();
-    const body = prompt.trim();
-    const text = trimmedImage
+    const input: PreviewPromptSubmission = typeof request === "string"
+      ? { prompt: request, imagePath, taskProfile }
+      : request;
+    const trimmedImage = String(input.imagePath || "").trim();
+    const body = input.prompt.trim();
+    const modelText = trimmedImage
       ? (body ? `[Attached image: ${trimmedImage}]\n${body}` : `[Attached image: ${trimmedImage}]`)
       : body;
-    if (!text) return "stopping";
+    const hasPrivateDisplay = typeof input.visibleText === "string";
+    const visibleBody = hasPrivateDisplay ? input.visibleText!.trim() : body;
+    const visibleText = trimmedImage
+      ? (visibleBody
+          ? `[Attached image: ${trimmedImage}]\n${visibleBody}`
+          : `[Attached image: ${trimmedImage}]`)
+      : visibleBody;
+    const submission = this.promptSubmission(
+      modelText,
+      visibleText,
+      input.titleHint || body,
+      input.taskProfile || taskProfile,
+    );
+    if (!submission.modelText || !submission.visibleText) return "stopping";
     if (!this.projectReady) {
       this.onNeedProject();
       return "needs_project";
     }
     if (this.usageExhausted) {
-      this.onSend(text, taskProfile);
+      this.onSend(submission);
       return "usage_exhausted";
     }
     if (this.stopping || this.userCancelled) return "stopping";
     if (this.running || this.drainingPending) {
-      this.enqueuePending(text, taskProfile);
+      this.enqueuePending(submission);
       return "queued";
     }
-    this.onSend(text, taskProfile);
+    this.onSend(submission);
     return "sent";
+  }
+
+  private promptSubmission(
+    modelText: string,
+    visibleText = modelText,
+    titleHint = visibleText,
+    taskProfile: AgentTaskProfile = "default",
+  ): ChatPromptSubmission {
+    return {
+      modelText: modelText.trim(),
+      visibleText: visibleText.trim(),
+      titleHint: titleHint.trim() || "Design edit",
+      taskProfile,
+    };
   }
 
   private autosize() {
@@ -1298,7 +1357,7 @@ export class Chat {
     );
     if (this.usageExhausted) {
       // Refuse send + queue while at 0% — keep text so user can retry after reset
-      this.onSend(unsampledText);
+      this.onSend(this.promptSubmission(unsampledText));
       return;
     }
     // While stopping, do not queue — keep composer contents so cancel stays a full stop
@@ -1327,20 +1386,20 @@ export class Chat {
     this.autosize();
     // While AI is working, queue the message as pending (semi-transparent)
     if (this.running || this.drainingPending) {
-      this.enqueuePending(text);
+      this.enqueuePending(this.promptSubmission(text));
       return;
     }
-    this.onSend(text);
+    this.onSend(this.promptSubmission(text));
   }
 
   /** Queue a message as a small chip above the chat box until the current run finishes. */
-  private enqueuePending(text: string, taskProfile: AgentTaskProfile = "default") {
+  private enqueuePending(submission: ChatPromptSubmission) {
     const id =
       typeof crypto !== "undefined" && "randomUUID" in crypto
         ? crypto.randomUUID()
         : `p-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const el = this.appendPendingChip(text, id);
-    this.pendingQueue.push({ id, text, taskProfile, el });
+    const el = this.appendPendingChip(submission.visibleText, id);
+    this.pendingQueue.push({ id, submission, el });
     this.syncPendingRail();
     this.refreshPlaceholder();
   }
@@ -1427,7 +1486,7 @@ export class Chat {
     this.syncPendingRail();
     this.refreshPlaceholder();
     try {
-      this.onSend(next.text, next.taskProfile);
+      this.onSend(next.submission);
     } finally {
       // onSend sets running=true; clear drain flag so further queues work mid-run
       this.drainingPending = false;
@@ -1636,7 +1695,7 @@ export class Chat {
     this.node.appendChild(empty);
   }
 
-  startSession(prompt: string) {
+  startSession(prompt: string, agentText = prompt) {
     this.clearPendingQueue();
     this.cancelAssistantPaints();
     clear(this.node);
@@ -1667,7 +1726,12 @@ export class Chat {
     const at = this.now();
     this.appendUser(prompt, at);
     if (!this.replaying) {
-      this.messages = [{ type: "user", text: prompt, at }];
+      this.messages = [{
+        type: "user",
+        text: prompt,
+        agentText: agentText !== prompt ? agentText : undefined,
+        at,
+      }];
     }
   }
 
@@ -1676,7 +1740,7 @@ export class Chat {
   }
 
   /** Append a follow-up user message to the existing conversation without clearing. */
-  continueSession(prompt: string) {
+  continueSession(prompt: string, agentText = prompt) {
     this.runCompleted = false;
     this.finalizeThinking();
     this.flushAssistantPaints();
@@ -1685,7 +1749,12 @@ export class Chat {
     const at = this.now();
     this.appendUser(prompt, at);
     if (!this.replaying) {
-      this.messages.push({ type: "user", text: prompt, at });
+      this.messages.push({
+        type: "user",
+        text: prompt,
+        agentText: agentText !== prompt ? agentText : undefined,
+        at,
+      });
     }
   }
 
@@ -4739,6 +4808,25 @@ export class Chat {
     return el.scrollHeight - el.scrollTop - el.clientHeight <= threshold;
   }
 
+  private syncJumpToLatestButton() {
+    if (!this.jumpToLatestBtn) return;
+    const overflow = this.node.scrollHeight > this.node.clientHeight + 8;
+    const visible = overflow && !this.isNearBottom(120);
+    this.jumpToLatestBtn.classList.toggle("is-visible", visible);
+    this.jumpToLatestBtn.setAttribute("aria-hidden", String(!visible));
+    this.jumpToLatestBtn.tabIndex = visible ? 0 : -1;
+  }
+
+  private jumpToLatest() {
+    this.pinToBottom = true;
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    this.node.scrollTo({
+      top: this.node.scrollHeight,
+      behavior: reducedMotion ? "auto" : "smooth",
+    });
+    window.setTimeout(() => this.syncJumpToLatestButton(), reducedMotion ? 0 : 240);
+  }
+
   /**
    * Scroll to the latest content.
    * @param force always scroll (user sent a message / load session).
@@ -4747,9 +4835,13 @@ export class Chat {
    */
   scrollToBottom(force = false) {
     requestAnimationFrame(() => {
-      if (!force && !this.pinToBottom) return;
+      if (!force && !this.pinToBottom) {
+        this.syncJumpToLatestButton();
+        return;
+      }
       this.node.scrollTop = this.node.scrollHeight;
       this.pinToBottom = true;
+      this.syncJumpToLatestButton();
     });
   }
 }

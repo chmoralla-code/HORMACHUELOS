@@ -68,7 +68,7 @@ impl AgentTaskProfile {
             Self::DesignEditFast => {
                 "\nDESIGN MODE FAST EDIT (higher priority than broad planning/investigation rules):\n\
 - The user selected an exact preview target and pressed Apply with AI. Implement now; do not ask for a plan or repeat the request. Normal safety boundaries still apply.\n\
-- Use the supplied route, DOM selector/excerpt, visible text, screenshot description, and ranked source candidates first. Usually one targeted read/search batch is enough. If a hint is wrong, expand once with a grep for the most distinctive route or visible-text phrase.\n\
+- Use the supplied route, DOM selector/excerpt, visible text, screenshot description, and resolved/ranked source locations first. An exact or strong Source Lens location should be opened directly with no broad search. For a likely location, allow only one focused verification using the most distinctive route, selector, or visible-text phrase.\n\
 - Aim for locate -> minimal patch -> smallest useful check -> done. Prefer 1-3 files and avoid unrelated refactors.\n\
 - For a copy, spacing, color, typography, table, or local layout change, do not inspect login/session flows, browse the web, run a full end-to-end suite, or perform a broad repository audit. Use a targeted typecheck/lint/build when quick, or re-read the changed source and preview it.\n\
 - Debug only a concrete failure. Once the requested target is changed and the focused check passes, finish immediately with a concise result.\n"

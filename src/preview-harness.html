@@ -85,6 +85,36 @@
         window.__previewSavedImages.push({ dataBase64, mime });
         return "C:\\preview-fixture\\design-feature-reference.png";
       };
+      window.__sourceLensRequests = [];
+      api.warmDesignSourceIndex = async () => 7;
+      api.invalidateDesignSourceIndex = async () => {};
+      api.resolveDesignTarget = async (probe) => {
+        window.__sourceLensRequests.push(probe);
+        const live = Boolean(probe.point);
+        return {
+          tag: live ? "button" : (probe.tag || "button"),
+          text: live ? "Publish" : (probe.text || "Preview target"),
+          selector: live ? "main > button.publish" : (probe.selector || "#target"),
+          domContext: probe.domContext || {
+            id: live ? "publish" : "target",
+            classes: live ? ["publish"] : [],
+            role: "",
+            ariaLabel: "",
+            testId: live ? "publish-action" : "preview-target",
+            name: "",
+            href: "/api/publish",
+            html: live ? '<button class="publish">Publish</button>' : '<button id="target">Preview target</button>',
+          },
+          rect: live ? { x: 84, y: 92, width: 128, height: 52 } : null,
+          sources: [
+            { path: "src/components/PublishButton.tsx", line: 42, column: 7, kind: "frontend", confidence: "exact", symbol: "PublishButton" },
+            { path: "src/styles/actions.css", line: 18, column: 1, kind: "style", confidence: "strong", symbol: null },
+            { path: "src/server/routes/publish.ts", line: 27, column: 1, kind: "backend", confidence: "strong", symbol: "publish" },
+          ],
+          inspectedBy: live ? "webview" : "dom",
+          indexPartial: false,
+        };
+      };
 
       const preview = new SitePreview(document.getElementById("preview-test-host"));
       window.__preview = preview;
@@ -92,14 +122,14 @@
       window.__previewPromptDispatches = [];
       window.__designTaskProfile = designTaskProfile;
       window.__rankDesignSourceCandidates = rankDesignSourceCandidates;
-      preview.setDescribeHandler((prompt, imagePath, taskProfile) => {
-        window.__previewPrompts.push(prompt);
-        window.__previewPromptDispatches.push({ prompt, imagePath, taskProfile });
+      preview.setDescribeHandler((request) => {
+        window.__previewPrompts.push(request.prompt);
+        window.__previewPromptDispatches.push(request);
         return "sent";
       });
       window.__chatQueueSends = [];
       const chatQueueProbe = new Chat({
-        onSend: (prompt, taskProfile) => window.__chatQueueSends.push({ prompt, taskProfile }),
+        onSend: (submission) => window.__chatQueueSends.push(submission),
         onStop: () => {},
         onNeedProject: () => {},
         onOpenProject: () => {},

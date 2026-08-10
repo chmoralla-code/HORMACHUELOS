@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.67";
-const BUILTIN_MSI_SHA256 = "d9c3ac278f05c2ac83519666653bbe8d81d7e8a8c6b45dc01a64f902db362853";
-const BUILTIN_EXE_SHA256 = "87a8e7519d2b5e0dcd1b9388ae85ab31dd0a1687272523b36fee3acd11b736b4";
-const BUILTIN_RELEASE_NOTES = "Project list cleanup: remove any remembered project with a focused row action and clear confirmation. Removing a project only forgets its shortcut—its folder, files, Git history, and saved sessions stay untouched. Active projects switch safely, running-agent projects are protected, and removals persist after restart.";
+const BUILTIN_RELEASE_VERSION = "0.1.68";
+const BUILTIN_MSI_SHA256 = "d5dc3a94b3060ae576769b483cd546a79e59bd2fce11dafe945c5ce9c3a763f6";
+const BUILTIN_EXE_SHA256 = "5f5089e74af74fdb2d0767263f914d39a324161af30247d06ece149571998060";
+const BUILTIN_RELEASE_NOTES = "Adds Source Lens as a second preview editing option with accurate hover-to-source hints for frontend, styles, and direct backend routes; keeps the original Design Mode unchanged; sends only the selected screenshot in chat while keeping target metadata private for faster focused AI edits; adds a quick Down button for long sessions; and includes the verified long-session, stalled-search, and tool-recovery reliability improvements.";
 
 const BUILTIN_FORCE_UPDATE = true;
 const GITHUB_RELEASES_BASE = "https://github.com/chmoralla-code/HORMACHUELOS/releases/download";

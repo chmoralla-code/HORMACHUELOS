@@ -3,7 +3,14 @@
 import { normalizeAssistantMarkdown } from "./util";
 
 export type SessionMessage =
-  | { type: "user"; text: string; at?: number }
+  | {
+      type: "user";
+      /** Text rendered in the transcript. */
+      text: string;
+      /** Optional private model context, never rendered or copied from the chat bubble. */
+      agentText?: string;
+      at?: number;
+    }
   /** Restores the visual run mode when a transcript is opened again. */
   | { type: "run_start"; permissionMode: "plan" | "multi_agent"; at?: number }
   /** Keeps the visual Multi-Agent activity batch with the session it belongs to. */
@@ -42,6 +49,8 @@ export interface SessionPreviewState {
   tabs: SessionPreviewTab[];
   activeTabIndex: number;
   designMode: boolean;
+  /** Separate source-aware selection mode; absent in sessions from older releases. */
+  sourceLensMode?: boolean;
   androidMode: boolean;
   softwareMode: boolean;
 }
@@ -248,6 +257,13 @@ export function normalizeSessionPermissionMode(value: unknown): "plan" | "multi_
 function redactSessionMessage(message: SessionMessage): SessionMessage {
   switch (message.type) {
     case "user":
+      return {
+        ...message,
+        text: redactChatCredentials(message.text),
+        agentText: message.agentText
+          ? redactChatCredentials(message.agentText)
+          : undefined,
+      };
     case "assistant":
     case "thinking":
       return { ...message, text: redactChatCredentials(message.text) };
@@ -353,6 +369,7 @@ function sanitizeSessionPreview(value: unknown): SessionPreviewState | undefined
       ? Math.max(0, Math.min(tabs.length - 1, requestedActive))
       : 0,
     designMode: raw.designMode === true,
+    sourceLensMode: raw.sourceLensMode === true,
     androidMode: raw.androidMode === true,
     softwareMode: raw.softwareMode === true,
   };
@@ -760,7 +777,10 @@ export function buildLlmHistory(messages: SessionMessage[], currentPrompt: strin
   let list = messages.slice();
   if (list.length > 0) {
     const last = list[list.length - 1];
-    if (last.type === "user" && last.text.trim() === currentPrompt.trim()) {
+    if (
+      last.type === "user" &&
+      (last.agentText || last.text).trim() === currentPrompt.trim()
+    ) {
       list = list.slice(0, -1);
     }
   }
@@ -803,7 +823,7 @@ export function buildLlmHistory(messages: SessionMessage[], currentPrompt: strin
     switch (msg.type) {
       case "user":
         pendingTool = null;
-        pushUser(msg.text);
+        pushUser(msg.agentText || msg.text);
         break;
       case "assistant":
         pendingTool = null;

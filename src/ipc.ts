@@ -101,6 +101,50 @@ export type FilePreview = {
   language: string;
 };
 
+export type DesignDomContext = {
+  id: string;
+  classes: string[];
+  role: string;
+  ariaLabel: string;
+  testId: string;
+  name: string;
+  href: string;
+  html: string;
+};
+
+export type DesignTargetProbe = {
+  previewUrl: string;
+  point?: { x: number; y: number } | null;
+  tag?: string;
+  text?: string;
+  selector?: string;
+  domContext?: DesignDomContext | null;
+  styleSelectors?: string[];
+  sourceFile?: string;
+  sourceLine?: number | null;
+  sourceColumn?: number | null;
+};
+
+export type DesignSourceLocation = {
+  path: string;
+  line: number;
+  column?: number | null;
+  kind: "frontend" | "style" | "backend";
+  confidence: "exact" | "strong" | "likely";
+  symbol?: string | null;
+};
+
+export type DesignTargetResolution = {
+  tag: string;
+  text: string;
+  selector: string;
+  domContext: DesignDomContext;
+  rect?: { x: number; y: number; width: number; height: number } | null;
+  sources: DesignSourceLocation[];
+  inspectedBy: "webview" | "dom" | "visual";
+  indexPartial: boolean;
+};
+
 export type ClientPackResult = {
   zipPath: string;
   filesCount: number;
@@ -209,6 +253,13 @@ export const api = {
     height: number;
     devicePixelRatio: number;
   }): Promise<string> => invoke("capture_preview_selection", { region }),
+  /** Warm the bounded project index used by Source Lens hover inspection. */
+  warmDesignSourceIndex: (): Promise<number> => invoke("warm_design_source_index"),
+  /** Drop cached source data after a preview reload or project write. */
+  invalidateDesignSourceIndex: (): Promise<void> => invoke("invalidate_design_source_index"),
+  /** Resolve a visible preview target to ranked frontend/style/backend file locations. */
+  resolveDesignTarget: (probe: DesignTargetProbe): Promise<DesignTargetResolution> =>
+    invoke("resolve_design_target", { probe }),
   /** Copy an on-disk image into the paste dir (Explorer paste / file picker). */
   importImagePath: (path: string): Promise<string> =>
     invoke("import_image_path", { path }),

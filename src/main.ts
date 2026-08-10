@@ -4,10 +4,9 @@ import {
   onComputerUseFx,
   onComputerUseStatus,
   type AgentEvent,
-  type AgentTaskProfile,
 } from "./ipc";
 import { Sidebar } from "./components/sidebar";
-import { Chat } from "./components/chat";
+import { Chat, type ChatPromptSubmission } from "./components/chat";
 import { ConsolePanel } from "./components/console";
 import { displayModelName, displayProviderName, getProviderMeta, getSettingsSafe, isHostedCatalogRestricted, visibleProviders } from "./components/settings";
 import { ModelBar } from "./components/modelbar";
@@ -1604,7 +1603,12 @@ function openClientSuccessCenter() {
   clientSuccessCenter?.open();
 }
 
-async function sendPrompt(prompt: string, taskProfile: AgentTaskProfile = "default") {
+async function sendPrompt(submission: ChatPromptSubmission) {
+  let prompt = redactChatCredentials(submission.modelText);
+  const visiblePrompt = redactChatCredentials(submission.visibleText || submission.modelText);
+  const titlePrompt = redactChatCredentials(submission.titleHint || visiblePrompt || prompt);
+  const taskProfile = submission.taskProfile || "default";
+  if (!prompt.trim() || !visiblePrompt.trim()) return;
   cancelDoneWorkingCue();
   if (!currentProjectPath) {
     reportError("Open or create a project before starting.");
@@ -1662,11 +1666,11 @@ async function sendPrompt(prompt: string, taskProfile: AgentTaskProfile = "defau
   if (!existing || !hasMessages) {
     // Fresh session — create one and start clean
     if (existing) {
-      existing.title = sessionTitle(prompt);
+      existing.title = sessionTitle(titlePrompt);
     } else {
       const s: Session = {
         id: newSessionId(),
-        title: sessionTitle(prompt),
+        title: sessionTitle(titlePrompt),
         projectId: projectRoot,
         messages: [],
         createdAt: Date.now(),
@@ -1677,10 +1681,10 @@ async function sendPrompt(prompt: string, taskProfile: AgentTaskProfile = "defau
       activeSessionId = s.id;
       existing = s;
     }
-    chat.startSession(prompt);
+    chat.startSession(visiblePrompt, prompt);
   } else {
     // Continuing an existing conversation — append, don't clear
-    chat.continueSession(prompt);
+    chat.continueSession(visiblePrompt, prompt);
   }
 
   const sessionId = activeSessionId!;
@@ -2032,8 +2036,7 @@ async function init() {
   // Preview actions use Chat's normal send/queue rules. That means a Build
   // choice always reaches the selected model, even when another task is still
   // running, instead of being silently dropped by a direct agent_run call.
-  sitePreview.setDescribeHandler((prompt, imagePath, taskProfile) =>
-    chat.submitPreviewPrompt(prompt, imagePath, taskProfile));
+  sitePreview.setDescribeHandler((request) => chat.submitPreviewPrompt(request));
   chat.setProjectReady(false);
   const HOSTED_SITE = "https://hormachuelos.vercel.app";
   let websiteUser: WebsiteAccount | null = null;

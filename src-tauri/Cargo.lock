@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "ai-forge"
-version = "0.1.67"
+version = "0.1.68"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -46,6 +46,7 @@ dependencies = [
  "tokio",
  "uuid",
  "walkdir",
+ "webview2-com",
  "windows 0.58.0",
  "zip",
 ]

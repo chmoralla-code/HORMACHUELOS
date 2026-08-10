@@ -4,6 +4,7 @@ pub mod computer_fx;
 pub mod computer_use;
 pub mod config;
 pub mod cursor_bridge;
+pub mod design_source;
 pub mod integration_chat;
 pub mod integrations;
 pub mod license;
@@ -1202,6 +1203,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(state::AppState::new())
+        .manage(design_source::DesignSourceState::default())
         .invoke_handler(tauri::generate_handler![
             get_project_root,
             app_updater::save_update_backup,
@@ -1242,6 +1244,9 @@ pub fn run() {
             record_license_usage,
             save_pasted_image,
             preview_capture::capture_preview_selection,
+            design_source::warm_design_source_index,
+            design_source::invalidate_design_source_index,
+            design_source::resolve_design_target,
             import_image_path,
             import_video_path,
             agent_run,
