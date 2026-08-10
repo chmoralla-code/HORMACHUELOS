@@ -80,6 +80,38 @@
         window.__previewCaptureRequests.push(region);
         return "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADElEQVR42mP8z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
       };
+      window.__previewBrowserCalls = [];
+      window.__previewBrowserListener = null;
+      api.onPreviewBrowserEvent = async (listener) => {
+        window.__previewBrowserListener = listener;
+        return () => {
+          if (window.__previewBrowserListener === listener) window.__previewBrowserListener = null;
+        };
+      };
+      api.createPreviewBrowser = async (label, url, bounds, visible) => {
+        window.__previewBrowserCalls.push({ command: "create", label, url, bounds, visible });
+        queueMicrotask(() => {
+          window.__previewBrowserListener?.({ label, kind: "loading", url });
+          window.__previewBrowserListener?.({ label, kind: "title", url, title: "Google" });
+          window.__previewBrowserListener?.({ label, kind: "ready", url, title: "Google" });
+        });
+      };
+      api.setPreviewBrowserBounds = async (label, bounds, visible) => {
+        window.__previewBrowserCalls.push({ command: "bounds", label, bounds, visible });
+      };
+      api.navigatePreviewBrowser = async (label, url) => {
+        window.__previewBrowserCalls.push({ command: "navigate", label, url });
+        queueMicrotask(() => {
+          window.__previewBrowserListener?.({ label, kind: "loading", url });
+          window.__previewBrowserListener?.({ label, kind: "ready", url });
+        });
+      };
+      api.previewBrowserAction = async (label, action) => {
+        window.__previewBrowserCalls.push({ command: "action", label, action });
+      };
+      api.closePreviewBrowser = async (label) => {
+        window.__previewBrowserCalls.push({ command: "close", label });
+      };
       api.savePastedImage = async (dataBase64, mime) => {
         window.__previewSavedImages = window.__previewSavedImages || [];
         window.__previewSavedImages.push({ dataBase64, mime });

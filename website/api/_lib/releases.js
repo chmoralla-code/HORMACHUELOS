@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.68";
-const BUILTIN_MSI_SHA256 = "d5dc3a94b3060ae576769b483cd546a79e59bd2fce11dafe945c5ce9c3a763f6";
-const BUILTIN_EXE_SHA256 = "5f5089e74af74fdb2d0767263f914d39a324161af30247d06ece149571998060";
-const BUILTIN_RELEASE_NOTES = "Adds Source Lens as a second preview editing option with accurate hover-to-source hints for frontend, styles, and direct backend routes; keeps the original Design Mode unchanged; sends only the selected screenshot in chat while keeping target metadata private for faster focused AI edits; adds a quick Down button for long sessions; and includes the verified long-session, stalled-search, and tool-recovery reliability improvements.";
+const BUILTIN_RELEASE_VERSION = "0.1.69";
+const BUILTIN_MSI_SHA256 = "b63b36ae681683b3ccd2d8d4418b5fb0a60fbf60deb906d613ee0c57f9655c42";
+const BUILTIN_EXE_SHA256 = "1683e8c06990cd76d920d7dda969e0c1039e2f448fec7bcf0f3caf6654e4f027";
+const BUILTIN_RELEASE_NOTES = "Adds a secure native Browser option to Preview Add Tab, with Google search, direct sites such as YouTube and Facebook, Back/Forward/Reload/Home controls, responsive native tabs, safe popup handling, and durable long-session restore.";
 
 const BUILTIN_FORCE_UPDATE = true;
 const GITHUB_RELEASES_BASE = "https://github.com/chmoralla-code/HORMACHUELOS/releases/download";

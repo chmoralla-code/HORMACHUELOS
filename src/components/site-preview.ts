@@ -6,6 +6,8 @@ import {
   type DesignSourceLocation,
   type DesignTargetProbe,
   type DesignTargetResolution,
+  type PreviewBrowserBounds,
+  type PreviewBrowserEvent,
   type ProjectNode,
 } from "../ipc";
 import type { SessionPreviewState, SessionPreviewTab } from "./session";
@@ -239,6 +241,42 @@ function withoutUrlSuffix(value: string): { path: string; suffix: string } {
 export function isExternalPreviewUrl(value: string): boolean {
   const trimmed = value.trim();
   return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(trimmed);
+}
+
+const BROWSER_HOME = "https://www.google.com/";
+const BROWSER_HISTORY_MAX = 32;
+
+/** Normalize an already-complete URL without ever accepting local file/script schemes. */
+export function normalizeBrowserUrl(value?: string | null): string | null {
+  const raw = value?.trim();
+  if (!raw || raw.length > 4_096 || raw.includes("\0")) return null;
+  try {
+    const url = new URL(raw);
+    if (!/^https?:$/.test(url.protocol) || !url.hostname || url.username || url.password) return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+/** Resolve a browser-style address bar value into either a URL or a Google search. */
+export function browserAddressToUrl(value: string): string | null {
+  const raw = value.trim();
+  if (!raw) return BROWSER_HOME;
+  const complete = normalizeBrowserUrl(raw);
+  if (complete) return complete;
+  if (/^[a-z][a-z\d+.-]*:/i.test(raw) || raw.startsWith("//")) return null;
+
+  const compact = !/\s/.test(raw);
+  if (compact && /^(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(raw)) {
+    return normalizeBrowserUrl(`http://${raw}`);
+  }
+  if (compact && /^(?:[\w-]+\.)+[a-z]{2,}(?::\d+)?(?:\/.*)?$/i.test(raw)) {
+    return normalizeBrowserUrl(`https://${raw}`);
+  }
+
+  const query = raw.slice(0, 300);
+  return `https://www.google.com/search?q=${encodeURIComponent(query)}`;
 }
 
 export function normalizePreviewEntry(projectRoot: string, value?: string | null): string | null {
@@ -564,13 +602,19 @@ function samePreviewProject(a: string, b: string): boolean {
     decodePath(b).replace(/\/+$/, "").toLowerCase();
 }
 
-function cleanPreviewHistory(projectRoot: string, values: unknown): string[] {
+function cleanPreviewHistory(
+  projectRoot: string,
+  values: unknown,
+  kind: "preview" | "browser" = "preview",
+): string[] {
   if (!Array.isArray(values)) return [];
   const seen = new Set<string>();
   const history: string[] = [];
   for (const value of values) {
     if (typeof value !== "string") continue;
-    const path = normalizePreviewEntry(projectRoot, value);
+    const path = kind === "browser"
+      ? normalizeBrowserUrl(value)
+      : normalizePreviewEntry(projectRoot, value);
     if (!path || seen.has(path)) continue;
     seen.add(path);
     history.push(path);
@@ -586,21 +630,27 @@ function cleanPreviewTabs(
   const seenEntries = new Set<string>();
   const clean: SessionPreviewTab[] = [];
   for (const raw of tabs) {
-    const history = cleanPreviewHistory(projectRoot, raw.history);
+    const kind = raw.kind === "browser" ? "browser" : "preview";
+    const history = cleanPreviewHistory(projectRoot, raw.history, kind);
     const requestedIndex = Math.floor(Number(raw.historyIndex) || 0);
     const historyIndex = history.length
       ? Math.max(0, Math.min(history.length - 1, requestedIndex))
       : 0;
-    const entryPath =
-      normalizePreviewEntry(projectRoot, raw.entryPath) || history[historyIndex] || null;
-    if (!entryPath || seenEntries.has(entryPath)) continue;
+    const entryPath = (kind === "browser"
+      ? normalizeBrowserUrl(raw.entryPath)
+      : normalizePreviewEntry(projectRoot, raw.entryPath)) || history[historyIndex] || null;
+    const entryKey = `${kind}:${entryPath || ""}`;
+    if (!entryPath || seenEntries.has(entryKey)) continue;
     if (!history.length) history.push(entryPath);
     if (!history.includes(entryPath)) history.push(entryPath);
     const normalizedIndex = Math.max(0, Math.min(history.length - 1, historyIndex));
-    seenEntries.add(entryPath);
+    seenEntries.add(entryKey);
     clean.push({
+      kind,
       entryPath: history[normalizedIndex] || entryPath,
-      title: raw.title?.trim().slice(0, 160) || tabTitleFromPath(entryPath),
+      title: raw.title?.trim().slice(0, 160) || (kind === "browser"
+        ? browserTitleFromUrl(entryPath)
+        : tabTitleFromPath(entryPath)),
       history,
       historyIndex: normalizedIndex,
     });
@@ -632,11 +682,14 @@ export function mergePreviewSessionState(
     entry = files.find((file) => /\.(apk|aab|ipa|exe|msi|dmg|wasm)$/i.test(file)) || null;
   }
   if (entry) {
-    const existingIndex = tabs.findIndex((tab) => tab.entryPath === entry);
+    const existingIndex = tabs.findIndex(
+      (tab) => tab.kind !== "browser" && tab.entryPath === entry,
+    );
     if (existingIndex >= 0) {
       activeTabIndex = existingIndex;
     } else {
       tabs.push({
+        kind: "preview",
         entryPath: entry,
         title: opts.title || tabTitleFromPath(entry),
         history: [entry],
@@ -660,12 +713,17 @@ export function mergePreviewSessionState(
 
 type PreviewTab = {
   id: string;
+  kind: "preview" | "browser";
   entryPath: string;
   title: string;
   history: string[];
   historyIndex: number;
   frame: HTMLIFrameElement;
   tabEl: HTMLButtonElement;
+  browserCreating?: Promise<void> | null;
+  browserReady?: boolean;
+  browserFailed?: boolean;
+  browserLoading?: boolean;
 };
 
 let previewTabSeq = 0;
@@ -679,6 +737,15 @@ const PREVIEW_CHAT_MIN = 240;
 function tabTitleFromPath(path: string): string {
   const base = path.split("/").pop() || path;
   return base.replace(/\.html?$/i, "") || base;
+}
+
+function browserTitleFromUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    return url.hostname.replace(/^www\./i, "") || "Browser";
+  } catch {
+    return "Browser";
+  }
 }
 
 function readStoredSize(key: string): number | null {
@@ -728,6 +795,11 @@ export class SitePreview {
   private statusEl: HTMLElement;
   private backBtn: HTMLButtonElement;
   private forwardBtn: HTMLButtonElement;
+  private refreshBtn: HTMLButtonElement;
+  private browserHomeBtn: HTMLButtonElement;
+  private newTabBtn: HTMLButtonElement;
+  private newTabMenu: HTMLElement;
+  private newTabMenuCleanup: (() => void) | null = null;
   private designBtn: HTMLButtonElement;
   private sourceLensBtn: HTMLButtonElement;
   private androidBtn: HTMLButtonElement;
@@ -773,6 +845,10 @@ export class SitePreview {
   private stateRestoreDepth = 0;
   private resizing = false;
   private resizeCleanup: (() => void) | null = null;
+  private browserResizeObserver: ResizeObserver | null = null;
+  private browserBoundsFrame = 0;
+  private lastBrowserBounds: PreviewBrowserBounds | null = null;
+  private browserEventUnlisten: (() => void) | null = null;
 
   constructor(host?: HTMLElement | null) {
     this.root =
@@ -791,15 +867,46 @@ export class SitePreview {
     const chrome = el("div", { class: "site-preview-chrome" });
     const tabstrip = el("div", { class: "site-preview-tabstrip" });
     this.tabsEl = el("div", { class: "site-preview-tabs", role: "tablist", "aria-label": "Preview tabs" });
-    const newTabBtn = el("button", {
+    const tabLauncher = el("div", { class: "site-preview-tab-launcher" });
+    this.newTabBtn = el("button", {
       class: "site-preview-tab-new",
       type: "button",
-      title: "New preview tab",
-      "aria-label": "New preview tab",
+      title: "Add tab",
+      "aria-label": "Add tab",
+      "aria-haspopup": "menu",
+      "aria-expanded": "false",
       html: icon("new", 14),
     }) as HTMLButtonElement;
-    newTabBtn.addEventListener("click", () => void this.openNewTab());
-    tabstrip.append(this.tabsEl, newTabBtn);
+    this.newTabBtn.addEventListener("click", () => this.toggleNewTabMenu());
+    this.newTabMenu = el("div", {
+      class: "site-preview-tab-menu",
+      role: "menu",
+      "aria-label": "Add tab",
+      hidden: "true",
+    });
+    const previewOption = this.newTabMenuOption(
+      "preview",
+      "Project preview",
+      "Open another page from this project",
+      "file",
+    );
+    previewOption.addEventListener("click", () => {
+      this.closeNewTabMenu();
+      void this.openNewTab();
+    });
+    const browserOption = this.newTabMenuOption(
+      "browser",
+      "Browser",
+      "Search Google or visit YouTube, Facebook, and the web",
+      "globe",
+    );
+    browserOption.addEventListener("click", () => {
+      this.closeNewTabMenu();
+      void this.openBrowserTab();
+    });
+    this.newTabMenu.append(previewOption, browserOption);
+    tabLauncher.append(this.newTabBtn, this.newTabMenu);
+    tabstrip.append(this.tabsEl, tabLauncher);
 
     const toolbar = el("div", { class: "site-preview-toolbar" });
     this.backBtn = el("button", {
@@ -822,14 +929,24 @@ export class SitePreview {
     }) as HTMLButtonElement;
     this.forwardBtn.addEventListener("click", () => void this.goForward());
 
-    const refresh = el("button", {
+    this.refreshBtn = el("button", {
       class: "site-preview-nav-btn",
       type: "button",
       title: "Reload preview",
       "aria-label": "Reload preview",
       html: icon("refresh", 14),
     }) as HTMLButtonElement;
-    refresh.addEventListener("click", () => void this.reload());
+    this.refreshBtn.addEventListener("click", () => void this.reload());
+
+    this.browserHomeBtn = el("button", {
+      class: "site-preview-nav-btn site-preview-browser-home",
+      type: "button",
+      title: "Google home",
+      "aria-label": "Google home",
+      hidden: "true",
+      html: icon("globe", 14),
+    }) as HTMLButtonElement;
+    this.browserHomeBtn.addEventListener("click", () => void this.navigateBrowserHome());
 
     this.urlInput = el("input", {
       class: "site-preview-omnibox",
@@ -943,7 +1060,14 @@ export class SitePreview {
       this.sourceLensBtn,
       close,
     );
-    toolbar.append(this.backBtn, this.forwardBtn, refresh, this.urlInput, actions);
+    toolbar.append(
+      this.backBtn,
+      this.forwardBtn,
+      this.refreshBtn,
+      this.browserHomeBtn,
+      this.urlInput,
+      actions,
+    );
     chrome.append(tabstrip, toolbar);
 
     this.viewport = el("div", { class: "site-preview-viewport" });
@@ -1012,6 +1136,9 @@ export class SitePreview {
 
     this.root.append(resizeHandle, chrome, this.statusEl, this.viewport, this.editBar);
     this.applySavedPreviewSize();
+    this.browserResizeObserver = new ResizeObserver(() => this.scheduleBrowserBoundsSync());
+    this.browserResizeObserver.observe(this.frameHost);
+    void this.bindBrowserEvents();
 
     window.addEventListener("keydown", (e) => {
       if (e.ctrlKey && e.shiftKey && (e.key === "D" || e.key === "d")) {
@@ -1024,9 +1151,27 @@ export class SitePreview {
         e.preventDefault();
         this.setSourceLensMode(!this.sourceLensMode);
       }
+      if (!this.isOpen || this.activeTab?.kind !== "browser") return;
+      if (e.ctrlKey && !e.shiftKey && (e.key === "l" || e.key === "L")) {
+        e.preventDefault();
+        this.urlInput.focus();
+        this.urlInput.select();
+      } else if (e.ctrlKey && !e.shiftKey && (e.key === "r" || e.key === "R")) {
+        e.preventDefault();
+        void this.reload();
+      } else if (e.altKey && e.key === "ArrowLeft") {
+        e.preventDefault();
+        void this.goBack();
+      } else if (e.altKey && e.key === "ArrowRight") {
+        e.preventDefault();
+        void this.goForward();
+      }
     });
     window.addEventListener("resize", () => {
-      if (this.isOpen) this.applySavedPreviewSize();
+      if (this.isOpen) {
+        this.applySavedPreviewSize();
+        this.scheduleBrowserBoundsSync();
+      }
     });
   }
 
@@ -1149,6 +1294,76 @@ export class SitePreview {
     this.onDescribe = cb;
   }
 
+  private newTabMenuOption(
+    kind: "preview" | "browser",
+    title: string,
+    detail: string,
+    iconName: "file" | "globe",
+  ): HTMLButtonElement {
+    const option = el("button", {
+      class: `site-preview-tab-menu-option site-preview-tab-menu-option-${kind}`,
+      type: "button",
+      role: "menuitem",
+      "data-tab-kind": kind,
+    }) as HTMLButtonElement;
+    option.append(
+      el("span", { class: "site-preview-tab-menu-icon", html: icon(iconName, 16) }),
+      el("span", { class: "site-preview-tab-menu-copy" }, [
+        el("span", { class: "site-preview-tab-menu-title" }, [title]),
+        el("span", { class: "site-preview-tab-menu-detail" }, [detail]),
+      ]),
+    );
+    return option;
+  }
+
+  private toggleNewTabMenu() {
+    if (this.newTabMenu.hidden) this.openNewTabMenu();
+    else this.closeNewTabMenu();
+  }
+
+  private openNewTabMenu() {
+    this.closeBuildMenu();
+    const rootRect = this.root.getBoundingClientRect();
+    const buttonRect = this.newTabBtn.getBoundingClientRect();
+    const roomToRight = rootRect.right - buttonRect.left;
+    this.newTabMenu.classList.toggle("is-align-right", roomToRight < 294);
+    this.newTabMenu.hidden = false;
+    this.newTabBtn.classList.add("is-active");
+    this.newTabBtn.setAttribute("aria-expanded", "true");
+    // Native child webviews sit above DOM; temporarily hide the active one so
+    // this launcher can extend over the viewport like a normal browser menu.
+    this.syncBrowserSurfaces(false);
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (!target || this.newTabMenu.contains(target) || this.newTabBtn.contains(target)) return;
+      this.closeNewTabMenu();
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      this.closeNewTabMenu();
+      this.newTabBtn.focus();
+    };
+    document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("keydown", onKeyDown, true);
+    this.newTabMenuCleanup = () => {
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("keydown", onKeyDown, true);
+    };
+    window.setTimeout(() => {
+      (this.newTabMenu.querySelector("[role='menuitem']") as HTMLButtonElement | null)?.focus();
+    }, 0);
+  }
+
+  private closeNewTabMenu() {
+    this.newTabMenuCleanup?.();
+    this.newTabMenuCleanup = null;
+    this.newTabMenu.hidden = true;
+    this.newTabBtn.classList.remove("is-active");
+    this.newTabBtn.setAttribute("aria-expanded", "false");
+    this.scheduleBrowserBoundsSync();
+  }
+
   private buildMenuItem(
     target: "apk" | "software",
     title: string,
@@ -1244,6 +1459,7 @@ export class SitePreview {
       version: 1,
       projectRoot: this.projectRoot,
       tabs: this.tabs.map((tab) => ({
+        kind: tab.kind,
         entryPath: tab.entryPath,
         title: tab.title,
         history: [...tab.history],
@@ -1293,11 +1509,18 @@ export class SitePreview {
       for (const savedTab of tabs) {
         if (generation !== this.viewGeneration) return;
         const id = `preview-tab-${++previewTabSeq}`;
-        const frame = this.createFrame(id);
+        const kind = savedTab.kind === "browser" ? "browser" : "preview";
+        const browserId = kind === "browser" ? `preview-browser-${previewTabSeq}` : id;
+        const frame = kind === "browser"
+          ? this.createBrowserFrame(browserId)
+          : this.createFrame(browserId);
         const tab: PreviewTab = {
-          id,
+          id: browserId,
+          kind,
           entryPath: savedTab.entryPath,
-          title: savedTab.title || tabTitleFromPath(savedTab.entryPath),
+          title: savedTab.title || (kind === "browser"
+            ? browserTitleFromUrl(savedTab.entryPath)
+            : tabTitleFromPath(savedTab.entryPath)),
           history: [...savedTab.history],
           historyIndex: savedTab.historyIndex,
           frame,
@@ -1321,10 +1544,12 @@ export class SitePreview {
       this.selected = null;
       this.syncModeUi();
       this.syncTabStrip();
-      this.statusEl.textContent = /\.(apk|aab|ipa|exe|msi|dmg|wasm)$/i.test(this.entryPath)
+      this.statusEl.textContent = this.activeTab?.kind === "browser"
+        ? this.readyStatus()
+        : /\.(apk|aab|ipa|exe|msi|dmg|wasm)$/i.test(this.entryPath)
         ? "Build artifact ready · open from Files to install/run"
         : this.readyStatus();
-      if (this.selectionModeActive()) this.injectDesignMode();
+      if (this.selectionModeActive() && this.activeTab?.kind === "preview") this.injectDesignMode();
     } finally {
       this.stateRestoreDepth -= 1;
     }
@@ -1336,17 +1561,26 @@ export class SitePreview {
   }
 
   private syncModeUi() {
+    const browserTab = this.activeTab?.kind === "browser";
+    this.root.classList.toggle("is-browser-tab", browserTab);
+    this.root.classList.toggle("is-browser-loading", browserTab && this.activeTab?.browserLoading === true);
     this.root.classList.toggle("is-android", this.androidMode);
     this.root.classList.toggle("is-software", this.softwareMode);
     this.designBtn.classList.toggle("is-active", this.designMode);
     this.designBtn.setAttribute("aria-pressed", String(this.designMode));
+    this.designBtn.disabled = browserTab;
     this.sourceLensBtn.classList.toggle("is-active", this.sourceLensMode);
     this.sourceLensBtn.setAttribute("aria-pressed", String(this.sourceLensMode));
+    this.sourceLensBtn.disabled = browserTab;
     this.androidBtn.classList.toggle("is-active", this.androidMode);
     this.androidBtn.setAttribute("aria-pressed", String(this.androidMode));
     this.softwareBtn.classList.toggle("is-active", this.softwareMode);
     this.softwareBtn.setAttribute("aria-pressed", String(this.softwareMode));
-    this.editBar.hidden = !this.selectionModeActive();
+    this.editBar.hidden = browserTab || !this.selectionModeActive();
+    this.browserHomeBtn.hidden = !browserTab;
+    this.urlInput.placeholder = browserTab
+      ? "Search Google or enter a web address"
+      : "Project file path or localhost URL";
     for (const tab of this.tabs) {
       tab.frame.title = this.androidMode
         ? "Website preview in Android device mode"
@@ -1383,6 +1617,7 @@ export class SitePreview {
 
   private teardownSessionView() {
     this.cancelCloseTeardown();
+    this.closeNewTabMenu();
     this.closeBuildMenu();
     this.clearDesignMode();
     this.designMode = false;
@@ -1483,7 +1718,7 @@ export class SitePreview {
       return;
     }
     this.statusEl.textContent = opts.title || "Loading preview…";
-    const existing = this.tabs.find((tab) => tab.entryPath === entry);
+    const existing = this.tabs.find((tab) => tab.kind === "preview" && tab.entryPath === entry);
     if (existing) {
       this.activateTab(existing.id);
       await this.reload();
@@ -1504,7 +1739,7 @@ export class SitePreview {
     const entry = normalizePreviewEntry(this.projectRoot, entryPath);
     if (!entry) return;
     this.showShell(opts?.title || "Preview");
-    const existing = this.tabs.find((tab) => tab.entryPath === entry);
+    const existing = this.tabs.find((tab) => tab.kind === "preview" && tab.entryPath === entry);
     if (existing) {
       this.activateTab(existing.id);
       await this.reload();
@@ -1523,6 +1758,8 @@ export class SitePreview {
     if (this.root.hidden || this.closing) return;
     this.viewGeneration += 1;
     this.closing = true;
+    this.closeNewTabMenu();
+    this.syncBrowserSurfaces(false);
     const generation = ++this.closeGeneration;
     this.closeBuildMenu();
     this.clearDesignMode();
@@ -1558,6 +1795,7 @@ export class SitePreview {
     document.body.classList.add("preview-open");
     document.querySelector(".workbench")?.classList.add("preview-open");
     this.applySavedPreviewSize();
+    this.scheduleBrowserBoundsSync();
     // Ensure right drawer space is available for preview
     const app = document.getElementById("app");
     if (app?.classList.contains("right-drawer-closed")) {
@@ -1579,6 +1817,155 @@ export class SitePreview {
     }
   }
 
+  private async bindBrowserEvents() {
+    try {
+      this.browserEventUnlisten?.();
+      this.browserEventUnlisten = await api.onPreviewBrowserEvent((event) => {
+        void this.handleBrowserEvent(event);
+      });
+    } catch {
+      // Browser harnesses do not provide a native event bus. Their explicit
+      // API mock still exercises the complete tab and navigation lifecycle.
+    }
+  }
+
+  private browserBounds(): PreviewBrowserBounds | null {
+    const rect = this.frameHost.getBoundingClientRect();
+    if (rect.width < 2 || rect.height < 2 || rect.left < 0 || rect.top < 0) return null;
+    const bounds = {
+      x: rect.left,
+      y: rect.top,
+      width: rect.width,
+      height: rect.height,
+    };
+    this.lastBrowserBounds = bounds;
+    return bounds;
+  }
+
+  private scheduleBrowserBoundsSync() {
+    if (this.browserBoundsFrame) window.cancelAnimationFrame(this.browserBoundsFrame);
+    this.browserBoundsFrame = window.requestAnimationFrame(() => {
+      this.browserBoundsFrame = 0;
+      this.syncBrowserSurfaces();
+    });
+  }
+
+  private syncBrowserSurfaces(allowActive = true) {
+    const bounds = this.browserBounds() || this.lastBrowserBounds;
+    if (!bounds) return;
+    const activeAllowed = allowActive && this.isOpen && this.newTabMenu.hidden;
+    for (const tab of this.tabs) {
+      if (tab.kind !== "browser" || !tab.browserReady) continue;
+      const visible = activeAllowed && tab.id === this.activeTabId;
+      void api.setPreviewBrowserBounds(tab.id, bounds, visible).catch(() => undefined);
+    }
+  }
+
+  private async ensureBrowserSurface(tab: PreviewTab): Promise<void> {
+    if (tab.kind !== "browser" || tab.browserReady) return;
+    if (tab.browserCreating) return tab.browserCreating;
+    const create = (async () => {
+      let bounds = this.browserBounds();
+      if (!bounds) {
+        await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+        bounds = this.browserBounds();
+      }
+      if (!bounds) throw new Error("Browser viewport is not ready.");
+      const visible = this.isOpen && tab.id === this.activeTabId && this.newTabMenu.hidden;
+      await api.createPreviewBrowser(tab.id, tab.entryPath || BROWSER_HOME, bounds, visible);
+      if (!this.tabs.includes(tab)) {
+        await api.closePreviewBrowser(tab.id).catch(() => undefined);
+        return;
+      }
+      tab.browserReady = true;
+      tab.browserFailed = false;
+      this.scheduleBrowserBoundsSync();
+    })().catch((error) => {
+      tab.browserFailed = true;
+      tab.browserReady = false;
+      if (this.activeTabId === tab.id) {
+        this.statusEl.textContent = `Browser unavailable: ${String(error)}. Use the installed desktop app for native browsing.`;
+      }
+    }).finally(() => {
+      tab.browserCreating = null;
+    });
+    tab.browserCreating = create;
+    return create;
+  }
+
+  private recordBrowserLocation(tab: PreviewTab, url: string) {
+    const current = tab.history[tab.historyIndex];
+    if (current === url) {
+      tab.entryPath = url;
+      return;
+    }
+    if (tab.historyIndex > 0 && tab.history[tab.historyIndex - 1] === url) {
+      tab.historyIndex -= 1;
+    } else if (
+      tab.historyIndex < tab.history.length - 1
+      && tab.history[tab.historyIndex + 1] === url
+    ) {
+      tab.historyIndex += 1;
+    } else {
+      tab.history = tab.history.slice(0, tab.historyIndex + 1);
+      tab.history.push(url);
+      if (tab.history.length > BROWSER_HISTORY_MAX) tab.history.shift();
+      tab.historyIndex = tab.history.length - 1;
+    }
+    tab.entryPath = url;
+  }
+
+  private updateBrowserTabTitle(tab: PreviewTab, title?: string | null) {
+    const clean = title?.trim().replace(/\s+/g, " ").slice(0, 160);
+    tab.title = clean || browserTitleFromUrl(tab.entryPath);
+    tab.tabEl.querySelector(".site-preview-tab-title")!.textContent = tab.title;
+    tab.tabEl.title = `${tab.title}\n${tab.entryPath}`;
+  }
+
+  private async handleBrowserEvent(event: PreviewBrowserEvent) {
+    const tab = this.tabs.find((candidate) => candidate.id === event.label && candidate.kind === "browser");
+    if (!tab) return;
+    if (event.kind === "popup") {
+      const target = normalizeBrowserUrl(event.url);
+      if (target) await this.navigateBrowserTab(tab, target);
+      return;
+    }
+    if (event.kind === "blocked") {
+      if (this.activeTabId === tab.id) {
+        this.statusEl.textContent = "Blocked an unsafe browser navigation. Only http:// and https:// are allowed.";
+      }
+      return;
+    }
+
+    const url = normalizeBrowserUrl(event.url);
+    if (url) this.recordBrowserLocation(tab, url);
+    if (event.kind === "title") this.updateBrowserTabTitle(tab, event.title);
+    if (event.kind === "loading") tab.browserLoading = true;
+    if (event.kind === "ready") {
+      tab.browserLoading = false;
+      if (event.title) this.updateBrowserTabTitle(tab, event.title);
+    }
+    if (this.activeTabId === tab.id) {
+      this.urlInput.value = tab.entryPath;
+      this.root.classList.toggle("is-browser-loading", tab.browserLoading === true);
+      this.statusEl.textContent = event.kind === "loading"
+        ? `Browser · Loading ${browserTitleFromUrl(tab.entryPath)}…`
+        : this.readyStatus();
+      this.updateNavButtons();
+    }
+    this.emitStateChange();
+  }
+
+  private createBrowserFrame(tabId: string): HTMLIFrameElement {
+    const frame = this.createFrame(tabId);
+    frame.classList.add("site-preview-browser-placeholder");
+    frame.title = "Native browser tab";
+    frame.srcdoc = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+      :root{color-scheme:dark;font-family:Inter,Segoe UI,sans-serif}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at 50% 32%,#17253b 0,#0d1119 34%,#080a0e 78%);color:#f4f7fb}.card{text-align:center;padding:36px}.mark{width:54px;height:54px;margin:0 auto 18px;display:grid;place-items:center;border:1px solid #4da3ff66;border-radius:17px;background:linear-gradient(145deg,#2e7ce044,#182842);box-shadow:0 14px 50px #1d79de2e;font-size:25px}h1{margin:0 0 9px;font-size:25px;letter-spacing:-.02em}p{margin:0;color:#9ba8ba;font-size:13px}.sites{display:flex;justify-content:center;gap:7px;margin-top:18px}.sites span{padding:6px 10px;border:1px solid #ffffff16;border-radius:999px;background:#ffffff08;color:#c8d3e2;font-size:11px}
+    </style></head><body><main class="card"><div class="mark">◎</div><h1>Hormachuelos Browser</h1><p>Search or enter an address in the bar above.</p><div class="sites"><span>Google</span><span>YouTube</span><span>Facebook</span></div></main></body></html>`;
+    return frame;
+  }
+
   private createFrame(tabId: string): HTMLIFrameElement {
     const frame = document.createElement("iframe");
     frame.className = "site-preview-frame";
@@ -1595,13 +1982,16 @@ export class SitePreview {
 
   private renderTabButton(tab: PreviewTab): HTMLButtonElement {
     const btn = el("button", {
-      class: "site-preview-tab",
+      class: `site-preview-tab${tab.kind === "browser" ? " is-browser" : ""}`,
       type: "button",
       role: "tab",
       "aria-selected": "false",
       title: tab.entryPath,
     }, []) as HTMLButtonElement;
-    const favicon = el("span", { class: "site-preview-tab-favicon", html: icon("globe", 12) });
+    const favicon = el("span", {
+      class: "site-preview-tab-favicon",
+      html: icon(tab.kind === "browser" ? "search" : "globe", 12),
+    });
     const title = el("span", { class: "site-preview-tab-title" }, [tab.title]);
     const closeBtn = el("button", {
       class: "site-preview-tab-close",
@@ -1634,7 +2024,9 @@ export class SitePreview {
       tab.frame.hidden = !active;
     }
     this.urlInput.value = this.entryPath;
+    this.syncModeUi();
     this.updateNavButtons();
+    this.scheduleBrowserBoundsSync();
   }
 
   private updateNavButtons() {
@@ -1649,13 +2041,19 @@ export class SitePreview {
   }
 
   private activateTab(tabId: string) {
-    if (!this.tabs.some((tab) => tab.id === tabId)) return;
+    const nextTab = this.tabs.find((tab) => tab.id === tabId);
+    if (!nextTab) return;
     if (this.selectionModeActive()) this.clearDesignMode();
+    if (nextTab.kind === "browser") {
+      this.designMode = false;
+      this.sourceLensMode = false;
+    }
     this.activeTabId = tabId;
     this.selected = null;
     this.updateEditTargetUi(null);
     this.syncTabStrip();
     if (this.entryPath) this.statusEl.textContent = this.readyStatus();
+    if (nextTab.kind === "browser" && !nextTab.browserReady) void this.ensureBrowserSurface(nextTab);
     this.emitStateChange();
   }
 
@@ -1663,6 +2061,9 @@ export class SitePreview {
     const idx = this.tabs.findIndex((tab) => tab.id === tabId);
     if (idx < 0) return;
     const [removed] = this.tabs.splice(idx, 1);
+    if (removed.kind === "browser") {
+      void api.closePreviewBrowser(removed.id).catch(() => undefined);
+    }
     removed.tabEl.remove();
     removed.frame.remove();
     if (!this.tabs.length) {
@@ -1682,6 +2083,9 @@ export class SitePreview {
 
   private destroyAllTabs() {
     for (const tab of this.tabs) {
+      if (tab.kind === "browser") {
+        void api.closePreviewBrowser(tab.id).catch(() => undefined);
+      }
       tab.tabEl.remove();
       tab.frame.removeAttribute("srcdoc");
       tab.frame.src = "about:blank";
@@ -1704,12 +2108,13 @@ export class SitePreview {
     opts: { activate?: boolean; title?: string; pushHistory?: boolean },
   ) {
     const clean = entryPath.replace(/\\/g, "/");
-    let tab = this.tabs.find((t) => t.entryPath === clean);
+    let tab = this.tabs.find((t) => t.kind === "preview" && t.entryPath === clean);
     if (!tab) {
       const id = `preview-tab-${++previewTabSeq}`;
       const frame = this.createFrame(id);
       tab = {
         id,
+        kind: "preview",
         entryPath: clean,
         title: opts.title || tabTitleFromPath(clean),
         history: [clean],
@@ -1729,6 +2134,10 @@ export class SitePreview {
 
   private async openNewTab() {
     if (!this.projectRoot) return;
+    if (this.tabs.length >= 12) {
+      this.statusEl.textContent = "Close a tab before opening another one (12-tab limit).";
+      return;
+    }
     const generation = ++this.viewGeneration;
     const files = (await this.listProjectFilesSafe())
       .map((file) => normalizePreviewEntry(this.projectRoot, file))
@@ -1745,6 +2154,7 @@ export class SitePreview {
     const frame = this.createFrame(tabId);
     const tab: PreviewTab = {
       id: tabId,
+      kind: "preview",
       entryPath: freshPath,
       title: freshPath ? tabTitleFromPath(freshPath) : "New tab",
       history: freshPath ? [freshPath] : [],
@@ -1761,13 +2171,102 @@ export class SitePreview {
     } else {
       frame.removeAttribute("srcdoc");
       frame.src = "about:blank";
-      this.statusEl.textContent = "New tab — type a file path or http://localhost URL";
+      this.statusEl.textContent = "New project tab — type a file path or http://localhost URL";
     }
     if (generation === this.viewGeneration) this.emitStateChange();
   }
 
+  private async openBrowserTab(initialUrl = BROWSER_HOME) {
+    if (!this.projectRoot) return;
+    if (this.tabs.length >= 12) {
+      this.statusEl.textContent = "Close a tab before opening another one (12-tab limit).";
+      return;
+    }
+    const url = normalizeBrowserUrl(initialUrl) || BROWSER_HOME;
+    const tabId = `preview-browser-${++previewTabSeq}`;
+    const frame = this.createBrowserFrame(tabId);
+    const tab: PreviewTab = {
+      id: tabId,
+      kind: "browser",
+      entryPath: url,
+      title: browserTitleFromUrl(url),
+      history: [url],
+      historyIndex: 0,
+      frame,
+      tabEl: null as unknown as HTMLButtonElement,
+      browserCreating: null,
+      browserReady: false,
+      browserLoading: true,
+    };
+    tab.tabEl = this.renderTabButton(tab);
+    this.tabs.push(tab);
+    this.activeTabId = tabId;
+    this.designMode = false;
+    this.sourceLensMode = false;
+    this.syncTabStrip();
+    this.statusEl.textContent = `Browser · Loading ${browserTitleFromUrl(url)}…`;
+    this.emitStateChange();
+    await this.ensureBrowserSurface(tab);
+  }
+
+  private async navigateBrowserHome() {
+    const tab = this.activeTab;
+    if (!tab || tab.kind !== "browser") return;
+    await this.navigateBrowserTab(tab, BROWSER_HOME);
+  }
+
+  private async navigateBrowserTab(tab: PreviewTab, url: string) {
+    if (tab.kind !== "browser") return;
+    const next = normalizeBrowserUrl(url);
+    if (!next) {
+      this.statusEl.textContent = "Only safe http:// and https:// web addresses are supported.";
+      return;
+    }
+    const previous = tab.entryPath;
+    const previousHistory = [...tab.history];
+    const previousHistoryIndex = tab.historyIndex;
+    const hadSurface = tab.browserReady === true;
+    const wasCreating = Boolean(tab.browserCreating);
+    this.recordBrowserLocation(tab, next);
+    this.updateBrowserTabTitle(tab);
+    tab.browserLoading = true;
+    if (this.activeTabId === tab.id) {
+      this.urlInput.value = next;
+      this.root.classList.add("is-browser-loading");
+      this.statusEl.textContent = `Browser · Loading ${browserTitleFromUrl(next)}…`;
+      this.updateNavButtons();
+    }
+    this.emitStateChange();
+    await this.ensureBrowserSurface(tab);
+    if (!tab.browserReady) return;
+    // A newly created surface already received `next` as its initial URL.
+    if (!hadSurface && !wasCreating) return;
+    try {
+      await api.navigatePreviewBrowser(tab.id, next);
+    } catch (error) {
+      tab.entryPath = previous;
+      tab.history = previousHistory;
+      tab.historyIndex = previousHistoryIndex;
+      this.urlInput.value = previous;
+      tab.browserLoading = false;
+      this.root.classList.remove("is-browser-loading");
+      this.statusEl.textContent = `Browser navigation failed: ${String(error)}`;
+    }
+  }
+
   private async navigateOmnibox() {
     if (!this.projectRoot) return;
+    const active = this.activeTab;
+    if (active?.kind === "browser") {
+      const next = browserAddressToUrl(this.urlInput.value);
+      if (!next) {
+        this.urlInput.value = active.entryPath;
+        this.statusEl.textContent = "Only web addresses and search terms are supported.";
+        return;
+      }
+      await this.navigateBrowserTab(active, next);
+      return;
+    }
     const next = normalizePreviewEntry(this.projectRoot, this.urlInput.value.trim());
     if (!next) {
       this.urlInput.value = this.entryPath;
@@ -1797,6 +2296,19 @@ export class SitePreview {
   private async goBack() {
     const tab = this.activeTab;
     if (!tab || tab.historyIndex <= 0) return;
+    if (tab.kind === "browser") {
+      tab.browserLoading = true;
+      this.root.classList.add("is-browser-loading");
+      this.statusEl.textContent = "Browser · Going back…";
+      try {
+        await this.ensureBrowserSurface(tab);
+        await api.previewBrowserAction(tab.id, "back");
+      } catch (error) {
+        tab.browserLoading = false;
+        this.statusEl.textContent = `Browser history failed: ${String(error)}`;
+      }
+      return;
+    }
     tab.historyIndex -= 1;
     tab.entryPath = tab.history[tab.historyIndex];
     tab.title = tabTitleFromPath(tab.entryPath);
@@ -1810,6 +2322,19 @@ export class SitePreview {
   private async goForward() {
     const tab = this.activeTab;
     if (!tab || tab.historyIndex >= tab.history.length - 1) return;
+    if (tab.kind === "browser") {
+      tab.browserLoading = true;
+      this.root.classList.add("is-browser-loading");
+      this.statusEl.textContent = "Browser · Going forward…";
+      try {
+        await this.ensureBrowserSurface(tab);
+        await api.previewBrowserAction(tab.id, "forward");
+      } catch (error) {
+        tab.browserLoading = false;
+        this.statusEl.textContent = `Browser history failed: ${String(error)}`;
+      }
+      return;
+    }
     tab.historyIndex += 1;
     tab.entryPath = tab.history[tab.historyIndex];
     tab.title = tabTitleFromPath(tab.entryPath);
@@ -1823,6 +2348,19 @@ export class SitePreview {
   async reload() {
     const tab = this.activeTab;
     if (!tab) return;
+    if (tab.kind === "browser") {
+      tab.browserLoading = true;
+      this.root.classList.add("is-browser-loading");
+      this.statusEl.textContent = `Browser · Reloading ${browserTitleFromUrl(tab.entryPath)}…`;
+      try {
+        await this.ensureBrowserSurface(tab);
+        await api.previewBrowserAction(tab.id, "reload");
+      } catch (error) {
+        tab.browserLoading = false;
+        this.statusEl.textContent = `Browser reload failed: ${String(error)}`;
+      }
+      return;
+    }
     if (this.sourceLensMode && this.projectRoot) {
       void api.invalidateDesignSourceIndex().catch(() => undefined);
     }
@@ -1831,6 +2369,10 @@ export class SitePreview {
 
   private async reloadTab(tab: PreviewTab) {
     if (!this.projectRoot || !tab.entryPath) return;
+    if (tab.kind === "browser") {
+      await this.ensureBrowserSurface(tab);
+      return;
+    }
     this.statusEl.textContent = "Loading…";
     const frame = tab.frame;
     try {
@@ -1868,6 +2410,10 @@ export class SitePreview {
   }
 
   setDesignMode(on: boolean) {
+    if (on && this.activeTab?.kind === "browser") {
+      this.statusEl.textContent = "Design tools are available on project preview tabs.";
+      return;
+    }
     if (this.designMode === on && (!on || !this.sourceLensMode)) return;
     this.clearDesignMode();
     this.designMode = on;
@@ -1883,6 +2429,10 @@ export class SitePreview {
   }
 
   setSourceLensMode(on: boolean) {
+    if (on && this.activeTab?.kind === "browser") {
+      this.statusEl.textContent = "Source Lens is available on project preview tabs.";
+      return;
+    }
     if (this.sourceLensMode === on && (!on || !this.designMode)) return;
     this.clearDesignMode();
     this.sourceLensMode = on;
@@ -1919,6 +2469,11 @@ export class SitePreview {
   }
 
   private readyStatus(assetMode = false): string {
+    if (this.activeTab?.kind === "browser") {
+      return this.activeTab.browserFailed
+        ? "Browser · native surface unavailable"
+        : "Browser · Ready · isolated native webview";
+    }
     const mode = this.androidMode
       ? "Android · 412 × 915 viewport"
       : this.softwareMode
@@ -2443,6 +2998,7 @@ export class SitePreview {
   }
 
   private injectDesignMode(attempt = 0) {
+    if (this.activeTab?.kind === "browser") return;
     const frame = this.frame;
     if (!frame) return;
     // This is the entry point that (re)activates design mode on the active

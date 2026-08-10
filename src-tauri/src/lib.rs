@@ -9,6 +9,7 @@ pub mod integration_chat;
 pub mod integrations;
 pub mod license;
 pub mod llm;
+pub mod preview_browser;
 pub mod preview_capture;
 pub mod smart_agent;
 pub mod state;
@@ -1244,6 +1245,11 @@ pub fn run() {
             record_license_usage,
             save_pasted_image,
             preview_capture::capture_preview_selection,
+            preview_browser::create_preview_browser,
+            preview_browser::set_preview_browser_bounds,
+            preview_browser::navigate_preview_browser,
+            preview_browser::preview_browser_action,
+            preview_browser::close_preview_browser,
             design_source::warm_design_source_index,
             design_source::invalidate_design_source_index,
             design_source::resolve_design_target,

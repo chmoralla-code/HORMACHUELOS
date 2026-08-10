@@ -20,6 +20,122 @@ test.use({
 
 test.beforeAll(() => fs.mkdirSync(OUT, { recursive: true }));
 
+test("Add tab offers a persistent native Browser with search and navigation controls", async ({ page }) => {
+  await page.goto(`${APP}/preview-harness.html`, { waitUntil: "networkidle" });
+
+  await page.getByRole("button", { name: "Add tab" }).click();
+  const launcher = page.getByRole("menu", { name: "Add tab" });
+  await expect(launcher).toBeVisible();
+  await expect(launcher.getByRole("menuitem", { name: /Project preview/ })).toBeVisible();
+  await expect(launcher.getByRole("menuitem", { name: /Browser/ })).toContainText(
+    "Google or visit YouTube, Facebook",
+  );
+  await page.screenshot({ path: path.join(OUT, "preview-add-browser-tab-menu.png"), fullPage: true });
+
+  await launcher.getByRole("menuitem", { name: /Browser/ }).click();
+  const browserTab = page.locator(".site-preview-tab.is-browser");
+  await expect(browserTab).toHaveClass(/is-active/);
+  await expect(page.locator(".site-preview")).toHaveClass(/is-browser-tab/);
+  await expect(page.getByRole("button", { name: "Google home" })).toBeVisible();
+  const address = page.getByRole("textbox", { name: "Preview path" });
+  await expect(address).toHaveAttribute("placeholder", /Search Google/);
+
+  await expect.poll(async () => page.evaluate(() =>
+    window.__previewBrowserCalls.filter((call) => call.command === "create").length,
+  )).toBe(1);
+  const created = await page.evaluate(() =>
+    window.__previewBrowserCalls.find((call) => call.command === "create"),
+  );
+  expect(created.url).toBe("https://www.google.com/");
+  expect(created.visible).toBe(true);
+  expect(created.bounds.width).toBeGreaterThan(100);
+  expect(created.bounds.height).toBeGreaterThan(100);
+
+  await address.fill("hormachuelos ai browser");
+  await address.press("Enter");
+  await expect.poll(async () => page.evaluate(() =>
+    window.__previewBrowserCalls.some((call) =>
+      call.command === "navigate" && call.url === "https://www.google.com/search?q=hormachuelos%20ai%20browser"
+    ),
+  )).toBe(true);
+  await address.fill("youtube.com");
+  await address.press("Enter");
+  await address.fill("facebook.com");
+  await address.press("Enter");
+  await expect.poll(async () => page.evaluate(() => {
+    const urls = window.__previewBrowserCalls
+      .filter((call) => call.command === "navigate")
+      .map((call) => call.url);
+    return urls.includes("https://youtube.com/") && urls.includes("https://facebook.com/");
+  })).toBe(true);
+  const directSites = await page.evaluate(() => window.__previewBrowserCalls
+    .filter((call) => call.command === "navigate")
+    .map((call) => call.url));
+  expect(directSites).toContain("https://youtube.com/");
+  expect(directSites).toContain("https://facebook.com/");
+  await expect(page.getByRole("button", { name: "Back" })).toBeEnabled();
+  await page.getByRole("button", { name: "Back" }).click();
+  await page.evaluate(() => {
+    const label = window.__previewBrowserCalls.find((call) => call.command === "create").label;
+    window.__previewBrowserListener?.({
+      label,
+      kind: "ready",
+      url: "https://youtube.com/",
+      title: "YouTube",
+    });
+  });
+  await expect(page.getByRole("button", { name: "Forward" })).toBeEnabled();
+  await page.getByRole("button", { name: "Forward" }).click();
+  await page.getByRole("button", { name: "Reload preview" }).click();
+
+  await page.locator(".site-preview-tab:not(.is-browser)").click();
+  await expect(page.locator(".site-preview")).not.toHaveClass(/is-browser-tab/);
+  await expect.poll(async () => page.evaluate(() =>
+    window.__previewBrowserCalls.some((call) => call.command === "bounds" && call.visible === false),
+  )).toBe(true);
+  await browserTab.click();
+  await expect(page.locator(".site-preview")).toHaveClass(/is-browser-tab/);
+  await page.screenshot({ path: path.join(OUT, "preview-native-browser-tab.png"), fullPage: true });
+
+  await browserTab.locator(".site-preview-tab-close").click();
+  await expect(browserTab).toHaveCount(0);
+  await expect.poll(async () => page.evaluate(() =>
+    window.__previewBrowserCalls.some((call) => call.command === "close"),
+  )).toBe(true);
+});
+
+test("Browser tabs survive repeated long-session restores without leaking native surfaces", async ({ page }) => {
+  await page.goto(`${APP}/preview-harness.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Add tab" }).click();
+  await page.getByRole("menuitem", { name: /Browser/ }).click();
+  const address = page.getByRole("textbox", { name: "Preview path" });
+  await address.fill("youtube.com");
+  await address.press("Enter");
+  await expect.poll(async () => page.evaluate(() =>
+    window.__preview.captureSessionState()?.tabs.some((tab) =>
+      tab.kind === "browser" && tab.entryPath === "https://youtube.com/"
+    ),
+  )).toBe(true);
+
+  const saved = await page.evaluate(() => window.__preview.captureSessionState());
+  expect(saved.tabs.at(-1).kind).toBe("browser");
+  expect(saved.activeTabIndex).toBe(saved.tabs.length - 1);
+  for (let cycle = 0; cycle < 8; cycle += 1) {
+    await page.evaluate(async (state) => window.__preview.restoreSessionState(state), saved);
+  }
+
+  await expect(page.locator(".site-preview-tab.is-browser")).toHaveCount(1);
+  await expect(page.locator(".site-preview-tab.is-browser")).toHaveClass(/is-active/);
+  const lifecycle = await page.evaluate(() => ({
+    creates: window.__previewBrowserCalls.filter((call) => call.command === "create").length,
+    closes: window.__previewBrowserCalls.filter((call) => call.command === "close").length,
+    state: window.__preview.captureSessionState(),
+  }));
+  expect(lifecycle.creates).toBe(9);
+  expect(lifecycle.closes).toBeGreaterThanOrEqual(8);
+  expect(lifecycle.state.tabs.at(-1).entryPath).toBe("https://youtube.com/");
+});
+
 test("Design mode keeps exact element selection for project-file previews", async ({ page }) => {
   await page.route("https://asset.localhost/**", (route) =>
     route.fulfill({ status: 200, contentType: "text/plain", body: "" }),

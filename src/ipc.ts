@@ -145,6 +145,20 @@ export type DesignTargetResolution = {
   indexPartial: boolean;
 };
 
+export type PreviewBrowserBounds = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+export type PreviewBrowserEvent = {
+  label: string;
+  kind: "loading" | "ready" | "title" | "popup" | "blocked";
+  url?: string | null;
+  title?: string | null;
+};
+
 export type ClientPackResult = {
   zipPath: string;
   filesCount: number;
@@ -253,6 +267,30 @@ export const api = {
     height: number;
     devicePixelRatio: number;
   }): Promise<string> => invoke("capture_preview_selection", { region }),
+  /** Mount an isolated native webview over one Browser tab in the preview panel. */
+  createPreviewBrowser: (
+    label: string,
+    url: string,
+    bounds: PreviewBrowserBounds,
+    visible: boolean,
+  ): Promise<void> => invoke("create_preview_browser", { label, url, bounds, visible }),
+  /** Keep a native Browser tab aligned with its responsive DOM placeholder. */
+  setPreviewBrowserBounds: (
+    label: string,
+    bounds: PreviewBrowserBounds,
+    visible: boolean,
+  ): Promise<void> => invoke("set_preview_browser_bounds", { label, bounds, visible }),
+  navigatePreviewBrowser: (label: string, url: string): Promise<void> =>
+    invoke("navigate_preview_browser", { label, url }),
+  previewBrowserAction: (
+    label: string,
+    action: "back" | "forward" | "reload" | "focus",
+  ): Promise<void> => invoke("preview_browser_action", { label, action }),
+  closePreviewBrowser: (label: string): Promise<void> =>
+    invoke("close_preview_browser", { label }),
+  onPreviewBrowserEvent: (
+    cb: (payload: PreviewBrowserEvent) => void,
+  ): Promise<UnlistenFn> => listen<PreviewBrowserEvent>("preview-browser-event", (event) => cb(event.payload)),
   /** Warm the bounded project index used by Source Lens hover inspection. */
   warmDesignSourceIndex: (): Promise<number> => invoke("warm_design_source_index"),
   /** Drop cached source data after a preview reload or project write. */

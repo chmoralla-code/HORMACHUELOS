@@ -37,6 +37,8 @@ export type SessionMultiAgentTool = {
  * recreated when that session becomes visible again.
  */
 export interface SessionPreviewTab {
+  /** Missing on older sessions, where every tab was a project preview. */
+  kind?: "preview" | "browser";
   entryPath: string;
   title: string;
   history: string[];
@@ -144,6 +146,7 @@ const CONTEXTUAL_CREDENTIAL =
 const SESSION_PREVIEW_MAX_TABS = 12;
 const SESSION_PREVIEW_MAX_HISTORY = 32;
 const SESSION_PREVIEW_PATH_MAX = 768;
+const SESSION_PREVIEW_URL_MAX = 4_096;
 const SESSION_PREVIEW_ROOT_MAX = 2_048;
 
 function projectPathKey(value: unknown): string {
@@ -323,6 +326,20 @@ function sanitizePreviewPath(value: unknown): string | null {
   return parts.length ? parts.join("/") : null;
 }
 
+/** Persist only ordinary credential-free web URLs for native Browser tabs. */
+function sanitizeBrowserUrl(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const raw = value.trim();
+  if (!raw || raw.length > SESSION_PREVIEW_URL_MAX || raw.includes("\0")) return null;
+  try {
+    const url = new URL(raw);
+    if (!/^https?:$/.test(url.protocol) || !url.hostname || url.username || url.password) return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
 function sanitizeSessionPreview(value: unknown): SessionPreviewState | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const raw = value as Record<string, unknown>;
@@ -337,15 +354,18 @@ function sanitizeSessionPreview(value: unknown): SessionPreviewState | undefined
   for (const candidate of rawTabs) {
     if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
     const tab = candidate as Record<string, unknown>;
+    const kind = tab.kind === "browser" ? "browser" : "preview";
+    const sanitizeEntry = kind === "browser" ? sanitizeBrowserUrl : sanitizePreviewPath;
     const rawHistory = Array.isArray(tab.history)
       ? tab.history.slice(0, SESSION_PREVIEW_MAX_HISTORY)
       : [];
     const history = rawHistory
-      .map(sanitizePreviewPath)
+      .map(sanitizeEntry)
       .filter((path): path is string => Boolean(path));
-    const entryPath = sanitizePreviewPath(tab.entryPath) || history[0];
-    if (!entryPath || seenEntries.has(entryPath)) continue;
-    seenEntries.add(entryPath);
+    const entryPath = sanitizeEntry(tab.entryPath) || history[0];
+    const entryKey = `${kind}:${entryPath || ""}`;
+    if (!entryPath || seenEntries.has(entryKey)) continue;
+    seenEntries.add(entryKey);
     if (!history.length) history.push(entryPath);
     const requestedIndex = Math.floor(Number(tab.historyIndex) || 0);
     const historyIndex = Math.max(0, Math.min(history.length - 1, requestedIndex));
@@ -353,6 +373,7 @@ function sanitizeSessionPreview(value: unknown): SessionPreviewState | undefined
       ? redactChatCredentials(tab.title.trim()).slice(0, 160)
       : entryPath.split("/").pop() || entryPath;
     tabs.push({
+      kind,
       entryPath: history[historyIndex] || entryPath,
       title,
       history,
