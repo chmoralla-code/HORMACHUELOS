@@ -28,6 +28,8 @@ const BUILTIN_RELEASE_VERSION = "0.1.60";
 const BUILTIN_MSI_SHA256 = "96f13869eb976aaf4d0760a93c9e98fa177ea6cbd7b3cc2a7a26bac25bb3cb8f";
 const BUILTIN_EXE_SHA256 = "54d0d292104a080da8d65a068f6dea509aae195a53180330aa48853055d2e409";
 const BUILTIN_RELEASE_NOTES = "Fixed: the AI no longer stops mid-reply - cut-off responses and reasoning-model narration are now resumed automatically instead of ending the run. Also: creating a new project inside a folder that already contains a project (like your INVENTORIES folder) now warns you and offers to open the existing folder instead, so the app can no longer scan an empty subfolder by accident.";
+
+const BUILTIN_FORCE_UPDATE = true;
 const GITHUB_RELEASES_BASE = "https://github.com/chmoralla-code/HORMACHUELOS/releases/download";
 
 /**
@@ -50,7 +52,7 @@ export function builtinLatestRelease() {
     exeUrl: `${downloadBase}/Hormachuelos_${BUILTIN_RELEASE_VERSION}_x64-setup.exe`,
     msiSha256: BUILTIN_MSI_SHA256,
     exeSha256: BUILTIN_EXE_SHA256,
-    forceUpdate: false,
+    forceUpdate: BUILTIN_FORCE_UPDATE,
     isLatest: true,
     publishedAt: "2026-08-02T00:00:00.000Z",
   };
