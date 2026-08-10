@@ -10,5 +10,5 @@ README.md
 **/*.exe
 **/*.zip
 .tmp/**
-!downloads/Hormachuelos_0.1.66_x64_en-US.msi
-!downloads/Hormachuelos_0.1.66_x64-setup.exe
+!downloads/Hormachuelos_0.1.67_x64_en-US.msi
+!downloads/Hormachuelos_0.1.67_x64-setup.exe

@@ -67,6 +67,25 @@ export function listProjectWorkspaces(): ProjectWorkspace[] {
   return readWorkspaces();
 }
 
+/**
+ * Forget one sidebar workspace without touching its folder, files, or saved
+ * sessions. Native recent-project persistence is updated separately through
+ * IPC so the removed entry also stays gone after an app restart.
+ */
+export function removeProjectWorkspace(path: string): ProjectWorkspace[] {
+  const key = workspaceKey(path);
+  if (!key) return readWorkspaces();
+  const remaining = readWorkspaces().filter((workspace) => workspaceKey(workspace.path) !== key);
+  writeWorkspaces(remaining);
+  try {
+    const active = normalizePath(localStorage.getItem(ACTIVE_WORKSPACE_KEY) || "");
+    if (workspaceKey(active) === key) localStorage.removeItem(ACTIVE_WORKSPACE_KEY);
+  } catch {
+    // The in-memory removal still succeeds when storage is unavailable.
+  }
+  return remaining;
+}
+
 /** Remember a project and mark it as the active workspace. */
 export function activateProjectWorkspace(path: string): ProjectWorkspace[] {
   const normalized = normalizePath(path);

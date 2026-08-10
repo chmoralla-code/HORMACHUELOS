@@ -109,6 +109,14 @@ fn list_recent_projects(state: tauri::State<'_, state::AppState>) -> Vec<String>
 }
 
 #[tauri::command]
+fn remove_recent_project(
+    path: String,
+    state: tauri::State<'_, state::AppState>,
+) -> Result<bool, String> {
+    state.remove_recent_project(&path)
+}
+
+#[tauri::command]
 async fn get_settings(
     state: tauri::State<'_, state::AppState>,
 ) -> Result<config::Settings, String> {
@@ -1204,6 +1212,7 @@ pub fn run() {
             set_project_root,
             ensure_quick_session_workspace,
             list_recent_projects,
+            remove_recent_project,
             get_settings,
             save_settings,
             get_computer_use_status,
