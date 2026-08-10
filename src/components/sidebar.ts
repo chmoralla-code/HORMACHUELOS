@@ -57,7 +57,11 @@ export class Sidebar {
   private runningProjectPaths = new Set<string>();
   private usageMeta: UsageDisplayMeta = {};
   private usageRoot: HTMLElement | null = null;
+  private usageDisclosure: HTMLDetailsElement | null = null;
+  private usageSummary: HTMLElement | null = null;
+  private usageExpanded = false;
   private accountRoot: HTMLElement | null = null;
+  private accountIdentityRoot: HTMLButtonElement | null = null;
   private accountStatus: AccountStatusState = { state: "checking" };
   private updateButton: HTMLButtonElement | null = null;
   private updateAvailable = false;
@@ -105,6 +109,10 @@ export class Sidebar {
 
     clear(this.node);
     this.usageRoot = null;
+    this.usageDisclosure = null;
+    this.usageSummary = null;
+    this.accountRoot = null;
+    this.accountIdentityRoot = null;
 
     this.node.appendChild(div("sb-brand",
       `<div class="sb-logo">H</div><div class="sb-title">Hormachuelos</div><div class="sb-version">v${version}</div>`));
@@ -216,10 +224,9 @@ export class Sidebar {
     workspaceSections.appendChild(sessionSection);
     this.node.appendChild(workspaceSections);
 
-    // Usage limit — below sessions in the left sandwich drawer
-    this.node.appendChild(this.buildUsageSection());
-
-    // Website account sync status (hormachuelos.vercel.app)
+    // Website account sync and a collapsed usage summary. Keeping usage inside
+    // the account card leaves the flexible workspace region available to the
+    // project and session lists.
     this.node.appendChild(this.buildAccountSection());
 
     const footer = el("div", { class: "sb-footer" });
@@ -390,7 +397,7 @@ export class Sidebar {
 
   private buildAccountSection(): HTMLElement {
     const section = el("div", { class: "sb-section sb-account-section" });
-    const labelRow = el("div", { class: "sb-usage-label-row" });
+    const labelRow = el("div", { class: "sb-account-label-row" });
     labelRow.appendChild(el("div", { class: "sb-section-label", style: "margin:0" }, ["Account"]));
     const refreshBtn = el("button", {
       class: "sb-account-refresh",
@@ -408,19 +415,27 @@ export class Sidebar {
 
     this.accountRoot = el("div", {
       class: "sb-account",
-      role: "status",
-      "aria-live": "polite",
-      "aria-label": "Website account status",
+      role: "group",
+      "aria-label": "Website account and usage",
     });
-    this.accountRoot.addEventListener("click", () => this.onManageAccount());
+    this.accountIdentityRoot = el("button", {
+      class: "sb-account-identity",
+      type: "button",
+      title: "Open website account",
+      "aria-label": "Manage website account",
+      "aria-live": "polite",
+    }) as HTMLButtonElement;
+    this.accountIdentityRoot.addEventListener("click", () => this.onManageAccount());
+    this.accountRoot.appendChild(this.accountIdentityRoot);
+    this.accountRoot.appendChild(this.buildUsageDisclosure());
     section.appendChild(this.accountRoot);
     return section;
   }
 
   private paintAccount() {
-    if (!this.accountRoot) return;
+    if (!this.accountRoot || !this.accountIdentityRoot) return;
     const s = this.accountStatus;
-    clear(this.accountRoot);
+    clear(this.accountIdentityRoot);
     this.accountRoot.classList.remove("is-synced", "is-offline", "is-signed-out", "is-checking");
 
     const row = (title: string, subtitle: string) => {
@@ -437,45 +452,64 @@ export class Sidebar {
 
     if (s.state === "checking") {
       this.accountRoot.classList.add("is-checking");
-      this.accountRoot.appendChild(row("Checking sync…", "hormachuelos.vercel.app"));
+      this.accountIdentityRoot.appendChild(row("Checking sync…", "hormachuelos.vercel.app"));
       return;
     }
 
     if (s.state === "synced") {
       const who = s.name?.trim() || s.email;
       this.accountRoot.classList.add("is-synced");
-      this.accountRoot.appendChild(row("Synced · signed in", who));
-      this.accountRoot.appendChild(el("div", { class: "sb-account-meta" }, ["Website account linked"]));
+      this.accountIdentityRoot.appendChild(row("Synced · signed in", who));
+      this.accountIdentityRoot.appendChild(el("div", { class: "sb-account-meta" }, ["Website account linked"]));
       return;
     }
 
     if (s.state === "offline") {
       this.accountRoot.classList.add("is-offline");
-      this.accountRoot.appendChild(
+      this.accountIdentityRoot.appendChild(
         row("Can't verify sync", s.email || "Saved session · website unreachable"),
       );
-      this.accountRoot.appendChild(
+      this.accountIdentityRoot.appendChild(
         el("div", { class: "sb-account-meta" }, [s.detail || "Click to open website"]),
       );
       return;
     }
 
     this.accountRoot.classList.add("is-signed-out");
-    this.accountRoot.appendChild(
+    this.accountIdentityRoot.appendChild(
       row("Not signed in", s.detail || "Sign in on hormachuelos.vercel.app"),
     );
-    this.accountRoot.appendChild(
+    this.accountIdentityRoot.appendChild(
       el("div", { class: "sb-account-meta" }, ["Click to link website account"]),
     );
   }
 
-  private buildUsageSection(): HTMLElement {
-    const section = el("div", { class: "sb-section sb-usage-section" });
-    const labelRow = el("div", { class: "sb-usage-label-row" });
-    labelRow.appendChild(el("div", { class: "sb-section-label", style: "margin:0" }, ["Usage"]));
-    section.appendChild(labelRow);
+  private buildUsageDisclosure(): HTMLDetailsElement {
+    const disclosure = el("details", {
+      class: "sb-account-usage",
+    }) as HTMLDetailsElement;
+    disclosure.open = this.usageExpanded;
+    this.usageDisclosure = disclosure;
+
+    const toggle = el("summary", {
+      class: "sb-account-usage-toggle",
+      "aria-controls": "sidebar-usage-details",
+    });
+    toggle.appendChild(el("span", { class: "sb-account-usage-label" }, ["Usage"]));
+    this.usageSummary = el("span", {
+      class: "sb-account-usage-value",
+      "data-usage-summary": "1",
+    }, ["—"]);
+    toggle.appendChild(this.usageSummary);
+    toggle.appendChild(el("span", {
+      class: "sb-account-usage-chevron",
+      "aria-hidden": "true",
+      html: icon("chevronDown", 12),
+    }));
+    disclosure.appendChild(toggle);
 
     this.usageRoot = el("div", {
+      id: "sidebar-usage-details",
       class: "sb-usage",
       role: "group",
       "aria-label": "Subscription and usage limits",
@@ -527,8 +561,25 @@ export class Sidebar {
     this.usageRoot.appendChild(row);
     this.usageRoot.appendChild(status);
     this.usageRoot.appendChild(topUp);
-    section.appendChild(this.usageRoot);
-    return section;
+    disclosure.appendChild(this.usageRoot);
+
+    disclosure.addEventListener("toggle", () => {
+      this.usageExpanded = disclosure.open;
+      this.syncUsageDisclosureState();
+    });
+    this.syncUsageDisclosureState();
+    return disclosure;
+  }
+
+  private syncUsageDisclosureState() {
+    if (!this.usageDisclosure) return;
+    const toggle = this.usageDisclosure.querySelector("summary");
+    if (!toggle) return;
+    const open = this.usageDisclosure.open;
+    const value = this.usageSummary?.textContent?.trim() || "not available";
+    toggle.setAttribute("aria-expanded", String(open));
+    toggle.setAttribute("aria-label", `Usage, ${value}. ${open ? "Collapse" : "Expand"} details`);
+    toggle.setAttribute("title", `${open ? "Collapse" : "Expand"} usage details`);
   }
 
   private formatPlanExpiry(isoDate: string): string {
@@ -561,6 +612,21 @@ export class Sidebar {
     const name = displayPlanLabel(planId);
     const active = m.planActive === true && !["free", "expired", ""].includes(planId.toLowerCase());
     const clampedPct = Math.max(0, Math.min(100, planPct));
+
+    if (this.usageSummary) {
+      this.usageSummary.textContent = active
+        ? `${clampedPct}% left`
+        : planId.toLowerCase() === "expired"
+          ? "Usage empty"
+          : "No plan";
+    }
+    if (this.usageDisclosure) {
+      this.usageDisclosure.classList.toggle("usage-low", active && planPct <= 20 && planPct > 5);
+      this.usageDisclosure.classList.toggle("usage-critical", active && planPct <= 5 && planPct > 0);
+      this.usageDisclosure.classList.toggle("usage-empty", active && planPct <= 0);
+      this.usageDisclosure.classList.toggle("is-free", !active);
+    }
+    this.syncUsageDisclosureState();
 
     this.usageRoot.classList.toggle("usage-low", active && planPct <= 20 && planPct > 5);
     this.usageRoot.classList.toggle("usage-critical", active && planPct <= 5 && planPct > 0);

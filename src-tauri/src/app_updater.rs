@@ -424,6 +424,182 @@ function Write-UpdateLog {
   } catch {}
 }
 
+function New-InstallStatusWindow {
+  try {
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+    [System.Windows.Forms.Application]::EnableVisualStyles()
+
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = 'Hormachuelos secure update'
+    $form.AccessibleName = 'Hormachuelos secure update progress'
+    $form.ClientSize = [System.Drawing.Size]::new(520, 300)
+    $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+    $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
+    $form.ShowInTaskbar = $true
+    $form.TopMost = $true
+    $form.Padding = [System.Windows.Forms.Padding]::new(1)
+    $form.BackColor = [System.Drawing.Color]::FromArgb(97, 205, 250)
+    try {
+      $form.Icon = [System.Drawing.Icon]::ExtractAssociatedIcon($AppPath)
+    } catch {}
+
+    $surface = New-Object System.Windows.Forms.Panel
+    $surface.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $surface.BackColor = [System.Drawing.Color]::FromArgb(20, 25, 28)
+    $form.Controls.Add($surface)
+
+    $brand = New-Object System.Windows.Forms.Label
+    $brand.AutoSize = $false
+    $brand.Location = [System.Drawing.Point]::new(28, 24)
+    $brand.Size = [System.Drawing.Size]::new(220, 18)
+    $brand.ForeColor = [System.Drawing.Color]::FromArgb(224, 234, 236)
+    $brand.Font = [System.Drawing.Font]::new('Bahnschrift', 9, [System.Drawing.FontStyle]::Bold)
+    $brand.Text = 'H O R M A C H U E L O S'
+    $surface.Controls.Add($brand)
+
+    $channel = New-Object System.Windows.Forms.Label
+    $channel.AutoSize = $false
+    $channel.Location = [System.Drawing.Point]::new(362, 22)
+    $channel.Size = [System.Drawing.Size]::new(128, 22)
+    $channel.ForeColor = [System.Drawing.Color]::FromArgb(139, 220, 179)
+    $channel.BackColor = [System.Drawing.Color]::FromArgb(27, 46, 40)
+    $channel.Font = [System.Drawing.Font]::new('Consolas', 8, [System.Drawing.FontStyle]::Bold)
+    $channel.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+    $channel.Text = '●  SECURE UPDATE'
+    $surface.Controls.Add($channel)
+
+    $core = New-Object System.Windows.Forms.Label
+    $core.AutoSize = $false
+    $core.Location = [System.Drawing.Point]::new(28, 76)
+    $core.Size = [System.Drawing.Size]::new(58, 58)
+    $core.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+    $core.ForeColor = [System.Drawing.Color]::FromArgb(219, 247, 255)
+    $core.BackColor = [System.Drawing.Color]::FromArgb(25, 50, 61)
+    $core.Font = [System.Drawing.Font]::new('Bahnschrift', 17, [System.Drawing.FontStyle]::Bold)
+    $core.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+    $core.Text = 'H'
+    $surface.Controls.Add($core)
+
+    $phase = New-Object System.Windows.Forms.Label
+    $phase.AutoSize = $false
+    $phase.Location = [System.Drawing.Point]::new(106, 75)
+    $phase.Size = [System.Drawing.Size]::new(380, 18)
+    $phase.ForeColor = [System.Drawing.Color]::FromArgb(104, 203, 236)
+    $phase.Font = [System.Drawing.Font]::new('Consolas', 8, [System.Drawing.FontStyle]::Bold)
+    $phase.Text = 'INSTALL // 03 OF 04'
+    $surface.Controls.Add($phase)
+
+    $headline = New-Object System.Windows.Forms.Label
+    $headline.AutoSize = $false
+    $headline.Location = [System.Drawing.Point]::new(105, 96)
+    $headline.Size = [System.Drawing.Size]::new(390, 28)
+    $headline.ForeColor = [System.Drawing.Color]::FromArgb(240, 247, 248)
+    $headline.Font = [System.Drawing.Font]::new('Bahnschrift', 15, [System.Drawing.FontStyle]::Bold)
+    $headline.Text = "Installing Hormachuelos v$ExpectedVersion"
+    $surface.Controls.Add($headline)
+
+    $description = New-Object System.Windows.Forms.Label
+    $description.AutoSize = $false
+    $description.Location = [System.Drawing.Point]::new(106, 126)
+    $description.Size = [System.Drawing.Size]::new(380, 35)
+    $description.ForeColor = [System.Drawing.Color]::FromArgb(139, 155, 160)
+    $description.Font = [System.Drawing.Font]::new('Segoe UI', 8.5)
+    $description.Text = 'Windows is replacing the app safely. It will relaunch automatically.'
+    $surface.Controls.Add($description)
+
+    $sequence = New-Object System.Windows.Forms.Label
+    $sequence.AutoSize = $false
+    $sequence.Location = [System.Drawing.Point]::new(28, 177)
+    $sequence.Size = [System.Drawing.Size]::new(464, 16)
+    $sequence.ForeColor = [System.Drawing.Color]::FromArgb(112, 135, 143)
+    $sequence.Font = [System.Drawing.Font]::new('Consolas', 7.5, [System.Drawing.FontStyle]::Bold)
+    $sequence.Text = 'INSTALL SEQUENCE'
+    $surface.Controls.Add($sequence)
+
+    $track = New-Object System.Windows.Forms.Panel
+    $track.Location = [System.Drawing.Point]::new(28, 199)
+    $track.Size = [System.Drawing.Size]::new(464, 7)
+    $track.BackColor = [System.Drawing.Color]::FromArgb(43, 51, 55)
+    $surface.Controls.Add($track)
+
+    $fill = New-Object System.Windows.Forms.Panel
+    $fill.Location = [System.Drawing.Point]::new(-96, 0)
+    $fill.Size = [System.Drawing.Size]::new(96, 7)
+    $fill.BackColor = [System.Drawing.Color]::FromArgb(107, 211, 243)
+    $track.Controls.Add($fill)
+
+    $stages = New-Object System.Windows.Forms.Label
+    $stages.AutoSize = $false
+    $stages.Location = [System.Drawing.Point]::new(28, 220)
+    $stages.Size = [System.Drawing.Size]::new(464, 22)
+    $stages.ForeColor = [System.Drawing.Color]::FromArgb(137, 209, 166)
+    $stages.Font = [System.Drawing.Font]::new('Consolas', 8, [System.Drawing.FontStyle]::Bold)
+    $stages.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+    $stages.Text = 'DOWNLOAD  ✓      VERIFY  ✓      INSTALL  ●      RELAUNCH  ○'
+    $surface.Controls.Add($stages)
+
+    $safety = New-Object System.Windows.Forms.Label
+    $safety.AutoSize = $false
+    $safety.Location = [System.Drawing.Point]::new(28, 258)
+    $safety.Size = [System.Drawing.Size]::new(464, 18)
+    $safety.ForeColor = [System.Drawing.Color]::FromArgb(125, 150, 153)
+    $safety.Font = [System.Drawing.Font]::new('Segoe UI', 8)
+    $safety.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+    $safety.Text = 'Your projects, sessions, and settings are protected.'
+    $surface.Controls.Add($safety)
+
+    $form.Tag = @{
+      Track = $track
+      Fill = $fill
+      AllowClose = $false
+    }
+    $form.Add_FormClosing({
+      param($sender, $eventArgs)
+      if (!$sender.Tag['AllowClose']) { $eventArgs.Cancel = $true }
+    })
+    return $form
+  } catch {
+    Write-UpdateLog "Native update window could not be created: $($_.Exception.Message)"
+    return $null
+  }
+}
+
+function Wait-InstallerWithStatus {
+  param(
+    [Parameter(Mandatory = $true)]$Process,
+    $Window
+  )
+  if ($null -eq $Window) {
+    $Process.WaitForExit()
+    return [int]$Process.ExitCode
+  }
+
+  try {
+    $Window.Show()
+    $Window.Activate()
+    $startedAt = [DateTimeOffset]::Now
+    while (!$Process.HasExited) {
+      $elapsedMs = ([DateTimeOffset]::Now - $startedAt).TotalMilliseconds
+      $track = $Window.Tag['Track']
+      $fill = $Window.Tag['Fill']
+      $travel = $track.ClientSize.Width + $fill.Width
+      $fill.Left = ([int]($elapsedMs / 4) % $travel) - $fill.Width
+      [System.Windows.Forms.Application]::DoEvents()
+      Start-Sleep -Milliseconds 34
+      $Process.Refresh()
+    }
+    $Process.WaitForExit()
+    return [int]$Process.ExitCode
+  } finally {
+    try {
+      $Window.Tag['AllowClose'] = $true
+      $Window.Close()
+      $Window.Dispose()
+    } catch {}
+  }
+}
+
 function Get-HormachuelosCandidates {
   $candidates = @($AppPath)
   foreach ($manufacturerKey in @(
@@ -578,15 +754,16 @@ try {
     $quotedInstaller = '"' + $InstallerPath + '"'
     $result = Start-Process -FilePath 'msiexec.exe' -ArgumentList @(
       '/i', $quotedInstaller, '/quiet', '/norestart'
-    ) -WindowStyle Hidden -Wait -PassThru
+    ) -WindowStyle Hidden -PassThru
   } elseif ($extension -eq '.exe') {
     $result = Start-Process -FilePath $InstallerPath -ArgumentList @(
       '/S', '/UPDATE'
-    ) -WindowStyle Hidden -Wait -PassThru
+    ) -WindowStyle Hidden -PassThru
   } else {
     throw "Unsupported installer type: $extension"
   }
-  $exitCode = [int]$result.ExitCode
+  $statusWindow = New-InstallStatusWindow
+  $exitCode = Wait-InstallerWithStatus -Process $result -Window $statusWindow
   Write-UpdateLog "Installer exited with code $exitCode."
 } catch {
   Write-UpdateLog "Installer failed to start: $($_.Exception.Message)"
@@ -1047,7 +1224,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn update_helper_runs_silently_and_restarts_the_app_once() {
+    fn update_helper_shows_secure_progress_while_the_silent_installer_runs() {
         let script = super::install_helper_script();
         assert!(script.contains("param("));
         assert!(!script.contains("$args["));
@@ -1062,6 +1239,11 @@ mod tests {
         assert!(!script.contains("'AUTOLAUNCHAPP=True'"));
         assert!(!script.contains("'/R'"));
         assert!(!script.contains("$nativeRestarted"));
+        assert!(script.contains("New-InstallStatusWindow"));
+        assert!(script.contains("Wait-InstallerWithStatus"));
+        assert!(script.contains("INSTALL // 03 OF 04"));
+        assert!(script.contains("Your projects, sessions, and settings are protected."));
+        assert!(script.contains("[System.Windows.Forms.Application]::DoEvents()"));
         assert!(script.contains("Start-Process -FilePath $launchPath"));
         assert_eq!(
             script
