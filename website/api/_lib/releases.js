@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.63";
-const BUILTIN_MSI_SHA256 = "83572271128187624fa0a7c0c5adb922ba1f3fb635955d7071ccc826204df2ad";
-const BUILTIN_EXE_SHA256 = "1aa223c9979d03a8e456d06351fe91aec8245e92e79b565b7f364ca7460d5856";
-const BUILTIN_RELEASE_NOTES = "Faster Design Mode edits with exact preview targeting, route-ranked source hints, isolated low-effort micro-edit agents, and long-session queue reliability.";
+const BUILTIN_RELEASE_VERSION = "0.1.64";
+const BUILTIN_MSI_SHA256 = "da894d7bb98d457e888a64d7b3880fb31200b6759c61e0fba6e01050144938ad";
+const BUILTIN_EXE_SHA256 = "3a3a1f9865460937c5b3f1cf9270ff319fea2b5463c28dd7aa939d01dfc9c205";
+const BUILTIN_RELEASE_NOTES = "Long-session reliability: unfinished agents resume instead of saying done, Cursor and native tool results stay synchronized, stalled search/read cards recover automatically, project-root path mistakes are repaired safely, and large-project sessions retain bounded context without premature completion.";
 
 const BUILTIN_FORCE_UPDATE = true;
 const GITHUB_RELEASES_BASE = "https://github.com/chmoralla-code/HORMACHUELOS/releases/download";
