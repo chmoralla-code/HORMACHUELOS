@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.62";
-const BUILTIN_MSI_SHA256 = "aaff59d38d660a4f95272b05b8bea747efc11876ec12d88de1a0fdda53082f10";
-const BUILTIN_EXE_SHA256 = "5a53ad03443db4ee63c7dae36f05146ca31ea239ca0ce312455baa724bb35a57";
-const BUILTIN_RELEASE_NOTES = "TodoWrite progress tracking; Plan uses Ship-level tool perms with Research renamed to Ask; harden edit_file against BOM/CRLF mismatches; clear recoverable Multi-Agent attention banners after retries.";
+const BUILTIN_RELEASE_VERSION = "0.1.63";
+const BUILTIN_MSI_SHA256 = "83572271128187624fa0a7c0c5adb922ba1f3fb635955d7071ccc826204df2ad";
+const BUILTIN_EXE_SHA256 = "1aa223c9979d03a8e456d06351fe91aec8245e92e79b565b7f364ca7460d5856";
+const BUILTIN_RELEASE_NOTES = "Faster Design Mode edits with exact preview targeting, route-ranked source hints, isolated low-effort micro-edit agents, and long-session queue reliability.";
 
 const BUILTIN_FORCE_UPDATE = true;
 const GITHUB_RELEASES_BASE = "https://github.com/chmoralla-code/HORMACHUELOS/releases/download";
