@@ -4,6 +4,30 @@ import { clear, div, el, displayPlanLabel } from "./util";
 import { SESSION_TOKEN_BUDGET, type Session } from "./session";
 import type { ProjectWorkspace } from "./projects";
 
+const PROJECTS_COLLAPSED_KEY = "ai-forge:sidebar-projects-collapsed";
+const SESSIONS_COLLAPSED_KEY = "ai-forge:sidebar-sessions-collapsed";
+
+function readCollapsedPreference(key: string): boolean {
+  try {
+    return localStorage.getItem(key) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeCollapsedPreference(key: string, collapsed: boolean) {
+  try {
+    localStorage.setItem(key, collapsed ? "1" : "0");
+  } catch {
+    // The sidebar still works when storage is unavailable (for example, in a
+    // locked-down preview); only persistence is skipped.
+  }
+}
+
+function normalizeSidebarSearch(value: string): string {
+  return value.trim().toLocaleLowerCase();
+}
+
 export type UsageDisplayMeta = {
   /** Remaining plan % (for aria / empty styling). */
   percent?: number;
@@ -66,6 +90,12 @@ export class Sidebar {
   private updateButton: HTMLButtonElement | null = null;
   private updateAvailable = false;
   private updateVersion = "";
+  private projectsCollapsed = readCollapsedPreference(PROJECTS_COLLAPSED_KEY);
+  private sessionsCollapsed = readCollapsedPreference(SESSIONS_COLLAPSED_KEY);
+  private projectSearchOpen = false;
+  private sessionSearchOpen = false;
+  private projectSearchQuery = "";
+  private sessionSearchQuery = "";
 
   constructor(handlers: {
     onNewProject: () => void;
@@ -133,21 +163,81 @@ export class Sidebar {
     const workspaceSections = el("div", { class: "sb-workspace-sections" });
     workspaceSections.appendChild(this.buildProjectsSection());
 
-    // Sessions section
-    const sessionSection = el("div", { class: "sb-section sb-sessions-section" });
-    const sessionHeader = el("div", { class: "sb-section-row" });
-    sessionHeader.appendChild(el("div", { class: "sb-section-label" }, ["Sessions"]));
+    // Sessions section — search and disclosure controls stay reachable even
+    // when the list itself is collapsed.
+    const sessionSection = el("div", {
+      class: `sb-section sb-sessions-section${this.sessionsCollapsed ? " is-collapsed" : ""}`,
+    });
+    const sessionHeader = el("div", { class: "sb-section-row sb-sessions-head" });
+    const sessionHeading = el("div", { class: "sb-section-heading" });
+    sessionHeading.appendChild(el("div", { class: "sb-section-label" }, ["Sessions"]));
+    sessionHeading.appendChild(el("span", {
+      class: "sb-section-count",
+      "aria-label": `${sessions.length} session${sessions.length === 1 ? "" : "s"}`,
+    }, [String(sessions.length)]));
+    sessionHeader.appendChild(sessionHeading);
     const sessionActions = el("div", { class: "sb-session-actions" });
-    const newSessionBtn = el("button", { class: "sb-new-session", type: "button", "aria-label": "New session", title: "New session", html: icon("new", 15) });
+    const newSessionBtn = el("button", { class: "sb-section-control sb-new-session", type: "button", "aria-label": "New session", title: "New session", html: icon("new", 14) });
     newSessionBtn.addEventListener("click", () => this.onNewSession());
     sessionActions.appendChild(newSessionBtn);
+    const sessionSearchToggle = el("button", {
+      class: `sb-section-control sb-section-search-toggle${this.sessionSearchOpen ? " is-active" : ""}`,
+      type: "button",
+      "aria-label": this.sessionSearchOpen ? "Close session search" : "Search sessions",
+      title: this.sessionSearchOpen ? "Close session search" : "Search sessions",
+      "aria-controls": "sidebar-session-search",
+      "aria-expanded": String(this.sessionSearchOpen),
+      html: icon("search", 14),
+    }) as HTMLButtonElement;
+    sessionActions.appendChild(sessionSearchToggle);
     if (sessions.length > 0) {
-      const delAllBtn = el("button", { class: "sb-del-all-sessions", type: "button", "aria-label": "Delete all sessions", title: "Delete all sessions", html: icon("trash", 15) });
+      const delAllBtn = el("button", { class: "sb-section-control sb-del-all-sessions", type: "button", "aria-label": "Delete all sessions", title: "Delete all sessions", html: icon("trash", 14) });
       delAllBtn.addEventListener("click", () => this.onDeleteAllSessions());
       sessionActions.appendChild(delAllBtn);
     }
+    const sessionCollapse = el("button", {
+      class: "sb-section-control sb-section-collapse",
+      type: "button",
+      "aria-label": this.sessionsCollapsed ? "Expand sessions" : "Collapse sessions",
+      title: this.sessionsCollapsed ? "Expand sessions" : "Collapse sessions",
+      "aria-controls": "sidebar-session-body",
+      "aria-expanded": String(!this.sessionsCollapsed),
+      html: icon("chevronDown", 13),
+    }) as HTMLButtonElement;
+    sessionActions.appendChild(sessionCollapse);
     sessionHeader.appendChild(sessionActions);
     sessionSection.appendChild(sessionHeader);
+
+    const sessionBody = el("div", {
+      class: "sb-section-body",
+      id: "sidebar-session-body",
+    });
+    sessionBody.hidden = this.sessionsCollapsed;
+
+    const sessionSearch = el("label", {
+      class: "sb-list-search",
+      id: "sidebar-session-search",
+    });
+    sessionSearch.hidden = !this.sessionSearchOpen;
+    sessionSearch.appendChild(el("span", { class: "sb-list-search-icon", html: icon("search", 13) }));
+    const sessionSearchInput = el("input", {
+      class: "sb-list-search-input",
+      type: "search",
+      placeholder: "Search sessions",
+      autocomplete: "off",
+      spellcheck: "false",
+      "aria-label": "Search sessions",
+    }) as HTMLInputElement;
+    sessionSearchInput.value = this.sessionSearchQuery;
+    sessionSearch.appendChild(sessionSearchInput);
+    const sessionSearchStatus = el("span", {
+      class: "sr-only",
+      role: "status",
+      "aria-live": "polite",
+    });
+    sessionSearch.appendChild(sessionSearchStatus);
+    sessionBody.appendChild(sessionSearch);
+
     const sessionList = el("div", { class: "sb-recent" });
     if (sessions.length === 0) {
       sessionList.appendChild(el("div", { class: "sb-recent-item empty" }, ["No sessions yet"]));
@@ -166,6 +256,7 @@ export class Sidebar {
           role: "button",
           tabindex: "0",
         });
+        item.dataset.searchText = normalizeSidebarSearch(s.title);
         item.appendChild(div("dot" + (isRunning ? " live" : "")));
         const label = el("span", { class: "sb-session-title" }, [s.title]);
         if (isRunning) {
@@ -220,8 +311,83 @@ export class Sidebar {
         sessionList.appendChild(item);
       }
     }
-    sessionSection.appendChild(sessionList);
+    const noSessionResults = el("div", { class: "sb-list-no-results" }, ["No matching sessions."]);
+    noSessionResults.hidden = true;
+    sessionList.appendChild(noSessionResults);
+    sessionBody.appendChild(sessionList);
+    sessionSection.appendChild(sessionBody);
+
+    const applySessionFilter = () => {
+      this.sessionSearchQuery = sessionSearchInput.value;
+      const query = normalizeSidebarSearch(this.sessionSearchQuery);
+      const rows = Array.from(sessionList.querySelectorAll<HTMLElement>(".sb-session-item"));
+      let matches = 0;
+      for (const row of rows) {
+        const visible = !query || String(row.dataset.searchText || "").includes(query);
+        row.hidden = !visible;
+        if (visible) matches += 1;
+      }
+      noSessionResults.hidden = !query || matches > 0;
+      sessionSearchStatus.textContent = query
+        ? `${matches} of ${rows.length} sessions shown`
+        : `${rows.length} sessions shown`;
+    };
+
+    const setSessionsCollapsed = (collapsed: boolean) => {
+      this.sessionsCollapsed = collapsed;
+      if (collapsed && this.sessionSearchOpen) {
+        this.sessionSearchOpen = false;
+        sessionSearch.hidden = true;
+        sessionSearchToggle.classList.remove("is-active");
+        sessionSearchToggle.setAttribute("aria-expanded", "false");
+        sessionSearchToggle.setAttribute("aria-label", "Search sessions");
+        sessionSearchToggle.setAttribute("title", "Search sessions");
+        sessionSearchInput.value = "";
+        applySessionFilter();
+      }
+      sessionSection.classList.toggle("is-collapsed", collapsed);
+      sessionSection.parentElement?.classList.toggle("sessions-collapsed", collapsed);
+      sessionBody.hidden = collapsed;
+      sessionCollapse.setAttribute("aria-expanded", String(!collapsed));
+      sessionCollapse.setAttribute("aria-label", collapsed ? "Expand sessions" : "Collapse sessions");
+      sessionCollapse.setAttribute("title", collapsed ? "Expand sessions" : "Collapse sessions");
+      writeCollapsedPreference(SESSIONS_COLLAPSED_KEY, collapsed);
+    };
+
+    const setSessionSearchOpen = (open: boolean) => {
+      if (open && this.sessionsCollapsed) setSessionsCollapsed(false);
+      this.sessionSearchOpen = open;
+      sessionSearch.hidden = !open;
+      sessionSearchToggle.classList.toggle("is-active", open);
+      sessionSearchToggle.setAttribute("aria-expanded", String(open));
+      sessionSearchToggle.setAttribute("aria-label", open ? "Close session search" : "Search sessions");
+      sessionSearchToggle.setAttribute("title", open ? "Close session search" : "Search sessions");
+      if (open) {
+        sessionSearchInput.focus();
+        sessionSearchInput.select();
+      } else {
+        sessionSearchInput.value = "";
+        applySessionFilter();
+      }
+    };
+
+    sessionSearchToggle.addEventListener("click", () => setSessionSearchOpen(!this.sessionSearchOpen));
+    sessionCollapse.addEventListener("click", () => setSessionsCollapsed(!this.sessionsCollapsed));
+    sessionSearchInput.addEventListener("input", applySessionFilter);
+    sessionSearchInput.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      if (sessionSearchInput.value) {
+        sessionSearchInput.value = "";
+        applySessionFilter();
+      } else {
+        setSessionSearchOpen(false);
+        sessionSearchToggle.focus();
+      }
+    });
+    applySessionFilter();
     workspaceSections.appendChild(sessionSection);
+    workspaceSections.classList.toggle("sessions-collapsed", this.sessionsCollapsed);
     this.node.appendChild(workspaceSections);
 
     // Website account sync and a collapsed usage summary. Keeping usage inside
@@ -312,9 +478,19 @@ export class Sidebar {
   }
 
   private buildProjectsSection(): HTMLElement {
-    const section = el("div", { class: "sb-section sb-projects-section" });
+    const section = el("div", {
+      class: `sb-section sb-projects-section${this.projectsCollapsed ? " is-collapsed" : ""}`,
+    });
     const header = el("div", { class: "sb-section-row sb-projects-head" });
-    header.appendChild(el("div", { class: "sb-section-label" }, ["Projects"]));
+    const totalProjects = this.projectWorkspaces.length + (this.quickSessionWorkspacePath ? 1 : 0);
+    const heading = el("div", { class: "sb-section-heading" });
+    heading.appendChild(el("div", { class: "sb-section-label" }, ["Projects"]));
+    heading.appendChild(el("span", {
+      class: "sb-section-count",
+      "aria-label": `${totalProjects} project${totalProjects === 1 ? "" : "s"}`,
+    }, [String(totalProjects)]));
+    header.appendChild(heading);
+    const actions = el("div", { class: "sb-project-actions" });
     const add = el(
       "button",
       {
@@ -326,8 +502,58 @@ export class Sidebar {
       ["+ Add project"],
     ) as HTMLButtonElement;
     add.addEventListener("click", () => this.onAddAnotherProject());
-    header.appendChild(add);
+    actions.appendChild(add);
+    const searchToggle = el("button", {
+      class: `sb-section-control sb-section-search-toggle${this.projectSearchOpen ? " is-active" : ""}`,
+      type: "button",
+      title: this.projectSearchOpen ? "Close project search" : "Search projects",
+      "aria-label": this.projectSearchOpen ? "Close project search" : "Search projects",
+      "aria-controls": "sidebar-project-search",
+      "aria-expanded": String(this.projectSearchOpen),
+      html: icon("search", 14),
+    }) as HTMLButtonElement;
+    actions.appendChild(searchToggle);
+    const collapse = el("button", {
+      class: "sb-section-control sb-section-collapse",
+      type: "button",
+      title: this.projectsCollapsed ? "Expand projects" : "Collapse projects",
+      "aria-label": this.projectsCollapsed ? "Expand projects" : "Collapse projects",
+      "aria-controls": "sidebar-project-body",
+      "aria-expanded": String(!this.projectsCollapsed),
+      html: icon("chevronDown", 13),
+    }) as HTMLButtonElement;
+    actions.appendChild(collapse);
+    header.appendChild(actions);
     section.appendChild(header);
+
+    const body = el("div", {
+      class: "sb-section-body",
+      id: "sidebar-project-body",
+    });
+    body.hidden = this.projectsCollapsed;
+    const search = el("label", {
+      class: "sb-list-search",
+      id: "sidebar-project-search",
+    });
+    search.hidden = !this.projectSearchOpen;
+    search.appendChild(el("span", { class: "sb-list-search-icon", html: icon("search", 13) }));
+    const searchInput = el("input", {
+      class: "sb-list-search-input",
+      type: "search",
+      placeholder: "Search projects",
+      autocomplete: "off",
+      spellcheck: "false",
+      "aria-label": "Search projects",
+    }) as HTMLInputElement;
+    searchInput.value = this.projectSearchQuery;
+    search.appendChild(searchInput);
+    const searchStatus = el("span", {
+      class: "sr-only",
+      role: "status",
+      "aria-live": "polite",
+    });
+    search.appendChild(searchStatus);
+    body.appendChild(search);
 
     const list = el("div", { class: "sb-projects-list", role: "list", "aria-label": "Open projects" });
     if (this.quickSessionWorkspacePath) {
@@ -342,6 +568,7 @@ export class Sidebar {
           "aria-current": this.quickSessionsActive ? "page" : "false",
         },
       ) as HTMLButtonElement;
+      quick.dataset.searchText = normalizeSidebarSearch(`Quick sessions ${this.quickSessionWorkspacePath}`);
       quick.appendChild(el("span", { class: "sb-project-mark", "aria-hidden": "true" }, ["Q"]));
       const copy = el("span", { class: "sb-project-copy" });
       copy.appendChild(el("strong", {}, ["Quick sessions"]));
@@ -368,6 +595,7 @@ export class Sidebar {
             role: "listitem",
           },
         ) as HTMLButtonElement;
+        item.dataset.searchText = normalizeSidebarSearch(`${workspace.name} ${workspace.path}`);
         item.appendChild(el("span", { class: "sb-project-mark", "aria-hidden": "true" }, [(workspace.name[0] || "P").toUpperCase()]));
         const copy = el("span", { class: "sb-project-copy" });
         copy.appendChild(el("strong", {}, [workspace.name]));
@@ -378,7 +606,83 @@ export class Sidebar {
         list.appendChild(item);
       }
     }
-    section.appendChild(list);
+    const noResults = el("div", { class: "sb-list-no-results" }, ["No matching projects."]);
+    noResults.hidden = true;
+    list.appendChild(noResults);
+    body.appendChild(list);
+    section.appendChild(body);
+
+    const applyProjectFilter = () => {
+      this.projectSearchQuery = searchInput.value;
+      const query = normalizeSidebarSearch(this.projectSearchQuery);
+      const rows = Array.from(list.querySelectorAll<HTMLElement>(".sb-project-workspace"));
+      let matches = 0;
+      for (const row of rows) {
+        const visible = !query || String(row.dataset.searchText || "").includes(query);
+        row.hidden = !visible;
+        if (visible) matches += 1;
+      }
+      const empty = list.querySelector<HTMLElement>(".sb-project-empty");
+      if (empty) empty.hidden = Boolean(query);
+      noResults.hidden = !query || matches > 0;
+      searchStatus.textContent = query
+        ? `${matches} of ${rows.length} projects shown`
+        : `${rows.length} projects shown`;
+    };
+
+    const setCollapsed = (collapsed: boolean) => {
+      this.projectsCollapsed = collapsed;
+      if (collapsed && this.projectSearchOpen) {
+        this.projectSearchOpen = false;
+        search.hidden = true;
+        searchToggle.classList.remove("is-active");
+        searchToggle.setAttribute("aria-expanded", "false");
+        searchToggle.setAttribute("aria-label", "Search projects");
+        searchToggle.setAttribute("title", "Search projects");
+        searchInput.value = "";
+        applyProjectFilter();
+      }
+      section.classList.toggle("is-collapsed", collapsed);
+      section.parentElement?.classList.toggle("projects-collapsed", collapsed);
+      body.hidden = collapsed;
+      collapse.setAttribute("aria-expanded", String(!collapsed));
+      collapse.setAttribute("aria-label", collapsed ? "Expand projects" : "Collapse projects");
+      collapse.setAttribute("title", collapsed ? "Expand projects" : "Collapse projects");
+      writeCollapsedPreference(PROJECTS_COLLAPSED_KEY, collapsed);
+    };
+
+    const setSearchOpen = (open: boolean) => {
+      if (open && this.projectsCollapsed) setCollapsed(false);
+      this.projectSearchOpen = open;
+      search.hidden = !open;
+      searchToggle.classList.toggle("is-active", open);
+      searchToggle.setAttribute("aria-expanded", String(open));
+      searchToggle.setAttribute("aria-label", open ? "Close project search" : "Search projects");
+      searchToggle.setAttribute("title", open ? "Close project search" : "Search projects");
+      if (open) {
+        searchInput.focus();
+        searchInput.select();
+      } else {
+        searchInput.value = "";
+        applyProjectFilter();
+      }
+    };
+
+    searchToggle.addEventListener("click", () => setSearchOpen(!this.projectSearchOpen));
+    collapse.addEventListener("click", () => setCollapsed(!this.projectsCollapsed));
+    searchInput.addEventListener("input", applyProjectFilter);
+    searchInput.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      if (searchInput.value) {
+        searchInput.value = "";
+        applyProjectFilter();
+      } else {
+        setSearchOpen(false);
+        searchToggle.focus();
+      }
+    });
+    applyProjectFilter();
     return section;
   }
 
