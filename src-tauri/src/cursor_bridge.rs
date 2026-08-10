@@ -410,9 +410,9 @@ fn bounded_cursor_history(history: &[HistoryTurn]) -> Vec<BridgeHistoryTurn> {
 
 fn cursor_permission_enforcement(mode: &str) -> &'static str {
     match mode {
-        "full" | "multi_agent" => "cursor_sdk_agent",
+        "full" | "multi_agent" | "plan" => "cursor_sdk_agent",
         "auto" => "cursor_sdk_auto_review",
-        "research" | "plan" => "cursor_sdk_plan_read_only",
+        "ask" | "research" => "cursor_sdk_plan_read_only",
         _ => "cursor_sdk_plan_read_only",
     }
 }
@@ -1124,6 +1124,10 @@ mod tests {
     fn restricted_modes_report_read_only_sdk_enforcement() {
         assert_eq!(
             cursor_permission_enforcement("plan"),
+            "cursor_sdk_agent"
+        );
+        assert_eq!(
+            cursor_permission_enforcement("ask"),
             "cursor_sdk_plan_read_only"
         );
         assert_eq!(

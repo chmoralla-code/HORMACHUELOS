@@ -3,7 +3,7 @@ import { PROVIDERS, effortOptionsForProvider, displayModelName, getProviderMeta,
 import { clear, el, escapeHtml } from "./util";
 import { icon, icons } from "./icons";
 
-export type PermissionMode = "plan" | "auto" | "research" | "full" | "multi_agent";
+export type PermissionMode = "plan" | "auto" | "ask" | "full" | "multi_agent";
 
 /** Agent permission modes (OpenCode-style chip labels). */
 const MODES: {
@@ -18,7 +18,7 @@ const MODES: {
     chip: "plan",
     label: "Plan",
     title:
-      "Plan — refine request, suggest options, numbered plan; tools need Approve.",
+      "Plan — refine request, suggest options, numbered plan; then execute with Ship-level permissions.",
     capability: "Thinking",
   },
   {
@@ -30,11 +30,11 @@ const MODES: {
     capability: "Agent",
   },
   {
-    id: "research",
-    chip: "research",
-    label: "Research",
+    id: "ask",
+    chip: "ask",
+    label: "Ask",
     title:
-      "Research — explore code & answer with evidence; reads free, writes need Approve.",
+      "Ask — explore code & answer with evidence; reads free, writes need Approve.",
     capability: "Investigate",
   },
   {
@@ -67,7 +67,7 @@ const CAPABILITIES: Record<
     { id: "agent", label: "Agent", title: "Tools on by default; high-risk asks" },
     { id: "balanced", label: "Balanced", title: "Build with smart defaults" },
   ],
-  research: [
+  ask: [
     {
       id: "investigate",
       label: "Investigate",
@@ -356,7 +356,9 @@ export class ModelBar {
 
   private normalizeMode() {
     const m = String(this.settings.permission_mode || "").toLowerCase().trim();
-    if (m === "plan" || m === "auto" || m === "research" || m === "full" || m === "multi_agent") {
+    if (m === "research" || m === "ask") {
+      this.settings.permission_mode = "ask";
+    } else if (m === "plan" || m === "auto" || m === "full" || m === "multi_agent") {
       this.settings.permission_mode = m;
     } else {
       this.settings.permission_mode = this.settings.auto_approve ? "auto" : "plan";
@@ -454,9 +456,9 @@ export class ModelBar {
       this.syncCapabilityDefault();
       this.renderProviderRail();
       const labels: Record<PermissionMode, string> = {
-        plan: "Plan — refine, then approve tools",
+        plan: "Plan — refine, then execute with full permissions",
         auto: "Auto — build with defaults",
-        research: "Research — investigate with evidence",
+        ask: "Ask — investigate with evidence",
         full: "Full — max autonomy",
         multi_agent: "Multi-Agent — parallel discovery",
       };
@@ -850,7 +852,7 @@ export class ModelBar {
     };
 
     addItem("Plan", "planList", {
-      title: "Plan — refine request, then approve tools",
+      title: "Plan — refine request, then execute with full permissions",
       active: mode === "plan",
       onClick: () => {
         this.closeMenus();
@@ -859,10 +861,10 @@ export class ModelBar {
     });
     addItem("Debug", "bug", {
       title: "Debug — investigate bugs with evidence",
-      active: mode === "research" && cap === "investigate",
+      active: mode === "ask" && cap === "investigate",
       onClick: () => {
         this.closeMenus();
-        void this.applyPlusMode("research", "investigate", "Debug mode");
+        void this.applyPlusMode("ask", "investigate", "Debug mode");
         this.insertComposer("Debug this:\n");
       },
     });
@@ -876,10 +878,10 @@ export class ModelBar {
     });
     addItem("Ask", "ask", {
       title: "Ask — answer with evidence, prefer reads",
-      active: mode === "research" && cap === "brief",
+      active: mode === "ask" && cap === "brief",
       onClick: () => {
         this.closeMenus();
-        void this.applyPlusMode("research", "brief", "Ask mode");
+        void this.applyPlusMode("ask", "brief", "Ask mode");
       },
     });
 

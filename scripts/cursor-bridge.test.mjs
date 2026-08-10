@@ -7,12 +7,16 @@ import {
   buildAgentPrompt,
   computerApprovalSummary,
   createComputerUseTools,
+  createProgressTools,
   helperEnvironment,
   isToolAllowed,
+  mergeHostCustomTools,
+  progressTrackingPrompt,
   resolveExecutionPolicy,
   resolveModelSelection,
   resolveSandboxOptions,
   sanitizeComputerToolArguments,
+  summarizeTodoWrite,
 } from "./cursor-bridge.mjs";
 import { redactToolArguments } from "../src/components/session.ts";
 
@@ -29,15 +33,21 @@ test("model selections preserve the configured provider model id", () => {
   assert.equal(resolveModelSelection("gpt-5.6-sol", "medium").id, "gpt-5.6-sol");
 });
 
-test("execution policy maps restricted modes to SDK plan mode", () => {
+test("execution policy maps modes to SDK permissions", () => {
   assert.deepEqual(resolveExecutionPolicy("plan"), {
     requestedMode: "plan",
+    sdkMode: "agent",
+    autoReview: false,
+    readOnly: false,
+  });
+  assert.deepEqual(resolveExecutionPolicy("ask"), {
+    requestedMode: "ask",
     sdkMode: "plan",
     autoReview: false,
     readOnly: true,
   });
   assert.deepEqual(resolveExecutionPolicy("research"), {
-    requestedMode: "research",
+    requestedMode: "ask",
     sdkMode: "plan",
     autoReview: false,
     readOnly: true,
@@ -57,14 +67,42 @@ test("sandbox is disabled because the bundled runtime lacks sandbox helpers", ()
   assert.deepEqual(resolveSandboxOptions(), { enabled: false });
 });
 
-test("read-only modes fail closed for mutating and unknown tools", () => {
-  const plan = resolveExecutionPolicy("plan");
-  assert.equal(isToolAllowed(plan, "read"), true);
-  assert.equal(isToolAllowed(plan, "grep"), true);
-  assert.equal(isToolAllowed(plan, "write"), false);
-  assert.equal(isToolAllowed(plan, "shell"), false);
-  assert.equal(isToolAllowed(plan, "third_party_tool"), false);
+test("ask/research stay read-only; plan and full allow mutating tools", () => {
+  const ask = resolveExecutionPolicy("ask");
+  assert.equal(isToolAllowed(ask, "read"), true);
+  assert.equal(isToolAllowed(ask, "grep"), true);
+  assert.equal(isToolAllowed(ask, "TodoWrite"), true);
+  assert.equal(isToolAllowed(ask, "todo_write"), true);
+  assert.equal(isToolAllowed(ask, "update_todos"), true);
+  assert.equal(isToolAllowed(ask, "write"), false);
+  assert.equal(isToolAllowed(ask, "shell"), false);
+  assert.equal(isToolAllowed(ask, "third_party_tool"), false);
+  assert.equal(isToolAllowed(resolveExecutionPolicy("research"), "shell"), false);
+  assert.equal(isToolAllowed(resolveExecutionPolicy("plan"), "shell"), true);
+  assert.equal(isToolAllowed(resolveExecutionPolicy("plan"), "write"), true);
   assert.equal(isToolAllowed(resolveExecutionPolicy("full"), "shell"), true);
+});
+
+test("progress tools are always registered for Cursor agents", () => {
+  const tools = createProgressTools();
+  assert.ok(tools.TodoWrite);
+  assert.ok(tools.todo_write);
+  assert.ok(tools.UpdateTodos);
+  assert.ok(tools.update_todos);
+  assert.match(progressTrackingPrompt(), /TodoWrite/);
+  assert.match(progressTrackingPrompt(), /never say the todo\/task-list tool is unavailable/i);
+  assert.equal(
+    summarizeTodoWrite({
+      todos: [
+        { id: "1", content: "Add IR types", status: "completed" },
+        { id: "2", content: "Build HR page", status: "in_progress" },
+        { id: "3", content: "Verify build", status: "pending" },
+      ],
+    }),
+    "Task list updated: 3 item(s) — 1 in progress, 1 pending, 1 completed, 0 cancelled.\n- [completed] 1: Add IR types\n- [in_progress] 2: Build HR page\n- [pending] 3: Verify build",
+  );
+  const merged = mergeHostCustomTools(createProgressTools(), {});
+  assert.equal(Object.keys(merged).includes("TodoWrite"), true);
 });
 
 test("fresh agents receive only bounded recent transcript context", () => {
@@ -84,7 +122,7 @@ test("fresh agents receive only bounded recent transcript context", () => {
   assert.match(prompt, /Current request$/);
 });
 
-test("computer use keeps read-only modes observational and exposes fast game controls in full mode", () => {
+test("computer use keeps ask observational; plan/full expose action tools", () => {
   const req = {
     computerUseEnabled: true,
     computerHelperPath: "C:\\Program Files\\AI-Forge\\ai-forge.exe",
@@ -92,10 +130,14 @@ test("computer use keeps read-only modes observational and exposes fast game con
   };
   const protocol = { requestApproval: async () => false };
 
+  const askTools = createComputerUseTools(req, resolveExecutionPolicy("ask"), protocol);
+  assert.equal(typeof askTools.computer_observe.execute, "function");
+  assert.equal(askTools.computer_click, undefined);
+  assert.equal(askTools.computer_game_sequence, undefined);
+
   const planTools = createComputerUseTools(req, resolveExecutionPolicy("plan"), protocol);
-  assert.equal(typeof planTools.computer_observe.execute, "function");
-  assert.equal(planTools.computer_click, undefined);
-  assert.equal(planTools.computer_game_sequence, undefined);
+  assert.equal(typeof planTools.computer_click.execute, "function");
+  assert.equal(typeof planTools.computer_game_sequence.execute, "function");
 
   const fullTools = createComputerUseTools(req, resolveExecutionPolicy("full"), protocol);
   assert.equal(typeof fullTools.computer_click.execute, "function");

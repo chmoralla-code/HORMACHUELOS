@@ -11,7 +11,7 @@ export type Settings = {
   max_iterations: number;
   command_timeout_secs: number;
   auto_approve: boolean;
-  /** plan | auto | research | full */
+  /** plan | auto | ask | full | multi_agent (research is a legacy alias for ask) */
   permission_mode: string;
   /** thinking | guided | agent | balanced | investigate | brief | autonomous | max */
   capability_mode: string;

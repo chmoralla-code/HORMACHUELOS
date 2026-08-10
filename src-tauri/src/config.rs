@@ -44,7 +44,8 @@ pub struct Settings {
     pub max_iterations: u32,
     pub command_timeout_secs: u64,
     pub auto_approve: bool,
-    /// Permission mode: "plan" | "auto" | "research" | "full" | "multi_agent"
+    /// Permission mode: "plan" | "auto" | "ask" | "full" | "multi_agent"
+    /// Legacy "research" is accepted and normalized to "ask".
     #[serde(default = "default_permission_mode")]
     pub permission_mode: String,
     /// Capability chip: thinking | guided | agent | balanced | investigate | brief | autonomous | max
@@ -101,7 +102,7 @@ fn is_hormachuelos_model_alias(model: &str) -> bool {
 fn capability_for_mode(mode: &str) -> &'static str {
     match mode {
         "auto" => "agent",
-        "research" => "investigate",
+        "ask" | "research" => "investigate",
         "full" | "multi_agent" => "autonomous",
         _ => "thinking",
     }
@@ -164,8 +165,13 @@ impl Settings {
                 s.permission_mode = mode;
                 s.auto_approve = true;
             }
-            "plan" | "research" => {
+            "plan" => {
                 s.permission_mode = mode;
+                // Plan keeps planning UX; tool confirms are Ship-level (see needs_tool_confirm).
+                s.auto_approve = false;
+            }
+            "ask" | "research" => {
+                s.permission_mode = "ask".into();
                 s.auto_approve = false;
             }
             _ => {
@@ -346,9 +352,9 @@ impl Settings {
         ensure!(
             matches!(
                 self.permission_mode.as_str(),
-                "plan" | "auto" | "research" | "full" | "multi_agent"
+                "plan" | "auto" | "ask" | "research" | "full" | "multi_agent"
             ),
-            "Permission mode must be plan, auto, research, full, or multi_agent."
+            "Permission mode must be plan, auto, ask, full, or multi_agent."
         );
         ensure!(
             matches!(
@@ -685,6 +691,24 @@ mod tests {
             ..Settings::default()
         };
         assert!(settings.validate().is_ok());
+    }
+
+    #[test]
+    fn ask_mode_is_valid_and_research_alias_is_accepted() {
+        let ask = Settings {
+            permission_mode: "ask".into(),
+            auto_approve: false,
+            ..Settings::default()
+        };
+        assert!(ask.validate().is_ok());
+        let research = Settings {
+            permission_mode: "research".into(),
+            auto_approve: false,
+            ..Settings::default()
+        };
+        assert!(research.validate().is_ok());
+        assert_eq!(capability_for_mode("research"), "investigate");
+        assert_eq!(capability_for_mode("ask"), "investigate");
     }
 
     #[test]

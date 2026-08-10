@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.61";
-const BUILTIN_MSI_SHA256 = "1635696d9e7143ca11c46319191c566bf9b310d35aea28a8697fc3ea7478a6c6";
-const BUILTIN_EXE_SHA256 = "744005d82b342391eb1cd7bab4251c1d144ac17a68dd948771de3ef3079c1c64";
-const BUILTIN_RELEASE_NOTES = "Fixed AI sessions that could announce done working too early or leave interrupted tool cards stuck. Completion now waits for queued and background work, streamed previews close safely, Smart Agent state resets between runs, and Cursor only marks explicitly verified tasks complete. Also adds full-size chat image viewing and more accurate design-mode feature selection.";
+const BUILTIN_RELEASE_VERSION = "0.1.62";
+const BUILTIN_MSI_SHA256 = "38818173424ef4578bf81fa92d2b1d3a52b4c06dec78fde2fdc24171c09b0193";
+const BUILTIN_EXE_SHA256 = "a38664137f37a25049561804db77f1b98dc1709d0112e5e13e9e6f0c6b2742c9";
+const BUILTIN_RELEASE_NOTES = "TodoWrite progress tracking; Plan uses Ship-level tool perms with Research renamed to Ask; harden edit_file against BOM/CRLF mismatches; clear recoverable Multi-Agent attention banners after retries.";
 
 const BUILTIN_FORCE_UPDATE = true;
 const GITHUB_RELEASES_BASE = "https://github.com/chmoralla-code/HORMACHUELOS/releases/download";

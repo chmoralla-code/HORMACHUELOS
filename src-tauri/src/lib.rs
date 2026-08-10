@@ -123,7 +123,8 @@ async fn save_settings(
     // Normalize permission mode + auto_approve together
     let mode = settings.permission_mode.trim().to_ascii_lowercase();
     settings.permission_mode = match mode.as_str() {
-        "plan" | "auto" | "research" | "full" | "multi_agent" => mode,
+        "ask" | "research" => "ask".into(),
+        "plan" | "auto" | "full" | "multi_agent" => mode,
         _ => {
             if settings.auto_approve {
                 "auto".into()

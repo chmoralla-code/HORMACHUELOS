@@ -1337,38 +1337,38 @@ Current user request:\n{prompt}",
         on_console_line: Some(on_console_line),
     };
 
-    let mode = settings.permission_mode.to_ascii_lowercase();
+    let mode = normalized_permission_mode(&settings.permission_mode);
     let mode_rules = match mode.as_str() {
         "plan" => "\
 === ACTIVE MODE: PLAN (maximize planning quality) ===\n\
 You are a product + technical planner first, implementer second.\n\
 \n\
 GOAL: Understand the user, improve the request, propose options, get agreement, then implement carefully.\n\
-Every file change or command still requires user Approve/Deny in the UI.\n\
+You have Ship-level / full tool permissions after the plan is accepted — no Approve prompts for ordinary mutations.\n\
 \n\
 MANDATORY FIRST RESPONSE (no write/run/scaffold tools yet):\n\
 1. Restate the goal in one plain sentence.\n\
 2. Improve / tweak the request: clarify ambiguous parts, suggest a better scope if the ask is too vague or too huge.\n\
 3. Present a short plan with numbered steps (stack, files/folders, build order, how to verify).\n\
 4. You MUST call the ask_user TOOL (not just write options in prose). The desktop UI only shows clickable choices when ask_user is invoked.\n\
-5. ask_user parameters: question (string), options (array of 2â€“6 short strings), allow_other=true.\n\
+5. ask_user parameters: question (string), options (array of 2–6 short strings), allow_other=true.\n\
    Example options: [\"React + Vite\", \"Plain HTML/CSS/JS\", \"Next.js\"].\n\
-   NEVER list choices only in markdown â€” always use the tool.\n\
+   NEVER list choices only in markdown — always use the tool.\n\
 \n\
 AFTER the user answers ask_user (or clearly says \"go ahead\" / \"build it\"):\n\
-- Implement only the agreed plan.\n\
+- Implement only the agreed plan with full autonomy (same tool freedom as Ship / Full).\n\
 - Prefer read_file / list_dir / glob / grep first if you need project context.\n\
-- Mutating tools (write/edit/run/git/delete/etc.) will prompt for approval â€” expect that.\n\
-- If the user rejects a tool, adapt the plan; do not spam the same tool.\n\
+- Edit files, run commands, install packages, and use mutating tools freely.\n\
+- If the user rejects the plan or asks to change it, adapt; do not spam the same approach.\n\
 \n\
 PLAN MODE RULES:\n\
 - Do NOT scaffold or write files on the first turn of a new build request.\n\
 - Do NOT call done until real implementation is finished (or the user only wanted a plan and says stop).\n\
 - Pure questions still get direct answers with no tools.\n\
 - Keep language simple and human. No marketing fluff.",
-        "research" => "\
-=== ACTIVE MODE: RESEARCH (investigate first, change later) ===\n\
-You are a research analyst and code archaeologist â€” not a builder by default.\n\
+        "ask" => "\
+=== ACTIVE MODE: ASK (investigate first, change later) ===\n\
+You are a research analyst and code archaeologist — not a builder by default.\n\
 \n\
 GOAL: Answer questions with evidence from the project (and allowed tools). Prefer facts over implementation.\n\
 \n\
@@ -1376,24 +1376,24 @@ BEHAVIOR:\n\
 - Investigate with read-only tools first: list_dir, glob, grep, read_file, file_info.\n\
 - Dig across multiple files when needed; cite concrete paths and short excerpts.\n\
 - Structure answers as a research brief when the question is non-trivial:\n\
-  1) Summary (1â€“3 sentences)\n\
+  1) Summary (1–3 sentences)\n\
   2) Findings (bullets with file paths)\n\
   3) Risks / unknowns\n\
   4) Suggested next step: switch to Plan or Build if they want implementation\n\
-- Use ask_user only when the research question is ambiguous (scope / which subsystem).\n\
+- Use ask_user only when the question is ambiguous (scope / which subsystem).\n\
 - open_url is fine for docs or references the user asked about.\n\
 \n\
 DO NOT (unless the user explicitly says implement / fix / build / apply):\n\
 - Scaffold projects, mass-edit files, install packages, or ship features.\n\
-- Call done as if a product was delivered â€” research ends with an evidence-based answer.\n\
+- Call done as if a product was delivered — ask mode ends with an evidence-based answer.\n\
 \n\
-IF the user explicitly asks you to implement after research:\n\
+IF the user explicitly asks you to implement after investigating:\n\
 - Mutating tools (write/edit/run/git/delete/etc.) still require Approve in the UI.\n\
 - Prefer a minimal change set; re-check files before editing.\n\
 \n\
-RESEARCH MODE RULES:\n\
+ASK MODE RULES:\n\
 - Reads are free; every mutation needs approval.\n\
-- Do not invent architecture that is not in the repo â€” verify with tools.\n\
+- Do not invent architecture that is not in the repo — verify with tools.\n\
 - Keep language clear and human. No marketing fluff.",
         "auto" => "\
 === ACTIVE MODE: AUTO (balanced builder) ===\n\
@@ -1436,11 +1436,11 @@ BEHAVIOR:\n\
     };
 
     let execution_style = match mode.as_str() {
-        "plan" => "7. In PLAN mode: explain plans and options clearly. After the user accepts, implement step by step.\n",
-        "research" => "7. In RESEARCH mode: evidence first (paths + findings). Do not implement unless the user explicitly asks.\n",
+        "plan" => "7. In PLAN mode: explain plans and options clearly. After the user accepts, implement with full tool permissions.\n",
+        "ask" => "7. In ASK mode: evidence first (paths + findings). Do not implement unless the user explicitly asks.\n",
         "auto" => "7. In AUTO mode: keep responses concise. Prefer doing work over long preambles.\n",
         "multi_agent" => "7. In MULTI-AGENT mode: start independent local inspection tools together, then keep dependent actions ordered.\n",
-        _ => "7. In FULL mode: keep responses very short. Don't explain what you are about to do â€” do it.\n",
+        _ => "7. In FULL mode: keep responses very short. Don't explain what you are about to do — do it.\n",
     };
 
     let has_history = history.iter().any(|t| !t.content.trim().is_empty());
@@ -1539,6 +1539,7 @@ CAPABILITIES:\n\
 - System tools: list_drives, sys_info, env_vars, list_processes, kill_process, open_url, open_path, download_file, move_file, copy_file, delete_file, make_dir, file_info, connect_account, integration_status, web_search, browse_page, export_client_pack.\n\
 - TOOL NAMING: call exactly one tool per function call and use its exact snake_case name. Never merge names. For example, call read_file to inspect package.json and list_processes separately when checking running apps.\n\
 - ask_user: multiple-choice questions for real decisions (stack, style, scope). Use allow_other when freeform answers help.\n\
+- todo_write: structured task list for multi-step work. Prefer it over narrating progress. Never say a todo/task-list tool is unavailable or that you will \"track progress directly\".\n\
 - export_client_pack: zip the project for client handoff (excludes node_modules/.git/target/dist) and write CLIENT_HANDOFF.md.\n\
 - web_search / browse_page: research the public web when local files are not enough.\n\
 - view_image: view/describe an image file (PNG/JPG/WEBP/GIF/BMP). Attached images are usually auto-described already; call view_image only when you need a closer look or a path was not auto-viewed.\n\
@@ -1560,9 +1561,10 @@ BASE RULES (mode rules above win on conflict):\n\
 12. For deploy/git hosting: use connected integrations first. If missing, call connect_account (in-chat secure form + browser) — do not run interactive CLI login via run_command and do not request credentials in the chat message box.\n\
 13. Format final prose as clean Markdown: use a short Result heading followed by clear sections and bullets; use Markdown tables only for comparisons. Every table must include a header row and separator row; never use unaligned plain-text columns. Never print raw JSON, function-call syntax, tool arguments, or a literal `done` payload for the user. When work is complete, call the done tool instead of repeating its title, files, and features as loose prose.\n\
 14. Never stop after only announcing the next step (e.g. \"Let me find…\", \"I'll check…\", \"Looking for…\"). If you need to act, call a tool in the SAME turn. Narration without tools is incomplete.\n\
+15. Never claim tools are missing when work can continue with available tools. If you want a task list, call todo_write — do not apologize about a missing todo tool.\n\
 {tool_scheduling_rules}\n\
 {memory_rules}\n\
-TOOL REFERENCE: read_file, write_file, edit_file, list_dir, glob, grep, run_command, start_dev_server, git_init, git_add_all, git_commit, git_status, list_drives, sys_info, env_vars, list_processes, kill_process, open_url, open_path, download_file, move_file, copy_file, delete_file, make_dir, file_info, view_image, view_video, connect_account, integration_status, web_search, browse_page, export_client_pack, computer_list_windows, computer_observe, computer_focus_window, computer_click, computer_type_text, computer_press_key, computer_scroll, computer_drag, computer_game_sequence, ask_user, done.",
+TOOL REFERENCE: read_file, write_file, edit_file, list_dir, glob, grep, run_command, start_dev_server, git_init, git_add_all, git_commit, git_status, list_drives, sys_info, env_vars, list_processes, kill_process, open_url, open_path, download_file, move_file, copy_file, delete_file, make_dir, file_info, view_image, view_video, connect_account, integration_status, web_search, browse_page, export_client_pack, computer_list_windows, computer_observe, computer_focus_window, computer_click, computer_type_text, computer_press_key, computer_scroll, computer_drag, computer_game_sequence, ask_user, todo_write, done.",
         root = root.display(),
         provider_display = provider_display,
         model_display = model_display,
@@ -1580,10 +1582,10 @@ TOOL REFERENCE: read_file, write_file, edit_file, list_dir, glob, grep, run_comm
     );
 
     // First-turn nudges only when this session has no prior chat.
-    let user_content = if mode == "research" && !has_history {
+    let user_content = if mode == "ask" && !has_history {
         format!(
             "{prompt}\n\n\
-[Research mode active] Investigate with read/search tools as needed, then answer with evidence \
+[Ask mode active] Investigate with read/search tools as needed, then answer with evidence \
 (paths + findings). Do not implement or scaffold unless I explicitly ask. Prefer a short research brief \
 for non-trivial questions."
         )
@@ -1591,21 +1593,21 @@ for non-trivial questions."
         format!(
             "{prompt}\n\n\
 [Plan mode active] First response: (1) restate & improve my request, (2) short numbered plan, \
-(3) you MUST call the ask_user tool with options: string[] (2â€“6 choices) and allow_other=true. \
-Writing \"choose one\" in text alone does NOT show UI buttons â€” only the ask_user tool does. \
-Do not write/scaffold files until I pick an option."
+(3) you MUST call the ask_user tool with options: string[] (2–6 choices) and allow_other=true. \
+Writing \"choose one\" in text alone does NOT show UI buttons — only the ask_user tool does. \
+Do not write/scaffold files until I pick an option. After I accept, implement with full tool permissions."
         )
     } else if mode == "plan" {
         format!(
             "{prompt}\n\n\
-[Plan mode Â· continuing session] Use session history. Mutating tools still need approval. \
-If you need a decision, call ask_user (options as a string array) â€” do not only list options in text. \
+[Plan mode · continuing session] Use session history. After agreement you have full tool permissions. \
+If you need a decision, call ask_user (options as a string array) — do not only list options in text. \
 Continue or adjust earlier plans instead of restarting from zero unless the user wants a new direction."
         )
-    } else if mode == "research" {
+    } else if mode == "ask" {
         format!(
             "{prompt}\n\n\
-[Research mode Â· continuing session] Use session history. Keep investigating with evidence. \
+[Ask mode · continuing session] Use session history. Keep investigating with evidence. \
 Do not implement unless I explicitly ask. Mutating tools still need approval."
         )
     } else if mode == "full" {
@@ -2316,8 +2318,8 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
                 };
                 (true, response)
             } else {
-                let mode = settings.permission_mode.to_ascii_lowercase();
-                // Confirm tools based on permission mode (plan / auto / full)
+                let mode = normalized_permission_mode(&settings.permission_mode);
+                // Confirm tools based on permission mode (plan / ask / auto / full)
                 if tools::needs_tool_confirm(&tc.name, &tc.arguments, root, &mode) {
                     let approved = await_tool_confirm(
                         &app,
@@ -2562,7 +2564,9 @@ fn uses_cursor_sdk(provider: &str) -> bool {
 
 fn normalized_permission_mode(mode: &str) -> String {
     match mode.trim().to_ascii_lowercase().as_str() {
-        "plan" | "research" | "auto" | "full" | "multi_agent" => mode.trim().to_ascii_lowercase(),
+        // Legacy "research" sessions/settings map to ask.
+        "ask" | "research" => "ask".into(),
+        "plan" | "auto" | "full" | "multi_agent" => mode.trim().to_ascii_lowercase(),
         _ => "plan".into(),
     }
 }
@@ -2619,11 +2623,14 @@ fn cursor_permission_instructions(mode: &str) -> &'static str {
         "auto" => {
             "Execution mode: AUTO. Work inside the selected project directory and rely on Cursor Auto-review. If an action cannot be reviewed safely, stop and explain the limitation."
         }
-        "research" => {
-            "Execution mode: RESEARCH. This is a read-only planning turn: investigate and explain, but do not edit files, run shell commands, or invoke mutating tools."
+        "ask" => {
+            "Execution mode: ASK. This is a read-only investigation turn: investigate and explain, but do not edit files, run shell commands, or invoke mutating tools."
+        }
+        "plan" => {
+            "Execution mode: PLAN. Present a plan and call ask_user before mutating work. After the user accepts, you have Ship-level / full tool permissions — edit files, run commands, and use mutating tools without further approval prompts."
         }
         _ => {
-            "Execution mode: PLAN. This is a read-only planning turn: propose steps and ask questions, but do not edit files, run shell commands, or invoke mutating tools."
+            "Execution mode: PLAN. Present a plan and call ask_user before mutating work. After the user accepts, you have Ship-level / full tool permissions — edit files, run commands, and use mutating tools without further approval prompts."
         }
     }
 }
@@ -2994,8 +3001,11 @@ mod tests {
     #[test]
     fn unknown_permission_modes_fail_closed_to_plan() {
         assert_eq!(normalized_permission_mode("unexpected"), "plan");
-        assert!(cursor_permission_instructions("plan").contains("read-only"));
-        assert!(cursor_permission_instructions("research").contains("read-only"));
+        assert!(cursor_permission_instructions("plan").contains("Ship-level"));
+        assert!(!cursor_permission_instructions("plan").contains("read-only"));
+        assert_eq!(normalized_permission_mode("research"), "ask");
+        assert_eq!(normalized_permission_mode("ask"), "ask");
+        assert!(cursor_permission_instructions("ask").contains("read-only"));
         assert_eq!(normalized_permission_mode("multi_agent"), "multi_agent");
         assert!(cursor_permission_instructions("multi_agent").contains("MULTI-AGENT"));
     }

@@ -2010,6 +2010,8 @@ export class Chat {
       askquestion: "Ask you",
       todo_write: "Task list",
       todowrite: "Task list",
+      update_todos: "Task list",
+      updatetodos: "Task list",
       done: "Wrap up",
       await: "Wait",
       awaitshell: "Wait",
@@ -2110,6 +2112,17 @@ export class Chat {
         return { emoji: "↗️", label: "Opening the requested view", detail: "Showing the result in the appropriate app" };
       case "ask_user":
         return { emoji: "💬", label: "Asking for a decision", detail: "Waiting only for a choice that changes the result" };
+      case "todo_write":
+      case "todowrite":
+      case "update_todos":
+      case "updatetodos": {
+        const todos = Array.isArray(args?.todos) ? args.todos : [];
+        const active = todos.find((item: any) => String(item?.status || "").toLowerCase() === "in_progress");
+        const label = active?.content
+          ? `Tracking: ${clip(String(active.content), 40)}`
+          : `Tracking ${todos.length || "the"} task${todos.length === 1 ? "" : "s"}`;
+        return { emoji: "📋", label, detail: "Updating the structured task list" };
+      }
       case "done":
         return { emoji: "✅", label: "Preparing the delivery", detail: "Summarizing the verified result" };
       default:
@@ -2128,6 +2141,8 @@ export class Chat {
     this.setActivePermissionMode("multi_agent");
     this.clearIdleActivityTimer();
     this.sealThoughtBeforeTools();
+    // Continuing with another swarm means prior soft edit misses are historical, not sticky banners.
+    this.clearRecoverableMultiAgentAttention();
     for (const tool of safeTools) this.multiAgentToolIds.add(tool.id);
 
     const batch = div("multi-agent-batch tool-spawn");
@@ -2149,6 +2164,8 @@ export class Chat {
       const activity = this.multiAgentActivity(tool.name, tool.arguments);
       const agent = div("multi-agent-tool working");
       agent.dataset.multiAgentToolId = tool.id;
+      const toolPath = this.toolArgPath(tool.arguments);
+      if (toolPath) agent.dataset.toolPath = toolPath;
       agent.style.setProperty("--agent-index", String(index));
       agent.title = activity.detail;
       agent.appendChild(el("span", { class: "multi-agent-tool-emoji", "aria-hidden": "true" }, [activity.emoji]));
@@ -2164,33 +2181,100 @@ export class Chat {
     this.scrollToBottom();
   }
 
-  private markMultiAgentToolDone(id: string, ok: boolean) {
+  private markMultiAgentToolDone(
+    id: string,
+    ok: boolean,
+    opts?: { recoverable?: boolean; path?: string },
+  ) {
     this.node.querySelectorAll<HTMLElement>(".multi-agent-tool").forEach((agent) => {
       if (agent.dataset.multiAgentToolId !== id) return;
-      agent.classList.remove("working");
-      agent.classList.add(ok ? "done" : "failed");
-      const batch = agent.closest<HTMLElement>(".multi-agent-batch");
-      if (batch && !batch.querySelector(".multi-agent-tool.working")) {
-        batch.classList.add("complete");
-        const failures = batch.querySelectorAll(".multi-agent-tool.failed").length;
-        batch.classList.toggle("needs-attention", failures > 0);
-        const status = batch.querySelector(".multi-agent-live");
-        if (status) status.textContent = failures > 0 ? "NEEDS ATTENTION" : "DONE";
+      agent.classList.remove("working", "failed", "missed", "recovered");
+      if (opts?.path) agent.dataset.toolPath = opts.path;
+      if (ok) {
+        agent.classList.add("done");
+      } else if (opts?.recoverable) {
+        // Soft miss: agent can retry; do not sticky-banner as needing user attention.
+        agent.classList.add("missed");
+      } else {
+        agent.classList.add("failed");
       }
+      this.refreshMultiAgentBatchStatus(agent.closest<HTMLElement>(".multi-agent-batch"));
+    });
+  }
+
+  private refreshMultiAgentBatchStatus(batch: HTMLElement | null) {
+    if (!batch || batch.querySelector(".multi-agent-tool.working")) return;
+    batch.classList.add("complete");
+    const failures = batch.querySelectorAll(".multi-agent-tool.failed").length;
+    batch.classList.toggle("needs-attention", failures > 0);
+    const status = batch.querySelector(".multi-agent-live");
+    if (status) status.textContent = failures > 0 ? "NEEDS ATTENTION" : "DONE";
+  }
+
+  private toolArgPath(args: any): string {
+    if (typeof args?.path === "string") return args.path;
+    if (typeof args?.target_file === "string") return args.target_file;
+    if (typeof args?.file_path === "string") return args.file_path;
+    return "";
+  }
+
+  private normalizeToolPathKey(path: string): string {
+    return path.replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
+  }
+
+  private isRecoverableEditFailure(name: string, content: string): boolean {
+    const compact = String(name || "")
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, "");
+    if (compact !== "editfile") return false;
+    const text = String(content || "").toLowerCase();
+    return (
+      text.includes("old_string not found") ||
+      text.includes("old_string edit failed") ||
+      text.includes("need a unique match")
+    );
+  }
+
+  private isPathMutatingTool(name: string): boolean {
+    const compact = String(name || "")
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, "");
+    return compact === "editfile" || compact === "writefile";
+  }
+
+  /** Clear zombie attention when a later edit/write succeeds for the same path. */
+  private recoverMultiAgentPathAttention(path: string) {
+    const key = this.normalizeToolPathKey(path);
+    if (!key) return;
+    this.node
+      .querySelectorAll<HTMLElement>(".multi-agent-tool.failed, .multi-agent-tool.missed")
+      .forEach((agent) => {
+        const agentPath = this.normalizeToolPathKey(agent.dataset.toolPath || "");
+        if (!agentPath) return;
+        if (agentPath !== key && !agentPath.endsWith(`/${key}`) && !key.endsWith(`/${agentPath}`)) {
+          return;
+        }
+        agent.classList.remove("failed", "missed");
+        agent.classList.add("done", "recovered");
+        this.refreshMultiAgentBatchStatus(agent.closest<HTMLElement>(".multi-agent-batch"));
+      });
+  }
+
+  /** Soft-clear recoverable edit misses when the run continues or finishes cleanly. */
+  private clearRecoverableMultiAgentAttention() {
+    this.node.querySelectorAll<HTMLElement>(".multi-agent-tool.missed").forEach((agent) => {
+      agent.classList.remove("missed");
+      agent.classList.add("done", "recovered");
+      this.refreshMultiAgentBatchStatus(agent.closest<HTMLElement>(".multi-agent-batch"));
     });
   }
 
   /** Noun-ish title used under Running/Ran (premium-friendly, never raw tool ids). */
   private toolRunTitle(name: string, args: any): string {
     const friendly = this.friendlyToolName(name);
-    const path =
-      typeof args?.path === "string"
-        ? args.path
-        : typeof args?.target_file === "string"
-          ? args.target_file
-          : typeof args?.file_path === "string"
-            ? args.file_path
-            : "";
+    const path = this.toolArgPath(args);
     const cmd = typeof args?.command === "string" ? args.command : "";
     const pattern =
       typeof args?.pattern === "string"
@@ -2218,7 +2302,12 @@ export class Chat {
   private toolRanLabel(name: string, args: any, ok: boolean, content: string): string {
     if (this.isMultiAgentRun()) {
       const activity = this.multiAgentActivity(name, args);
-      if (!ok) return `⚠️ ${activity.label} needs attention`;
+      if (!ok) {
+        if (this.isRecoverableEditFailure(name, content)) {
+          return `⚠️ ${activity.label} missed`;
+        }
+        return `⚠️ ${activity.label} needs attention`;
+      }
       return `✓ ${activity.emoji} ${activity.label}`;
     }
     const title = this.toolRunTitle(name, args);
@@ -3821,10 +3910,16 @@ export class Chat {
     }
     if (!this.toolBatchResultIds.has(id)) {
       this.toolBatchResultIds.add(id);
-      if (!ok) this.toolBatchFailures += 1;
+      const recoverable = !ok && this.isRecoverableEditFailure(toolName, content);
+      if (!ok && !recoverable) this.toolBatchFailures += 1;
     }
     if (completedBatch) this.paintToolBatchLabel();
-    this.markMultiAgentToolDone(id, ok);
+    const path = this.toolArgPath(toolArgs);
+    const recoverable = !ok && this.isRecoverableEditFailure(toolName, content);
+    if (ok && path && this.isPathMutatingTool(toolName)) {
+      this.recoverMultiAgentPathAttention(path);
+    }
+    this.markMultiAgentToolDone(id, ok, { recoverable, path: path || undefined });
     this.multiAgentToolIds.delete(id);
     this.scrollToBottom();
   }
@@ -4089,6 +4184,7 @@ export class Chat {
     this.flushAssistantPaints();
     this.finalizeThinking();
     this.sealPendingTools("done");
+    this.clearRecoverableMultiAgentAttention();
     this.pendingAssistant = null;
     this.pendingAssistantMsg = null;
     const at = data.at ?? this.now();
@@ -4312,6 +4408,7 @@ export class Chat {
     this.flushAssistantPaints();
     this.finalizeThinking();
     this.sealPendingTools(completed ? "done" : "interrupted");
+    if (completed) this.clearRecoverableMultiAgentAttention();
     // Stamp the last AI chat once the agent is done replying
     this.sealAiTimestamp(at, workMs ?? this.currentWorkMs(at) ?? undefined);
     this.pendingAssistant = null;
