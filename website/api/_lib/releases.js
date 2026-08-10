@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.65";
-const BUILTIN_MSI_SHA256 = "7feeb405512b989e492a52905e35403ee1aaddc51dbbce62e913306b4a88515d";
-const BUILTIN_EXE_SHA256 = "2dd24db00b21ad7c56006a91ab66648acf7f93cfb30883e1569feb71c64a7e3a";
-const BUILTIN_RELEASE_NOTES = "Sidebar clarity and installer polish: usage now lives in a collapsed Account panel to give projects and sessions more room; updates now show download, verification, install, and relaunch progress with clearer Windows approval recovery and a native secure-install window.";
+const BUILTIN_RELEASE_VERSION = "0.1.66";
+const BUILTIN_MSI_SHA256 = "1196ae59790dd64c3d097688e686fd84625f5bd5e54ce244ab513a690e9edf74";
+const BUILTIN_EXE_SHA256 = "af9a4470958ce7c382496c83150076a0834d7f95bed414820517e8e2b82eff51";
+const BUILTIN_RELEASE_NOTES = "Cleaner sidebar navigation: Projects and Sessions now have instant search, live result feedback, compact item counts, keyboard-friendly dismissal, and independent collapse controls remembered across restarts.";
 
 const BUILTIN_FORCE_UPDATE = true;
 const GITHUB_RELEASES_BASE = "https://github.com/chmoralla-code/HORMACHUELOS/releases/download";

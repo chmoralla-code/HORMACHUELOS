@@ -21,6 +21,10 @@ test("sidebar nests usage in a collapsed account card and gives sessions more ro
   const sessionRows = sidebar.locator(".sb-recent .sb-session-item");
 
   await expect(sidebar.getByRole("button", { name: "Add another project" })).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: "Search projects" })).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: "Collapse projects" })).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: "Search sessions" })).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: "Collapse sessions" })).toBeVisible();
   await expect(projectRows).toHaveCount(3);
   await expect(sessionRows).toHaveCount(3);
   await expect(sidebar.getByText("Account", { exact: true })).toBeVisible();
@@ -64,6 +68,81 @@ test("sidebar nests usage in a collapsed account card and gives sessions more ro
 
   const fatal = consoleErrors.filter((entry) => !/favicon|vite/i.test(entry));
   expect(fatal, fatal.join("\n")).toEqual([]);
+});
+
+test("project and session search filter immediately and support keyboard dismissal", async ({ page }) => {
+  await page.goto(`${APP}/update-harness.html`, { waitUntil: "networkidle" });
+  await page.locator("#background-action").evaluate((node) => { node.hidden = true; });
+
+  const sidebar = page.locator("#sidebar");
+  const projects = sidebar.locator(".sb-project-workspace");
+  const sessions = sidebar.locator(".sb-session-item");
+
+  await sidebar.getByRole("button", { name: "Search projects" }).click();
+  const projectSearch = sidebar.getByRole("searchbox", { name: "Search projects" });
+  await expect(projectSearch).toBeVisible();
+  await expect(projectSearch).toBeFocused();
+  await projectSearch.fill("beacon");
+  await expect(projects.filter({ visible: true })).toHaveCount(1);
+  await expect(projects.filter({ visible: true }).first()).toContainText("Beacon");
+
+  await projectSearch.fill("missing workspace");
+  await expect(projects.filter({ visible: true })).toHaveCount(0);
+  await expect(sidebar.getByText("No matching projects.", { exact: true })).toBeVisible();
+
+  await projectSearch.press("Escape");
+  await expect(projectSearch).toHaveValue("");
+  await expect(projects.filter({ visible: true })).toHaveCount(3);
+  await projectSearch.press("Escape");
+  await expect(projectSearch).toBeHidden();
+  await expect(sidebar.getByRole("button", { name: "Search projects" })).toBeFocused();
+
+  await sidebar.getByRole("button", { name: "Search sessions" }).click();
+  const sessionSearch = sidebar.getByRole("searchbox", { name: "Search sessions" });
+  await sessionSearch.fill("installation");
+  await expect(sessions.filter({ visible: true })).toHaveCount(1);
+  await expect(sessions.filter({ visible: true }).first()).toContainText("Refine the installation flow");
+
+  await sessionSearch.fill("not here");
+  await expect(sessions.filter({ visible: true })).toHaveCount(0);
+  await expect(sidebar.getByText("No matching sessions.", { exact: true })).toBeVisible();
+  await sidebar.getByRole("button", { name: "Close session search" }).click();
+  await expect(sessionSearch).toBeHidden();
+  await expect(sessions.filter({ visible: true })).toHaveCount(3);
+});
+
+test("projects and sessions collapse independently, persist, and reopen for search", async ({ page }) => {
+  await page.goto(`${APP}/update-harness.html`, { waitUntil: "networkidle" });
+  await page.locator("#background-action").evaluate((node) => { node.hidden = true; });
+
+  const sidebar = page.locator("#sidebar");
+  const projectBody = sidebar.locator("#sidebar-project-body");
+  const sessionBody = sidebar.locator("#sidebar-session-body");
+
+  await sidebar.getByRole("button", { name: "Collapse projects" }).click();
+  await expect(projectBody).toBeHidden();
+  await expect(sidebar.getByRole("button", { name: "Expand projects" })).toHaveAttribute("aria-expanded", "false");
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("ai-forge:sidebar-projects-collapsed"))).toBe("1");
+
+  await sidebar.getByRole("button", { name: "Collapse sessions" }).click();
+  await expect(sessionBody).toBeHidden();
+  await expect(sidebar.getByRole("button", { name: "Expand sessions" })).toHaveAttribute("aria-expanded", "false");
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("ai-forge:sidebar-sessions-collapsed"))).toBe("1");
+
+  await page.reload({ waitUntil: "networkidle" });
+  await page.locator("#background-action").evaluate((node) => { node.hidden = true; });
+  await expect(sidebar.locator("#sidebar-project-body")).toBeHidden();
+  await expect(sidebar.locator("#sidebar-session-body")).toBeHidden();
+
+  await sidebar.getByRole("button", { name: "Search projects" }).click();
+  await expect(sidebar.locator("#sidebar-project-body")).toBeVisible();
+  await expect(sidebar.getByRole("searchbox", { name: "Search projects" })).toBeFocused();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("ai-forge:sidebar-projects-collapsed"))).toBe("0");
+
+  await sidebar.getByRole("button", { name: "Search sessions" }).click();
+  await expect(sidebar.locator("#sidebar-session-body")).toBeVisible();
+  await expect(sidebar.getByRole("searchbox", { name: "Search sessions" })).toBeFocused();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("ai-forge:sidebar-sessions-collapsed"))).toBe("0");
 });
 
 test("collapsed account usage keeps the full session list visible in a compact desktop window", async ({ page }) => {
