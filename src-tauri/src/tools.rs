@@ -339,6 +339,7 @@ mod permission_mode_tests {
         normalize_tool_name, schemas,
     };
     use serde_json::json;
+    use std::collections::BTreeSet;
     use std::path::Path;
 
     #[test]
@@ -460,6 +461,70 @@ mod permission_mode_tests {
                 assert_eq!(normalize_tool_name(name), name);
             }
         }
+    }
+
+    #[test]
+    fn complete_tool_catalog_is_registered() {
+        let actual = schemas(true)
+            .into_iter()
+            .map(|schema| {
+                schema["function"]["name"]
+                    .as_str()
+                    .expect("tool name")
+                    .to_string()
+            })
+            .collect::<BTreeSet<_>>();
+        let expected = [
+            "read_file",
+            "write_file",
+            "edit_file",
+            "list_dir",
+            "glob",
+            "grep",
+            "run_command",
+            "start_dev_server",
+            "git_init",
+            "git_add_all",
+            "git_commit",
+            "git_status",
+            "list_drives",
+            "sys_info",
+            "env_vars",
+            "list_processes",
+            "kill_process",
+            "open_url",
+            "connect_account",
+            "integration_status",
+            "open_path",
+            "download_file",
+            "move_file",
+            "copy_file",
+            "delete_file",
+            "make_dir",
+            "file_info",
+            "view_image",
+            "view_video",
+            "web_search",
+            "browse_page",
+            "export_client_pack",
+            "ask_user",
+            "done",
+            "computer_list_windows",
+            "computer_observe",
+            "computer_focus_window",
+            "computer_click",
+            "computer_type_text",
+            "computer_press_key",
+            "computer_scroll",
+            "computer_drag",
+            "computer_game_sequence",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+
+        assert_eq!(actual, expected);
+        assert_eq!(actual.len(), 43);
     }
 
     #[test]

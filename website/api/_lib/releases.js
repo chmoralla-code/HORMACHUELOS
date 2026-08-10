@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.60";
-const BUILTIN_MSI_SHA256 = "96f13869eb976aaf4d0760a93c9e98fa177ea6cbd7b3cc2a7a26bac25bb3cb8f";
-const BUILTIN_EXE_SHA256 = "54d0d292104a080da8d65a068f6dea509aae195a53180330aa48853055d2e409";
-const BUILTIN_RELEASE_NOTES = "Fixed: the AI no longer stops mid-reply - cut-off responses and reasoning-model narration are now resumed automatically instead of ending the run. Also: creating a new project inside a folder that already contains a project (like your INVENTORIES folder) now warns you and offers to open the existing folder instead, so the app can no longer scan an empty subfolder by accident.";
+const BUILTIN_RELEASE_VERSION = "0.1.61";
+const BUILTIN_MSI_SHA256 = "1635696d9e7143ca11c46319191c566bf9b310d35aea28a8697fc3ea7478a6c6";
+const BUILTIN_EXE_SHA256 = "744005d82b342391eb1cd7bab4251c1d144ac17a68dd948771de3ef3079c1c64";
+const BUILTIN_RELEASE_NOTES = "Fixed AI sessions that could announce done working too early or leave interrupted tool cards stuck. Completion now waits for queued and background work, streamed previews close safely, Smart Agent state resets between runs, and Cursor only marks explicitly verified tasks complete. Also adds full-size chat image viewing and more accurate design-mode feature selection.";
 
 const BUILTIN_FORCE_UPDATE = true;
 const GITHUB_RELEASES_BASE = "https://github.com/chmoralla-code/HORMACHUELOS/releases/download";

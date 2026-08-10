@@ -541,6 +541,7 @@ function pickFemaleVoice(): SpeechSynthesisVoice | null {
 }
 
 let voicesReady = false;
+let doneWorkingCueGeneration = 0;
 function ensureVoices(): void {
   if (typeof window === "undefined" || !window.speechSynthesis) return;
   if (window.speechSynthesis.getVoices().length) {
@@ -556,10 +557,23 @@ function ensureVoices(): void {
   );
 }
 
-/** Speak a short female “done working” cue when an agent run finishes. */
+/** Cancel both active speech and a delayed voices-ready completion cue. */
+export function cancelDoneWorkingCue(): void {
+  doneWorkingCueGeneration += 1;
+  try {
+    if (typeof window !== "undefined" && window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
+  } catch {
+    // Voice is optional.
+  }
+}
+
+/** Speak a short female “done working” cue when all agent work finishes. */
 export function speakDoneWorking(): void {
   try {
     if (typeof window === "undefined" || !window.speechSynthesis) return;
+    const generation = ++doneWorkingCueGeneration;
     ensureVoices();
     window.speechSynthesis.cancel();
     const utter = new SpeechSynthesisUtterance("done working");
@@ -576,6 +590,7 @@ export function speakDoneWorking(): void {
     // If voices haven't loaded yet, retry once shortly after
     if (!voicesReady && !voice) {
       window.setTimeout(() => {
+        if (generation !== doneWorkingCueGeneration) return;
         const v2 = pickFemaleVoice();
         if (v2) utter.voice = v2;
         window.speechSynthesis.speak(utter);

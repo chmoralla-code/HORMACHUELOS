@@ -327,7 +327,7 @@ export type IntegrationTestResult = {
 };
 
 export type AgentEventPayload =
-  | { kind: "start"; payload: { prompt: string; permission_mode?: string } }
+  | { kind: "start"; payload: { prompt: string; permission_mode?: string; smart_agent_enabled?: boolean } }
   | { kind: "task_plan"; payload: { title: string; summary: string; steps: { id: string; label: string; state: string }[]; active_step: number; status: string; detail?: string } }
   | { kind: "task_progress"; payload: { step: number; phase: string; status: string; detail: string; completed_before?: number; complete_all?: boolean } }
   | { kind: "thinking"; payload: { iteration: number } }
@@ -335,6 +335,7 @@ export type AgentEventPayload =
   | { kind: "reasoning"; payload: { text: string; iteration?: number } }
   | { kind: "text"; payload: { text: string } }
   | { kind: "tool_preview"; payload: { id: string; name: string; arguments_delta?: string } }
+  | { kind: "tool_preview_end"; payload: { id: string; name: string; reason: string } }
   | {
       kind: "multi_agent_batch";
       payload: {

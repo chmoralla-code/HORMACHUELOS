@@ -746,6 +746,23 @@ fn resolve_tool_preview_name(
     names.get(&index).cloned()
 }
 
+/// Match streamed preview slots to the compact final-call ordinals used by the
+/// UI's preview promotion. A stream can expose a tool name and partial
+/// arguments, then end before producing a valid call. Slots beyond the final
+/// count must be retired before automatic continuation starts another iteration.
+fn orphaned_tool_previews(
+    names: &HashMap<usize, String>,
+    completed_call_count: usize,
+) -> Vec<(usize, String)> {
+    let mut orphaned = names
+        .iter()
+        .filter(|(index, _)| **index >= completed_call_count)
+        .map(|(index, name)| (*index, name.clone()))
+        .collect::<Vec<_>>();
+    orphaned.sort_by_key(|(index, _)| *index);
+    orphaned
+}
+
 /// Normalize provider tool names and safe in-project inspection paths before
 /// they reach history, permission checks, UI events, Smart Agent state, or the
 /// dispatcher. This keeps a harmless provider typo from becoming a visible
@@ -1639,6 +1656,7 @@ The tool entries are historical summaries; use fresh tools for the current works
         json!({
             "prompt": prompt,
             "permission_mode": mode,
+            "smart_agent_enabled": smart_agent_enabled,
         }),
     );
     smart_agent.emit_plan(&app, &session_id);
@@ -1712,6 +1730,7 @@ The tool entries are historical summaries; use fresh tools for the current works
             usize,
             String,
         >::new()));
+        let emitted_tool_preview_names = tool_preview_names.clone();
         let tool_call_sink: ToolCallSink =
             Arc::new(move |index: usize, name: &str, arguments_delta: &str| {
                 let resolved_name = {
@@ -1832,6 +1851,22 @@ The tool entries are historical summaries; use fresh tools for the current works
             };
 
             if recover_after_blip {
+                let orphaned = emitted_tool_preview_names
+                    .lock()
+                    .map(|names| orphaned_tool_previews(&names, 0))
+                    .unwrap_or_default();
+                for (index, name) in orphaned {
+                    emit(
+                        &app,
+                        &session_id,
+                        "tool_preview_end",
+                        json!({
+                            "id": format!("tool-preview-{iteration}-{index}"),
+                            "name": name,
+                            "reason": "Provider connection ended before this tool request was complete; retrying safely.",
+                        }),
+                    );
+                }
                 provider_blip_recoveries = provider_blip_recoveries.saturating_add(1);
                 let reason = AutomaticContinuationReason::ProviderBlip;
                 emit(
@@ -1867,6 +1902,22 @@ The tool entries are historical summaries; use fresh tools for the current works
             return Ok(None);
         }
         normalize_tool_calls(root, &mut resp.tool_calls);
+        let orphaned = emitted_tool_preview_names
+            .lock()
+            .map(|names| orphaned_tool_previews(&names, resp.tool_calls.len()))
+            .unwrap_or_default();
+        for (index, name) in orphaned {
+            emit(
+                &app,
+                &session_id,
+                "tool_preview_end",
+                json!({
+                    "id": format!("tool-preview-{iteration}-{index}"),
+                    "name": name,
+                    "reason": "Provider stream ended before this tool request was complete; continuing safely.",
+                }),
+            );
+        }
         total_tokens = total_tokens.saturating_add(resp.usage_tokens);
         let billable = crate::license::to_billable_tokens(
             &settings.provider,
@@ -2707,17 +2758,18 @@ mod tests {
         can_recover_from_provider_blip, compact_history_messages, cursor_computer_use_instructions,
         cursor_effort_for_request, cursor_permission_instructions, display_model_name,
         display_provider_name, identity_instructions, next_stalled_recovery_count,
-        normalize_tool_calls, normalized_permission_mode, parallel_readonly_batch_len,
-        public_tool_arguments, public_tool_preview_delta, reply_announces_pending_action,
-        reply_was_cut_off, resolve_tool_preview_name, response_made_concrete_progress,
-        starts_as_explanatory_request, stop_reason_requires_continuation,
-        task_likely_requires_project_completion, tool_confirm_summary, truncate_utf8,
-        uses_cursor_sdk, HistoryToolCall, HistoryTurn, MAX_CONSECUTIVE_STALLED_RECOVERIES,
-        NATIVE_HISTORY_MAX_BYTES, NATIVE_HISTORY_MAX_TURNS,
+        normalize_tool_calls, normalized_permission_mode, orphaned_tool_previews,
+        parallel_readonly_batch_len, public_tool_arguments, public_tool_preview_delta,
+        reply_announces_pending_action, reply_was_cut_off, resolve_tool_preview_name,
+        response_made_concrete_progress, starts_as_explanatory_request,
+        stop_reason_requires_continuation, task_likely_requires_project_completion,
+        tool_confirm_summary, truncate_utf8, uses_cursor_sdk, HistoryToolCall, HistoryTurn,
+        MAX_CONSECUTIVE_STALLED_RECOVERIES, NATIVE_HISTORY_MAX_BYTES, NATIVE_HISTORY_MAX_TURNS,
     };
     use crate::llm::{ChatMessage, LlmResponse, ToolCall};
     use anyhow::anyhow;
     use serde_json::json;
+    use std::collections::HashMap;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -2842,6 +2894,20 @@ mod tests {
             resolve_tool_preview_name(&mut names, 3, "read_filelist_processes").as_deref(),
             Some("read_file")
         );
+    }
+
+    #[test]
+    fn incomplete_streamed_tool_previews_are_retired_after_final_call_count() {
+        let previews = HashMap::from([
+            (0, "grep".to_string()),
+            (1, "read_file".to_string()),
+            (2, "grep".to_string()),
+        ]);
+        assert_eq!(
+            orphaned_tool_previews(&previews, 1),
+            vec![(1, "read_file".to_string()), (2, "grep".to_string())]
+        );
+        assert!(orphaned_tool_previews(&HashMap::new(), 1).is_empty());
     }
 
     #[test]

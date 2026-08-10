@@ -145,6 +145,14 @@ function pause(state: SmartAgentTaskState, detail: string): SmartAgentTaskState 
 
 /** Apply only public, bounded task state events to the owning session. */
 export function applySmartAgentEvent(session: Session, event: AgentEvent): boolean {
+  if (event.kind === "start") {
+    // A task ledger belongs to one backend run. Without this reset, an ordinary
+    // follow-up keeps showing the previous run's green "Done" state while the
+    // new model turn is still thinking or streaming a tool preview.
+    const hadState = sanitizeSmartAgentTaskState(session.smartAgent) != null;
+    delete session.smartAgent;
+    return hadState;
+  }
   if (event.kind === "task_plan") {
     session.smartAgent = makePlan(event.payload as Record<string, unknown>);
     return true;

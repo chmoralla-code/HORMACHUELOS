@@ -51,6 +51,8 @@ export class Chat {
    * message must be an intentional send.
    */
   private userCancelled = false;
+  /** True only after this run received the backend's explicit completion handshake. */
+  private runCompleted = false;
   /** True while force-finishing live tool rows so we don't spawn idle Thinking… */
   private sealingTools = false;
   /** Messages queued while the agent is still working on the current run. */
@@ -1443,6 +1445,7 @@ export class Chat {
     if (running) {
       // Fresh run — clear prior cancel latch and start work timer
       this.userCancelled = false;
+      this.runCompleted = false;
       this.stopping = false;
       this.runStartTime = Date.now();
       this.startDotsPulse();
@@ -1453,8 +1456,11 @@ export class Chat {
       this.runStartTime = null;
       this.stopDotsPulse();
       this.clearIdleActivityTimer();
-      // Finish any tool rows still shimmering (Cursor SDK often omits matching results)
-      this.sealPendingTools(this.userCancelled ? "cancelled" : "done");
+      // A missing result is successful only after an explicit completion
+      // handshake. Errors, provider cuts, and ordinary prose exits stay honest.
+      this.sealPendingTools(
+        this.userCancelled ? "cancelled" : this.runCompleted ? "done" : "interrupted",
+      );
       this.finalizeThinking();
       this.freezeAllWorkingDots();
       this.clearRunningIndicator();
@@ -1639,6 +1645,7 @@ export class Chat {
     this.thinkingBody = null;
     this.thinkingText = "";
     this.hasUsedTools = false;
+    this.runCompleted = false;
     this.stopTypewriter();
     this.thinkingTarget = "";
     this.thinkingRevealed = 0;
@@ -1661,6 +1668,7 @@ export class Chat {
 
   /** Append a follow-up user message to the existing conversation without clearing. */
   continueSession(prompt: string) {
+    this.runCompleted = false;
     this.finalizeThinking();
     this.flushAssistantPaints();
     this.pendingAssistant = null;
@@ -1676,6 +1684,7 @@ export class Chat {
     this.clearPendingQueue();
     this.cancelAssistantPaints();
     this.replaying = true;
+    this.runCompleted = false;
     this.hasUsedTools = msgs.some((m) => m.type === "tool_call");
     clear(this.node);
     this.toolCards.clear();
@@ -1694,6 +1703,7 @@ export class Chat {
       switch (msg.type) {
         case "user": this.appendUser(msg.text, msg.at); break;
         case "run_start":
+          this.runCompleted = false;
           this.setActivePermissionMode(msg.permissionMode);
           break;
         case "multi_agent_batch":
@@ -1780,7 +1790,7 @@ export class Chat {
         ]));
       }
       for (const path of imagePaths) {
-        const chip = el("div", { class: "msg-attach-chip", title: "Attached image" });
+        const chip = el("div", { class: "msg-attach-chip msg-attach-zoomable", title: "Attached image — click to view" });
         const img = document.createElement("img");
         img.alt = "Attached image";
         img.className = "msg-attach-thumb";
@@ -1792,6 +1802,10 @@ export class Chat {
             chip.textContent = "Image";
           });
         chip.appendChild(img);
+        chip.addEventListener("click", (event) => {
+          event.stopPropagation();
+          this.openImageViewer(path);
+        });
         rail.appendChild(chip);
       }
       host.appendChild(rail);
@@ -1801,6 +1815,81 @@ export class Chat {
     } else if (!imagePaths.length && !videoPaths.length) {
       host.textContent = text;
     }
+  }
+
+  /**
+   * Open a full-size viewer for a pasted/uploaded image attachment. Uses the
+   * modal-root overlay host (kept in sync with the thumbnail's convertFileSrc
+   * URL), closes on backdrop click / Escape / close button.
+   */
+  private openImageViewer(path: string) {
+    const root = document.getElementById("modal-root");
+    if (!root) return;
+    root.innerHTML = "";
+    const overlay = el("div", {
+      class: "modal-overlay chat-image-viewer-overlay",
+      role: "dialog",
+      "aria-modal": "true",
+      "aria-label": "Attached image viewer",
+    });
+    const card = el("div", { class: "chat-image-viewer" });
+    const top = el("div", { class: "chat-image-viewer-top" });
+    top.appendChild(
+      el("span", { class: "chat-image-viewer-title" }, ["Attached image"]),
+    );
+    const closeBtn = el("button", {
+      class: "chat-image-viewer-close",
+      type: "button",
+      "aria-label": "Close image viewer",
+      html: "×",
+    });
+    const close = () => {
+      root.innerHTML = "";
+      window.removeEventListener("keydown", onKey);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        close();
+      }
+    };
+    top.appendChild(closeBtn);
+    card.appendChild(top);
+    const img = document.createElement("img");
+    img.alt = "Attached image";
+    img.className = "chat-image-viewer-img";
+    void import("@tauri-apps/api/core")
+      .then(({ convertFileSrc }) => {
+        img.src = convertFileSrc(path);
+      })
+      .catch(() => {
+        top.appendChild(
+          el("span", { class: "chat-image-viewer-error" }, ["Could not load image"]),
+        );
+      });
+    card.appendChild(img);
+    overlay.appendChild(card);
+
+    window.addEventListener("keydown", onKey);
+    root.appendChild(overlay);
+    // Move focus into the dialog so keyboard users can dismiss with Escape
+    // immediately, and return it to the chat when the viewer closes.
+    const priorFocus = document.activeElement as HTMLElement | null;
+    const closeBtnEl = closeBtn as HTMLButtonElement;
+    window.setTimeout(() => closeBtnEl.focus(), 0);
+    const restore = () => {
+      window.removeEventListener("keydown", onKey);
+      if (priorFocus && priorFocus.isConnected) priorFocus.focus();
+    };
+    const origClose = close;
+    const closeWithRestore = () => {
+      restore();
+      origClose();
+    };
+    closeBtn.addEventListener("click", () => closeWithRestore());
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) closeWithRestore();
+    });
   }
 
   /** Neutral system/status line (cancel, limits, etc.). */
@@ -2281,7 +2370,7 @@ export class Chat {
    * Force-finish any tool rows still showing Running… / shimmer after the agent
    * stops (missing tool_result, mismatched ids, or early done/end).
    */
-  private sealPendingTools(mode: "done" | "cancelled" = "done") {
+  private sealPendingTools(mode: "done" | "cancelled" | "interrupted" = "done") {
     this.sealingTools = true;
     try {
       if (mode === "cancelled") {
@@ -2305,9 +2394,13 @@ export class Chat {
           if (statusIco) statusIco.innerHTML = icon("alert", 12);
         }
       } else {
+        const ok = mode === "done";
+        const content = ok
+          ? "(completed)"
+          : "Tool did not return a result before the run ended.";
         const pending = [...this.pendingTools.entries()];
         for (const [id, meta] of pending) {
-          this.appendToolResult(id, meta.name, true, "(completed)");
+          this.appendToolResult(id, meta.name, ok, content);
         }
         this.pendingTools.clear();
         this.clearToolStreams();
@@ -2317,7 +2410,7 @@ export class Chat {
           }
           const nameHint =
             (tc.head.querySelector(".badge") as HTMLElement | null)?.textContent || "tool";
-          this.appendToolResult(id, nameHint, true, "(completed)");
+          this.appendToolResult(id, nameHint, ok, content);
         }
       }
 
@@ -3991,6 +4084,7 @@ export class Chat {
     at?: number;
     workMs?: number;
   }) {
+    this.runCompleted = true;
     this.normalizeLatestAssistantReply();
     this.flushAssistantPaints();
     this.finalizeThinking();
@@ -4212,10 +4306,12 @@ export class Chat {
   }
 
   appendEnd(reason: string, at?: number, workMs?: number) {
+    const completed = reason.trim().toLowerCase() === "completed";
+    this.runCompleted ||= completed;
     this.normalizeLatestAssistantReply();
     this.flushAssistantPaints();
     this.finalizeThinking();
-    this.sealPendingTools("done");
+    this.sealPendingTools(completed ? "done" : "interrupted");
     // Stamp the last AI chat once the agent is done replying
     this.sealAiTimestamp(at, workMs ?? this.currentWorkMs(at) ?? undefined);
     this.pendingAssistant = null;
@@ -4437,6 +4533,7 @@ export class Chat {
   private renderEvent(e: AgentEvent) {
     switch (e.kind) {
       case "start":
+        this.runCompleted = false;
         this.setActivePermissionMode(e.payload.permission_mode);
         break;
       case "thinking": this.showThinking(e.payload.iteration); break;
@@ -4464,6 +4561,14 @@ export class Chat {
           e.payload.id,
           e.payload.name,
           e.payload.arguments_delta ?? "",
+        );
+        break;
+      case "tool_preview_end":
+        this.appendToolResult(
+          e.payload.id,
+          e.payload.name,
+          false,
+          e.payload.reason || "Provider did not finish this tool request.",
         );
         break;
       case "multi_agent_batch":
@@ -4498,6 +4603,7 @@ export class Chat {
         // Calling setRunning(false) here races the next queued run and causes
         // "session already running" / stuck stop button / tools after cancel.
         this.userCancelled = true;
+        this.runCompleted = false;
         this.stopping = true;
         this.stopDotsPulse();
         this.finalizeThinking();

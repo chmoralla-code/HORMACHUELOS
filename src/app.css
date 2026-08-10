@@ -3169,6 +3169,18 @@
   object-fit: cover;
   display: block;
 }
+.msg-attach-chip.msg-attach-zoomable {
+  cursor: zoom-in;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+}
+.msg-attach-chip.msg-attach-zoomable:hover {
+  border-color: rgba(90, 160, 255, 0.65);
+  box-shadow: 0 0 0 3px rgba(90, 160, 255, 0.18);
+  transform: translateY(-1px);
+}
+.msg-attach-chip.msg-attach-zoomable:active {
+  transform: scale(0.96);
+}
 .msg-attach-video {
   width: min(176px, 48vw);
   height: 72px;
@@ -3853,6 +3865,71 @@
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+/* Full-size viewer for pasted/uploaded chat images */
+.chat-image-viewer-overlay {
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+  background: rgba(5, 8, 12, 0.82);
+  backdrop-filter: blur(6px);
+}
+.chat-image-viewer {
+  display: flex;
+  flex-direction: column;
+  max-width: min(92vw, 1080px);
+  max-height: 88vh;
+  background: var(--bg-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
+}
+.chat-image-viewer-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.chat-image-viewer-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--fg-1);
+}
+.chat-image-viewer-close {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--fg-3);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+.chat-image-viewer-close:hover {
+  background: var(--bg-2);
+  color: var(--fg-0);
+}
+.chat-image-viewer-img {
+  display: block;
+  max-width: 100%;
+  max-height: calc(88vh - 48px);
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  background: repeating-conic-gradient(#161a20 0% 25%, #101419 0% 50%) 0 0 / 24px 24px;
+}
+.chat-image-viewer-error {
+  font-size: 12px;
+  color: #ff8b8b;
 }
 
 .set-row { margin-bottom: 16px; }

@@ -2107,20 +2107,64 @@ export class SitePreview {
         ringRaf = 0;
       }
     };
+    // An element qualifies as a "feature" when it is interactive or has a
+    // meaningful visible box. Nested spans/icons/emojis inside buttons, cards
+    // and nav items are skipped so the outline lands on the whole feature.
+    const INTERACTIVE_SELECTOR =
+      "a, button, input, select, textarea, [role='button'], [role='link'], [tabindex]";
+    const isInteractive = (n: Element | null) =>
+      !!n && !!n.matches?.(INTERACTIVE_SELECTOR);
+    const inlineDisplay = (n: HTMLElement) => {
+      const display = n.ownerDocument.defaultView?.getComputedStyle(n).display || "";
+      return display.startsWith("inline");
+    };
+    const featureFromTarget = (n: Element | null): Element | null => {
+      if (!n || n === doc.body || n === doc.documentElement) return null;
+      let cur: Element | null = n;
+      while (cur && cur !== doc.body) {
+        // The nearest interactive container (button, link, input, tab…) wins.
+        if (cur.matches?.(INTERACTIVE_SELECTOR)) return cur;
+        // Otherwise prefer a real visible block: sizable with content, so
+        // headings, cards and list items are outlined instead of their text.
+        if (cur instanceof HTMLElement) {
+          const r = cur.getBoundingClientRect();
+          if (r.width >= 24 && r.height >= 24 && (cur.innerText || "").trim().length > 0) {
+            // Inline elements (spans, inline-flex chips) rarely ARE the
+            // feature — keep climbing so the outline lands on the block
+            // container instead of an inner text run.
+            if (inlineDisplay(cur)) {
+              const parentEl: Element | null = cur.parentElement;
+              if (parentEl && parentEl !== doc.body) {
+                cur = parentEl;
+                continue;
+              }
+            }
+            return cur;
+          }
+        }
+        cur = cur.parentElement;
+      }
+      return n instanceof HTMLElement ? n : null;
+    };
     const onMove = (e: MouseEvent) => {
-      const t = e.target as HTMLElement | null;
-      if (!t || t === doc.body || t === doc.documentElement) {
+      const raw = e.target as Element | null;
+      if (!raw || raw === doc.body || raw === doc.documentElement) {
+        cursorRing.classList.remove("is-visible", "is-hovering");
+        return;
+      }
+      const feature = featureFromTarget(raw);
+      if (!feature) {
         cursorRing.classList.remove("is-visible", "is-hovering");
         return;
       }
       cursorRing.classList.add("is-visible");
-      const hovering = !!t.closest?.(".horma-design-hover, a, button, input, select, textarea, [role='button']");
+      const hovering = feature.matches?.(INTERACTIVE_SELECTOR) === true;
       cursorRing.classList.toggle("is-hovering", hovering);
       ringTargetX = e.clientX;
       ringTargetY = e.clientY;
       if (!ringRaf) ringRaf = requestAnimationFrame(moveRing);
       doc.querySelectorAll(".horma-design-hover").forEach((n) => n.classList.remove("horma-design-hover"));
-      t.classList.add("horma-design-hover");
+      feature.classList.add("horma-design-hover");
     };
     const positionEditChip = (chip: HTMLElement, target: HTMLElement) => {
       const rect = target.getBoundingClientRect();
@@ -2142,8 +2186,10 @@ export class SitePreview {
       cursorRing.classList.remove("is-hovering");
       cursorRing.classList.add("is-clicked");
       window.setTimeout(() => cursorRing.classList.remove("is-clicked"), 140);
-      const t = e.target as HTMLElement | null;
-      if (!t || t === doc.body || t === doc.documentElement) return;
+      const raw = e.target as Element | null;
+      if (!raw || raw === doc.body || raw === doc.documentElement) return;
+      const t = featureFromTarget(raw) as HTMLElement | null;
+      if (!t) return;
       // Clicking the edit chip itself should not reselect.
       if (t.classList.contains("horma-edit-chip") || t.closest?.(".horma-edit-chip")) return;
       doc.querySelectorAll(".horma-design-selected").forEach((n) => n.classList.remove("horma-design-selected"));

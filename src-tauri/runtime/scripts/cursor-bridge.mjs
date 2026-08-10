@@ -184,6 +184,12 @@ function resolveSandboxOptions() {
   return { enabled: false };
 }
 
+function cursorRunFinishedSuccessfully(status, error) {
+  if (error) return false;
+  const normalized = String(status || "finished").trim().toLowerCase();
+  return ["finished", "completed", "success", "succeeded"].includes(normalized);
+}
+
 function isToolAllowed(policy, name) {
   if (!policy.readOnly) return true;
   return READ_ONLY_TOOLS.has(String(name || "").trim().toLowerCase());
@@ -1215,11 +1221,6 @@ async function runMain(protocol) {
   completionFilter.flush();
   textOut.flush();
 
-  // Seal any tools the SDK left open so the UI doesn't keep shimmering after Done
-  for (const [id, meta] of openTools.entries()) {
-    emitToolResult(id, meta.name, true, "(completed)");
-  }
-
   const status = result?.status || "finished";
   const errMsg =
     runError ||
@@ -1227,6 +1228,19 @@ async function runMain(protocol) {
     (status === "error" && !finalText
       ? "Cursor SDK model failed. Check Cursor usage limits or try a different model or effort."
       : null);
+
+  // Seal any tools the SDK left open so the UI never keeps shimmering. An
+  // error/cancelled run did not prove those tools succeeded, so report the
+  // interrupted state instead of manufacturing a successful result.
+  const openToolsSucceeded = cursorRunFinishedSuccessfully(status, errMsg);
+  for (const [id, meta] of openTools.entries()) {
+    emitToolResult(
+      id,
+      meta.name,
+      openToolsSucceeded,
+      openToolsSucceeded ? "(completed)" : "(interrupted before a result)",
+    );
+  }
 
   if (errMsg) {
     write({ type: "error", message: errMsg });
@@ -1264,6 +1278,7 @@ export {
   computerApprovalSummary,
   createCompletionMarkerFilter,
   createComputerUseTools,
+  cursorRunFinishedSuccessfully,
   helperEnvironment,
   isToolAllowed,
   normalizeEffort,

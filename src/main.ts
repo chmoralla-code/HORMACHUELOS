@@ -29,7 +29,7 @@ import {
   showUpdateDialog,
   showUpdateGate,
 } from "./components/update-gate";
-import { basename, clear, div, el, speakDoneWorking } from "./components/util";
+import { basename, cancelDoneWorkingCue, clear, div, el, speakDoneWorking } from "./components/util";
 import {
   activeProjectWorkspacePath,
   activateProjectWorkspace,
@@ -66,6 +66,13 @@ let activeSessionId: string | null = null;
 const sessionRegistry = new Map<string, Session>();
 /** Session ids with an in-flight agent run (multiple can run at once). */
 const runningSessions = new Set<string>();
+/** Runs that emitted an explicit completion handshake before agent_run returned. */
+const verifiedRunCompletions = new Set<string>();
+/** Coalesce done+end and hold the audible cue while queued/background work remains. */
+let completionCuePending = false;
+let completionCueTimer: ReturnType<typeof setTimeout> | null = null;
+/** Queue dispatch can await provider readiness before it appears in runningSessions. */
+let pendingPromptStarts = 0;
 /** Exact provider/model profile captured when each in-flight run starts. */
 const runModelProfiles = new Map<
   string,
@@ -397,6 +404,18 @@ function isVerifiedAgentCompletion(e: AgentEvent): boolean {
 
 function isTerminalAgentEvent(e: AgentEvent): boolean {
   return e.kind === "done" || e.kind === "end" || e.kind === "cancelled";
+}
+
+function scheduleCompletionCueWhenIdle(): void {
+  if (!completionCuePending) return;
+  if (completionCueTimer !== null) window.clearTimeout(completionCueTimer);
+  completionCueTimer = window.setTimeout(() => {
+    completionCueTimer = null;
+    if (!completionCuePending) return;
+    if (runningSessions.size > 0 || pendingPromptStarts > 0 || chat?.running) return;
+    completionCuePending = false;
+    speakDoneWorking();
+  }, 180);
 }
 
 function refreshSidebar() {
@@ -896,6 +915,7 @@ function removeSession(id: string) {
   if (runningSessions.has(id)) {
     api.agentStop(id).catch(() => {});
     runningSessions.delete(id);
+    verifiedRunCompletions.delete(id);
     runModelProfiles.delete(id);
     runPrompts.delete(id);
   }
@@ -989,6 +1009,7 @@ function doRemoveAllSessions() {
   for (const id of ids.filter((id) => runningSessions.has(id))) {
     api.agentStop(id).catch(() => {});
     runningSessions.delete(id);
+    verifiedRunCompletions.delete(id);
     runModelProfiles.delete(id);
     runPrompts.delete(id);
   }
@@ -1532,13 +1553,22 @@ function openClientSuccessCenter() {
 }
 
 async function sendPrompt(prompt: string) {
+  cancelDoneWorkingCue();
   if (!currentProjectPath) {
     reportError("Open or create a project before starting.");
     openNewProjectPicker();
     return;
   }
   const projectRoot = currentProjectPath;
-  if (!(await refreshProviderReadiness())) {
+  pendingPromptStarts += 1;
+  let providerReady = false;
+  try {
+    providerReady = await refreshProviderReadiness();
+  } finally {
+    pendingPromptStarts = Math.max(0, pendingPromptStarts - 1);
+    scheduleCompletionCueWhenIdle();
+  }
+  if (!providerReady) {
     reportError("Connect the selected provider before sending a request.");
     return;
   }
@@ -1701,6 +1731,7 @@ async function sendPrompt(prompt: string) {
   } finally {
     // Only drop the busy flag here — after backend finish_run. Early deletes on
     // cancelled/done events race a follow-up send ("session already running").
+    if (verifiedRunCompletions.delete(sessionId)) completionCuePending = true;
     runningSessions.delete(sessionId);
     runModelProfiles.delete(sessionId);
     if (activeSessionId === sessionId) {
@@ -1731,6 +1762,7 @@ async function sendPrompt(prompt: string) {
     refreshSidebar();
     runProjectPaths.delete(sessionId);
     runPrompts.delete(sessionId);
+    scheduleCompletionCueWhenIdle();
   }
 }
 
@@ -1739,6 +1771,8 @@ function handleAgentEvent(e: AgentEvent) {
   const isActive = !!sid && sid === activeSessionId;
   const owningSession = sid ? sessionForId(sid) : undefined;
   const smartStateChanged = owningSession ? applySmartAgentEvent(owningSession, e) : false;
+  if (e.kind === "start") cancelDoneWorkingCue();
+  if (sid && isVerifiedAgentCompletion(e)) verifiedRunCompletions.add(sid);
   if (smartStateChanged && isActive) syncSmartAgentPanel();
 
   // UI-only secure handoff. Inline chat form — never persist credentials to transcript.
@@ -1823,7 +1857,6 @@ function handleAgentEvent(e: AgentEvent) {
     // Background run end events: do NOT remove from runningSessions here.
     // sendPrompt's finally owns that set (avoids "already running" races).
     if (isTerminalAgentEvent(e)) {
-      if (isVerifiedAgentCompletion(e)) speakDoneWorking();
       updateGlobalRunStatus();
       refreshSidebar();
       void maybeOpenBuildPreview(sid, e.kind);
@@ -1884,7 +1917,6 @@ function handleAgentEvent(e: AgentEvent) {
     // await finishes. Early setRunning(false) / runningSessions.delete races
     // the next send (backend still in start_run → "already running").
     // chat.handleEvent already cleared pending + marked userCancelled.
-    if (isVerifiedAgentCompletion(e)) speakDoneWorking();
     updateGlobalRunStatus();
     syncUsageBar();
     refreshSidebar();

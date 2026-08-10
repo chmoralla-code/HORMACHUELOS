@@ -7,6 +7,8 @@
  *   npm run release -- 0.1.1 --notes "Bug fixes and improvements"
  *   npm run release -- 0.1.1 --notes-file notes.txt --force
  *   npm run release -- 0.1.1 --notes "..." --skip-build
+ *   npm run release -- 0.1.1 --notes "..." --skip-build --skip-upload \
+ *     --msi-url "https://github.com/.../installer.msi" --exe-url "https://github.com/.../setup.exe"
  *
  * Env (required for upload/publish):
  *   SUPABASE_ACCESS_TOKEN  — Supabase personal access token (preferred)
@@ -76,6 +78,8 @@ function parseArgs(argv) {
     skipBuild: false,
     skipUpload: false,
     skipPublish: false,
+    msiUrl: "",
+    exeUrl: "",
   };
   const args = [...argv];
   while (args.length) {
@@ -89,6 +93,8 @@ function parseArgs(argv) {
     else if (a === "--skip-build") out.skipBuild = true;
     else if (a === "--skip-upload") out.skipUpload = true;
     else if (a === "--skip-publish") out.skipPublish = true;
+    else if (a === "--msi-url") out.msiUrl = args.shift() || "";
+    else if (a === "--exe-url") out.exeUrl = args.shift() || "";
     else if (a === "--help" || a === "-h") {
       console.log(readFileSync(fileURLToPath(import.meta.url), "utf8").split("*/")[0].replace("/**", "").trim());
       process.exit(0);
@@ -386,8 +392,11 @@ async function main() {
   if (existsSync(paths.msi)) copyFileSync(paths.msi, join(downloadsDir, paths.msiName));
   if (existsSync(paths.exe)) copyFileSync(paths.exe, join(downloadsDir, paths.exeName));
 
-  const msiUrl = `${ASSET_PUBLIC}/downloads/${paths.msiName}`;
-  const exeUrl = `${ASSET_PUBLIC}/downloads/${paths.exeName}`;
+  // Explicit URLs support the verified GitHub Release mirror when Supabase
+  // upload credentials are unavailable. Checksums are still mandatory and
+  // verified by the update API before the release is announced.
+  const msiUrl = opts.msiUrl || `${ASSET_PUBLIC}/downloads/${paths.msiName}`;
+  const exeUrl = opts.exeUrl || `${ASSET_PUBLIC}/downloads/${paths.exeName}`;
 
   if (!opts.skipUpload) {
     const { url, service } = await resolveServiceKey();

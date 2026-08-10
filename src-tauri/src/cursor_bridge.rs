@@ -74,6 +74,13 @@ impl CursorTurnOutcome {
     }
 }
 
+fn is_verified_cursor_completion(
+    requires_project_completion: bool,
+    completion_marker_seen: bool,
+) -> bool {
+    requires_project_completion && completion_marker_seen
+}
+
 #[derive(Default)]
 struct CursorPassActivity {
     made_concrete_progress: bool,
@@ -552,7 +559,24 @@ pub async fn run_cursor_turn(
     let mut consecutive_stalled_recoveries: u8 = 0;
     let mut current_prompt = prompt.to_string();
     let mut current_agent_id = resume_agent_id;
-    let mut smart_agent = SmartAgentRun::new(smart_agent_enabled && requires_project_completion);
+    let smart_agent_active = smart_agent_enabled && requires_project_completion;
+    let mut smart_agent = SmartAgentRun::new(smart_agent_active);
+    let computer_use_active = computer_use_enabled && !crate::computer_use::is_paused();
+    emit(
+        &app,
+        session_id,
+        "start",
+        json!({
+            "prompt": prompt,
+            "provider": "OpenAI",
+            "model": model,
+            "permission_mode": permission_mode,
+            "permission_enforcement": cursor_permission_enforcement(permission_mode),
+            "host_approval_callbacks": computer_use_active,
+            "computer_use": computer_use_active,
+            "smart_agent_enabled": smart_agent_active,
+        }),
+    );
     smart_agent.emit_plan(&app, session_id);
 
     loop {
@@ -582,7 +606,10 @@ pub async fn run_cursor_turn(
             return Ok(current_agent_id);
         }
 
-        if outcome.completion_marker_seen {
+        if is_verified_cursor_completion(
+            requires_project_completion,
+            outcome.completion_marker_seen,
+        ) {
             if smart_agent.request_final_review(&app, session_id) {
                 continuation_pass = continuation_pass.saturating_add(1);
                 emit(
@@ -724,20 +751,6 @@ async fn run_cursor_attempt(
     };
     let computer_session_secret = computer_use_active.then(|| uuid::Uuid::new_v4().to_string());
 
-    emit(
-        &app,
-        session_id,
-        "start",
-        json!({
-            "prompt": prompt,
-            "provider": "OpenAI",
-            "model": model,
-            "permission_mode": permission_mode,
-            "permission_enforcement": cursor_permission_enforcement(permission_mode),
-            "host_approval_callbacks": computer_use_active,
-            "computer_use": computer_use_active,
-        }),
-    );
     emit(&app, session_id, "thinking", json!({ "iteration": 0 }));
 
     let bounded_history = bounded_cursor_history(history);
@@ -828,7 +841,10 @@ async fn run_cursor_attempt(
     });
 
     let mut agent_id_out: Option<String> = None;
-    let mut completion_marker_seen = !requires_project_completion;
+    // A regular chat turn has no completion marker. Initializing this to true
+    // made the outer runner report ordinary prose as a verified completed task,
+    // leaving its distinct no_tool_calls branch unreachable.
+    let mut completion_marker_seen = false;
     let mut saw_error: Option<String> = None;
     let mut activity = CursorPassActivity::default();
     let mut saw_bridge_event = false;
@@ -1055,6 +1071,14 @@ mod tests {
         assert_eq!(bounded.len(), CURSOR_HISTORY_MAX_TURNS);
         assert_eq!(bounded.first().unwrap().content, "turn-16");
         assert_eq!(bounded.last().unwrap().content, "turn-39");
+    }
+
+    #[test]
+    fn regular_cursor_reply_is_not_a_verified_project_completion() {
+        assert!(!is_verified_cursor_completion(false, false));
+        assert!(!is_verified_cursor_completion(false, true));
+        assert!(!is_verified_cursor_completion(true, false));
+        assert!(is_verified_cursor_completion(true, true));
     }
 
     #[test]
