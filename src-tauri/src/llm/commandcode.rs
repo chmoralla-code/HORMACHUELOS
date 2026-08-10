@@ -243,6 +243,9 @@ impl LlmProvider for CommandCode {
             .unwrap_or_else(|_| String::from("."));
         let body = json!({
             "config": build_config(&project_root),
+            // Command Code currently requires this field. Hormachuelos keeps
+            // its provider-neutral Flavour memory locally and injects only a
+            // bounded relevant digest through the primary system message.
             "memory": "",
             "params": {
                 "model": self.model,
@@ -269,6 +272,8 @@ impl LlmProvider for CommandCode {
                 .header("User-Agent", "cli")
                 .header("x-command-code-version", COMMAND_CODE_CLIENT_VERSION)
                 .header("x-cli-environment", "production")
+                // Avoid provider-side Taste learning and duplicate retention:
+                // Flavour stays local, inspectable, and consistent across all providers.
                 .header("x-taste-learning", "false")
                 .header("x-co-flag", "false")
                 .header("x-session-id", uuid::Uuid::new_v4().to_string())

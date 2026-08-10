@@ -21,6 +21,8 @@ export type Settings = {
   computer_use_enabled: boolean;
   /** Keep long build tasks on a durable plan and request a final verification pass. */
   smart_agent_enabled: boolean;
+  /** Recall bounded project preferences and private per-session working memory. */
+  flavour_enabled: boolean;
   /** Cursor SDK effort: light | medium | high | xhigh | ultra */
   model_effort?: string;
 };
@@ -306,6 +308,7 @@ export const api = {
     invoke("import_video_path", { path }),
   agentRun: (
     prompt: string,
+    userRequest: string,
     sessionId: string,
     history: Array<{
       role: string;
@@ -320,6 +323,7 @@ export const api = {
   ): Promise<string | null> =>
     invoke("agent_run", {
       prompt,
+      userRequest,
       sessionId,
       history,
       projectRoot,
@@ -426,7 +430,7 @@ export type IntegrationTestResult = {
 };
 
 export type AgentEventPayload =
-  | { kind: "start"; payload: { prompt: string; permission_mode?: string; smart_agent_enabled?: boolean } }
+  | { kind: "start"; payload: { prompt: string; permission_mode?: string; smart_agent_enabled?: boolean; flavour_enabled?: boolean } }
   | { kind: "task_plan"; payload: { title: string; summary: string; steps: { id: string; label: string; state: string }[]; active_step: number; status: string; detail?: string } }
   | { kind: "task_progress"; payload: { step: number; phase: string; status: string; detail: string; completed_before?: number; complete_all?: boolean } }
   | { kind: "thinking"; payload: { iteration: number } }

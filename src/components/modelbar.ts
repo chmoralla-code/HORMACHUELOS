@@ -885,6 +885,32 @@ export class ModelBar {
       },
     });
 
+    addItem(
+      `Flavour memory — ${this.settings.flavour_enabled !== false ? "On" : "Off"}`,
+      "spark",
+      {
+        title: "Recall bounded project preferences and private session working memory before, during, and after AI work",
+        active: this.settings.flavour_enabled !== false,
+        onClick: () => {
+          const enabled = this.settings.flavour_enabled === false;
+          this.settings.flavour_enabled = enabled;
+          this.closeMenus();
+          void api.saveSettings(this.settings)
+            .then(async () => {
+              this.settings = await api.getSettings();
+              this.normalizeMode();
+              this.renderProviderRail();
+              this.setStatus(`Flavour memory ${enabled ? "on" : "off"}`);
+              this.onChange();
+            })
+            .catch((error) => {
+              console.error("Failed to toggle Flavour memory", error);
+              this.setStatus("Could not change Flavour memory", true);
+            });
+        },
+      },
+    );
+
     menu.appendChild(el("div", { class: "chip-menu-sep", role: "separator" }));
 
     addItem("Image", "image", {

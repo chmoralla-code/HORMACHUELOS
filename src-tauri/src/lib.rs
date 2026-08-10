@@ -5,6 +5,7 @@ pub mod computer_use;
 pub mod config;
 pub mod cursor_bridge;
 pub mod design_source;
+pub mod flavour;
 pub mod integration_chat;
 pub mod integrations;
 pub mod license;
@@ -911,6 +912,7 @@ fn clear_project_files(state: tauri::State<'_, state::AppState>) -> Result<u64, 
 #[allow(clippy::too_many_arguments)]
 async fn agent_run(
     prompt: String,
+    user_request: Option<String>,
     session_id: String,
     history: Option<Vec<agent::HistoryTurn>>,
     project_root: Option<String>,
@@ -1006,6 +1008,7 @@ async fn agent_run(
         app_handle,
         project_root,
         prompt,
+        user_request.unwrap_or_default(),
         settings,
         session_id.clone(),
         run,

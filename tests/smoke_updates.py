@@ -22,6 +22,8 @@ def install_tauri_mock(page):
         "capability_mode": "thinking",
         "taglish": False,
         "computer_use_enabled": False,
+        "smart_agent_enabled": True,
+        "flavour_enabled": True,
         "model_effort": "high",
     }
     license_status = {
@@ -204,99 +206,25 @@ def main():
         assert page.locator("#changes-tab").get_attribute("aria-selected") == "true"
         assert page.locator("#changes-panel").is_visible()
 
-        settings_button = page.locator(".sb-action", has_text="Settings")
-        settings_button.click()
-        dialog = page.get_by_role("dialog", name="Settings")
-        dialog.wait_for(state="visible")
-        page.wait_for_timeout(50)
-        assert dialog.evaluate("dialog => dialog.contains(document.activeElement)")
+        # The legacy full Settings modal is intentionally hidden. Runtime
+        # controls live next to the composer, including the Flavour switch.
+        assert page.locator(".sb-action", has_text="Settings").count() == 0
+        add_button = page.get_by_role("button", name="Add modes and attachments")
+        add_button.click()
+        flavour_on = page.get_by_role("menuitem", name="Flavour memory — On")
+        flavour_on.wait_for(state="visible")
+        flavour_on.click()
+        page.wait_for_function("window.__testSettings.flavour_enabled === false")
+        assert page.evaluate("window.__savedSettingsHistory.at(-1).flavour_enabled") is False
 
-        provider_names = dialog.locator(".provider-card-name").all_inner_texts()
-        assert provider_names == [
-            "OpenAI",
-            "HORMACHUELOS FREE",
-            "Ollama",
-            "DeepSeek",
-            "OpenRouter",
-            "OpenCode",
-        ]
-        assert not any("Claude" in name for name in provider_names)
+        add_button.click()
+        flavour_off = page.get_by_role("menuitem", name="Flavour memory — Off")
+        flavour_off.wait_for(state="visible")
+        flavour_off.click()
+        page.wait_for_function("window.__testSettings.flavour_enabled === true")
 
-        model_label = dialog.locator("label", has_text="Model").first
-        model_select = dialog.locator(f"#{model_label.get_attribute('for')}")
-        assert model_select.input_value() == "grok-4.5"
-        assert "GPT 5.6 Sol" in model_select.locator("option:checked").inner_text()
-
-        base_label = dialog.locator("label", has_text="Base URL").first
-        base_input = dialog.locator(f"#{base_label.get_attribute('for')}")
-        base_input.fill("https://private-proxy.example/v1")
-        dialog.get_by_role("button", name="Ollama", exact=True).click()
-
-        active_label = dialog.locator("label", has_text="Active provider").first
-        active_select = dialog.locator(f"#{active_label.get_attribute('for')}")
-        assert active_select.input_value() == "ollama"
-        base_label = dialog.locator("label", has_text="Base URL").first
-        base_input = dialog.locator(f"#{base_label.get_attribute('for')}")
-        assert base_input.input_value() == "http://localhost:11434/v1"
-
-        custom_ollama_base = "http://192.168.1.44:11434/v1"
-        base_input.fill(custom_ollama_base)
-        dialog.get_by_role("button", name="Ollama", exact=True).click()
-        base_label = dialog.locator("label", has_text="Base URL").first
-        base_input = dialog.locator(f"#{base_label.get_attribute('for')}")
-        assert base_input.input_value() == custom_ollama_base
-
-        model_label = dialog.locator("label", has_text="Model").first
-        model_select = dialog.locator(f"#{model_label.get_attribute('for')}")
-        model_select.locator("option[value='deepseek-v4-flash']").wait_for(state="attached")
-        model_select.select_option("deepseek-v4-flash")
-        dialog.get_by_role("button", name="Save", exact=True).click()
-        dialog.wait_for(state="hidden")
-        selected = page.evaluate("({...window.__testSettings})")
-        assert selected["provider"] == "ollama"
-        assert selected["model"] == "deepseek-v4-flash"
-        assert selected["base_url"] == custom_ollama_base
-
-        settings_button.click()
-        dialog = page.get_by_role("dialog", name="Settings")
-        dialog.wait_for(state="visible")
-
-        computer_panel = dialog.locator(".computer-use-panel")
-        assert computer_panel.is_visible()
-        computer_status = computer_panel.locator(".computer-use-badge").inner_text()
-        assert "AVAILABLE" in computer_status.upper(), f"unexpected computer-use status: {computer_status}"
-        assert "Computer use is off" in computer_panel.inner_text()
-        assert "Ctrl+Alt+Esc" in computer_panel.inner_text()
-        computer_toggle = computer_panel.get_by_role("checkbox", name="Enable computer use")
-        assert computer_toggle.is_enabled()
-        assert not computer_toggle.is_checked()
-        computer_toggle.check()
-        assert "READY" in computer_panel.locator(".computer-use-badge").inner_text().upper()
-        assert "Full desktop control is enabled" in computer_panel.inner_text()
-        computer_toggle.uncheck()
-        assert "AVAILABLE" in computer_panel.locator(".computer-use-badge").inner_text().upper()
-
-        for label in dialog.locator("label[for]").all():
-            target_id = label.get_attribute("for")
-            assert target_id and dialog.locator(f"#{target_id}").count() == 1
-
-        inert_count = page.locator("#app > [inert]").count()
-        assert inert_count >= 2, "background content was not made inert"
-
-        save_button = dialog.get_by_role("button", name="Save", exact=True)
-        save_button.focus()
-        save_button.press("Tab")
-        assert page.locator(".modal-close").evaluate("node => node === document.activeElement")
-
-        computer_panel.scroll_into_view_if_needed()
-        page.wait_for_timeout(50)
         SCREENSHOT.parent.mkdir(parents=True, exist_ok=True)
         page.screenshot(path=str(SCREENSHOT), full_page=True)
-        page.keyboard.press("Escape")
-        assert dialog.count() == 0
-        page.wait_for_timeout(50)
-        assert settings_button.evaluate("node => node === document.activeElement")
-        assert page.locator("#app > [inert]").count() == 0
         assert not errors, "browser errors: " + " | ".join(errors)
         browser.close()
 

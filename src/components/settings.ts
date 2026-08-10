@@ -668,6 +668,7 @@ export function defaultSettings(): Settings {
     taglish: false,
     computer_use_enabled: false,
     smart_agent_enabled: true,
+    flavour_enabled: true,
     model_effort: "high",
   };
 }
@@ -708,6 +709,9 @@ export function normalizeSettings(s: Settings): Settings {
   // Missing on older desktop settings means enabled: Smart Agent is a safe,
   // provider-neutral orchestration layer and does not change credentials.
   s.smart_agent_enabled = s.smart_agent_enabled !== false;
+  // Flavour is local, provider-neutral memory. Missing on older settings means
+  // enabled so long-running and continuing sessions benefit after upgrading.
+  s.flavour_enabled = s.flavour_enabled !== false;
   s.model_effort = normalizeEffortForProvider(s.provider, s.model_effort);
   // Older builds pointed the OpenAI label at Cursor. Keep that path for a
   // genuine Cursor key; an explicit xAI endpoint uses the native xAI route.
@@ -1334,6 +1338,21 @@ export class SettingsModal {
     }));
     body.appendChild(el("div", { class: "set-hint", style: "margin-top:-6px;margin-bottom:12px" }, [
       "For build, fix, app, website, software, APK, and release work: keeps the same session moving and checks evidence before the AI says it is done. It never changes your selected provider, model, or API key.",
+    ]));
+
+    body.appendChild(this.field("Flavour memory", () => {
+      const wrap = el("label", { class: "set-check", style: "display:flex;align-items:center;gap:8px;cursor:pointer" });
+      const inp = el("input", { type: "checkbox" }) as HTMLInputElement;
+      inp.checked = this.settings.flavour_enabled !== false;
+      inp.addEventListener("change", () => {
+        this.settings.flavour_enabled = inp.checked;
+      });
+      wrap.appendChild(inp);
+      wrap.appendChild(document.createTextNode("Learn and recall project preferences throughout every AI run"));
+      return wrap;
+    }));
+    body.appendChild(el("div", { class: "set-hint", style: "margin-top:-6px;margin-bottom:12px" }, [
+      "Flavour recalls a small relevant digest before, during, and after work. Shareable preferences live in .hormachuelos/flavour.json; detailed working memory stays private per project and session. Credentials and full tool output are never saved.",
     ]));
 
     body.appendChild(this.field("Permission mode", () => {

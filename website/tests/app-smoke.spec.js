@@ -55,10 +55,14 @@ test("desktop shell loads critical regions", async ({ page }) => {
   const authGate = page.locator(".auth-gate-overlay");
   const authRequired = await authGate.isVisible().catch(() => false);
   if (authRequired) {
-    await expect(authGate).toContainText("Sign in to continue");
+    if (await authGate.evaluate((element) => element.classList.contains("update-required-overlay"))) {
+      await expect(authGate).toContainText("Update required");
+    } else {
+      await expect(authGate).toContainText("Sign in to continue");
+    }
     appFindings.push({
       severity: "info",
-      message: "Browser-only desktop smoke reached the expected sign-in gate",
+      message: "Browser-only desktop smoke reached the expected access gate",
     });
   }
 
@@ -119,7 +123,11 @@ test("empty chat / send without project prompts", async ({ page }) => {
   await page.waitForTimeout(1000);
   const authGate = page.locator(".auth-gate-overlay");
   if (await authGate.isVisible().catch(() => false)) {
-    await expect(authGate).toContainText("Sign in to continue");
+    if (await authGate.evaluate((element) => element.classList.contains("update-required-overlay"))) {
+      await expect(authGate).toContainText("Update required");
+    } else {
+      await expect(authGate).toContainText("Sign in to continue");
+    }
     await page.screenshot({ path: path.join(OUT, "11-app-auth-gate.png"), fullPage: true });
     return;
   }

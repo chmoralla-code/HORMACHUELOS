@@ -1482,6 +1482,7 @@ pub async fn run_loop(
     app: Arc<AppHandle>,
     project_root: String,
     prompt: String,
+    user_request: String,
     settings: Settings,
     session_id: String,
     run: Arc<SessionRun>,
@@ -1493,6 +1494,14 @@ pub async fn run_loop(
     let task_profile = AgentTaskProfile::from_wire(task_profile.as_deref());
     let cancel = run.cancel.clone();
     let known_integration_secrets = Arc::new(crate::integrations::loaded_tokens());
+    let user_request = integration_chat::redact_sensitive_text(
+        if user_request.trim().is_empty() {
+            &prompt
+        } else {
+            &user_request
+        },
+        known_integration_secrets.as_ref(),
+    );
     let mut prompt =
         integration_chat::redact_sensitive_text(&prompt, known_integration_secrets.as_ref());
     // A selected video is sampled into one chronological contact sheet by the
@@ -1583,6 +1592,14 @@ pub async fn run_loop(
         history = compact_fast_design_history(&history);
     }
 
+    let mut flavour = crate::flavour::FlavourRun::begin(
+        root,
+        &session_id,
+        &user_request,
+        settings.flavour_enabled,
+        known_integration_secrets.as_ref(),
+    );
+
     // Cursor Cloud API has no /chat/completions — use the local Cursor SDK agent.
     // Cursor model ids are served only by the local Cursor SDK. They are not
     // OpenAI-compatible ids and must never be forwarded to the hosted chat
@@ -1611,6 +1628,12 @@ pub async fn run_loop(
                     task_profile.is_fast_design_edit(),
                 );
                 let task_profile_policy = task_profile.instructions();
+                let flavour_context =
+                    flavour.context_block(if task_profile.is_fast_design_edit() {
+                        3_000
+                    } else {
+                        8_000
+                    });
                 let completion_contract = if requires_project_completion {
                     "\n\nAUTONOMOUS LONG-TASK CONTRACT:\n\
 - This is an implementation task. Keep using tools until the requested website, app, APK, software, or fix is actually complete and verified.\n\
@@ -1621,7 +1644,7 @@ pub async fn run_loop(
                     ""
                 };
                 let wrapped_prompt = format!(
-                    "{identity}\n\n{policy}{computer_policy}{completion_contract}{smart_agent_policy}{task_profile_policy}\n\n\
+                    "{identity}\n\n{policy}{computer_policy}{completion_contract}{smart_agent_policy}{task_profile_policy}\n\n{flavour_context}\n\n\
 IN-APP PREVIEW:\n\
 - Hormachuelos has a built-in Preview panel on the right. Do NOT open websites/games in Chrome or the system browser.\n\
 - After creating or updating HTML (index.html, game pages, etc.), call open_path on that HTML file so the in-app Preview opens.\n\
@@ -1633,15 +1656,16 @@ Current user request:\n{prompt}",
                     completion_contract = completion_contract,
                     smart_agent_policy = smart_agent_policy,
                     task_profile_policy = task_profile_policy,
+                    flavour_context = flavour_context,
                     prompt = prompt,
                 );
                 let resume_agent_id =
                     cursor_resume_id_for_task(cursor_resume_agent_id.clone(), task_profile);
                 let cursor_result = crate::cursor_bridge::run_cursor_turn(
-                    app,
+                    app.clone(),
                     &project_root,
                     &wrapped_prompt,
-                    &prompt,
+                    &user_request,
                     &key,
                     &settings.model,
                     &effort,
@@ -1655,8 +1679,13 @@ Current user request:\n{prompt}",
                     requires_project_completion,
                     smart_agent_enabled,
                     task_profile.wire_name(),
+                    &mut flavour,
                 )
                 .await;
+                match &cursor_result {
+                    Ok(_) => flavour.finish("finished", None, &[]),
+                    Err(error) => flavour.finish("error", Some(&error.to_string()), &[]),
+                }
                 // Fast Design turns use an isolated Cursor agent. Preserve the
                 // main conversation's durable id instead of replacing it with
                 // the disposable micro-edit agent.
@@ -1960,7 +1989,7 @@ BEHAVIOR:\n\
     } else {
         "15. Work efficiently: group independent local inspection calls (read_file, list_dir, glob, grep, git_status, file_info) in one tool response. The host may run that safe read-only batch together. Never assume results from one tool call while constructing another call in the same batch; keep writes, commands, browser actions, approvals, and computer actions ordered."
     };
-    let system = format!(
+    let system_base = format!(
         "You are Hormachuelos, an autonomous agent embedded in a desktop app with access to the user's computer. \
 You can answer questions, explain concepts, build websites, games, and apps, manage files, run programs, and perform system tasks. \
 The project root is: {root}\n\n\
@@ -2086,6 +2115,15 @@ Do not implement unless I explicitly ask. Mutating tools still need approval."
         )
     };
 
+    let flavour_context_budget = if task_profile.is_fast_design_edit() {
+        3_000
+    } else {
+        8_000
+    };
+    let system = format!(
+        "{system_base}\n\n{}",
+        flavour.context_block(flavour_context_budget)
+    );
     let mut messages: Vec<ChatMessage> = vec![ChatMessage::system(&system)];
 
     // Inject a bounded, protocol-safe summary of the recent session. This keeps
@@ -2127,9 +2165,18 @@ The tool entries are historical summaries; use fresh tools for the current works
             "prompt": prompt,
             "permission_mode": mode,
             "smart_agent_enabled": smart_agent_enabled,
+            "flavour_enabled": flavour.is_enabled(),
             "task_profile": task_profile.wire_name(),
         }),
     );
+    if flavour.is_enabled() {
+        emit(
+            &app,
+            &session_id,
+            "status",
+            json!({ "message": "Flavour · recalling project and session memory…" }),
+        );
+    }
     smart_agent.emit_plan(&app, &session_id);
     emit(
         &app,
@@ -2148,6 +2195,13 @@ The tool entries are historical summaries; use fresh tools for the current works
             return Ok(None);
         }
 
+        // Refresh Flavour in place instead of appending memory messages. This
+        // makes successful tools and failure clues available during long runs
+        // without growing the provider transcript on every iteration.
+        messages[0] = ChatMessage::system(&format!(
+            "{system_base}\n\n{}",
+            flavour.context_block(flavour_context_budget)
+        ));
         compact_active_run_messages(&mut messages, pinned_message_count);
 
         emit(
@@ -2652,6 +2706,16 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
         let parallel_batch_len = parallel_readonly_batch_len(&resp.tool_calls, &mode);
         let mut parallel_read_results = if parallel_batch_len > 0 {
             let parallel_calls = &resp.tool_calls[..parallel_batch_len];
+            for call in parallel_calls {
+                if flavour.record_tool_call(&call.id, &call.name, &call.arguments) {
+                    emit(
+                        &app,
+                        &session_id,
+                        "status",
+                        json!({ "message": "Flavour · updating working memory…" }),
+                    );
+                }
+            }
             if mode == "multi_agent" {
                 emit(
                     &app,
@@ -2740,6 +2804,16 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
                 }
             }
 
+            if tool_index >= parallel_batch_len
+                && flavour.record_tool_call(&tc.id, &tc.name, &tc.arguments)
+            {
+                emit(
+                    &app,
+                    &session_id,
+                    "status",
+                    json!({ "message": "Flavour · updating working memory…" }),
+                );
+            }
             smart_agent.on_tool_call(&app, &session_id, &tc.id, &tc.name, &tc.arguments);
             let public_arguments = public_tool_arguments(&tc.name, &tc.arguments);
             let args_str = serde_json::to_string_pretty(&public_arguments).unwrap_or_default();
@@ -2863,6 +2937,7 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
                     }
                     if !approved {
                         let denied = "User denied tool execution.".to_string();
+                        flavour.record_tool_result(&tc.id, &tc.name, &tc.arguments, false, &denied);
                         let (content_preview, content_truncated) = truncate_utf8(&denied, 8000);
                         let preview = if content_truncated {
                             format!("{content_preview}...(truncated)")
@@ -2958,6 +3033,7 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
                 if final_review_instruction.is_some() {
                     let deferred =
                         "Completion is deferred until the requested final verification pass finishes.";
+                    flavour.record_tool_result(&tc.id, &tc.name, &tc.arguments, true, deferred);
                     messages.push(ChatMessage::tool(&tc.id, &tc.name, deferred));
                     emit(
                         &app,
@@ -2975,6 +3051,13 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
                 if smart_agent.request_final_review(&app, &session_id) {
                     let review_message =
                         crate::smart_agent::SmartAgentRun::final_review_instruction();
+                    flavour.record_tool_result(
+                        &tc.id,
+                        &tc.name,
+                        &tc.arguments,
+                        true,
+                        "Host requested one final workspace verification pass before delivery.",
+                    );
                     messages.push(ChatMessage::tool(
                         &tc.id,
                         &tc.name,
@@ -3051,6 +3134,16 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
                     .unwrap_or_default();
                 messages.push(ChatMessage::tool(&tc.id, &tc.name, &content));
                 smart_agent.complete(&app, &session_id);
+                flavour.record_tool_result(&tc.id, &tc.name, &tc.arguments, true, &summary);
+                flavour.finish("completed", Some(&summary), &files);
+                if flavour.is_enabled() {
+                    emit(
+                        &app,
+                        &session_id,
+                        "status",
+                        json!({ "message": "Flavour · session memory refreshed" }),
+                    );
+                }
                 emit(
                     &app,
                     &session_id,
@@ -3087,6 +3180,7 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
                 content.clone()
             };
             smart_agent.on_tool_result(&app, &session_id, &tc.id, &tc.name, ok);
+            flavour.record_tool_result(&tc.id, &tc.name, &tc.arguments, ok, &content);
             // Flag streamed commands so UI can skip re-dumping full output
             let streamed = matches!(tc.name.as_str(), "run_command") || tc.name.starts_with("git_");
             emit(

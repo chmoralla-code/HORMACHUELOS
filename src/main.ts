@@ -1730,6 +1730,7 @@ async function sendPrompt(submission: ChatPromptSubmission) {
     const resumeAgentId = sessionForId(sessionId)?.cursorAgentId || null;
     const nextAgentId = await api.agentRun(
       agentPrompt,
+      prompt,
       sessionId,
       history,
       projectRoot,
