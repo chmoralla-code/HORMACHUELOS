@@ -1,4 +1,5 @@
 from pathlib import Path
+from time import perf_counter
 
 from playwright.sync_api import sync_playwright
 
@@ -26,7 +27,9 @@ def main() -> None:
             "openrouter",
         ], f"unexpected visible provider catalog: {providers}"
         assert body.get_attribute("data-cursor-models") == "grok-4.5,composer-2.5"
-        assert body.get_attribute("data-hormachuelos-free-models") == "hormachuelos-v1,hormachuelos-v2"
+        assert body.get_attribute("data-hormachuelos-free-models") == (
+            "hormachuelos-v1,hormachuelos-v2,hormachuelos-v3,hormachuelos-v4"
+        )
         assert body.get_attribute("data-tool-animation") == "lightningToolSpawnBlue"
         assert body.get_attribute("data-agentic-animation") == "lightningFadeInOutBlue"
         assert body.get_attribute("data-agentic-color") == "rgb(85, 185, 255)"
@@ -67,6 +70,23 @@ def main() -> None:
         frame.locator("#target").click()
         assert page.locator("#site-preview-edit-tag").inner_text() == "button"
         assert page.locator(".site-preview-editbar").is_visible()
+
+        # A selected micro-edit must be packaged locally in under a second and
+        # dispatched with the isolated fast profile, even when the parent chat
+        # may be a long-running session.
+        design_input = page.get_by_role("textbox", name="Describe the change")
+        design_input.fill("Use the primary color.")
+        dispatch_started = perf_counter()
+        page.get_by_role("button", name="Ask AI", exact=True).click()
+        page.wait_for_function("() => window.__previewPromptDispatches?.length === 1")
+        design_dispatch_ms = (perf_counter() - dispatch_started) * 1000
+        dispatch = page.evaluate("() => window.__previewPromptDispatches[0]")
+        assert design_dispatch_ms < 1000, design_dispatch_ms
+        assert dispatch["taskProfile"] == "design_edit_fast", dispatch
+        assert "DOM selector: #target" in dispatch["prompt"], dispatch["prompt"]
+        assert "Ranked source candidates (open these first): index.html" in dispatch["prompt"]
+        assert len(dispatch["prompt"]) < 5000, len(dispatch["prompt"])
+        assert "Fast Design edit" in page.locator(".site-preview-status").inner_text()
 
         software.click()
         assert software.get_attribute("aria-pressed") == "true"
@@ -160,7 +180,10 @@ def main() -> None:
         preview.wait_for(state="hidden")
         browser.close()
 
-    print(f"Preview mode checks passed; screenshot: {SCREENSHOT}")
+    print(
+        f"Preview mode checks passed; Design dispatch {design_dispatch_ms:.1f} ms; "
+        f"screenshot: {SCREENSHOT}"
+    )
 
 
 if __name__ == "__main__":

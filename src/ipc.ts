@@ -25,6 +25,12 @@ export type Settings = {
   model_effort?: string;
 };
 
+/** Host-side execution profile selected by an in-app surface. */
+export type AgentTaskProfile =
+  | "default"
+  | "design_edit"
+  | "design_edit_fast";
+
 export type Provider = "deepseek" | "openrouter" | "glm" | "openai" | "cursor" | "hormachuelos_free" | "anthropic" | "gemini" | "ollama" | "pollinations";
 
 export type ConnectionTestResult = {
@@ -219,6 +225,7 @@ export const api = {
     }> = [],
     projectRoot?: string,
     cursorAgentId?: string | null,
+    taskProfile: AgentTaskProfile = "default",
   ): Promise<string | null> =>
     invoke("agent_run", {
       prompt,
@@ -226,6 +233,7 @@ export const api = {
       history,
       projectRoot,
       cursorAgentId: cursorAgentId ?? null,
+      taskProfile,
     }),
   agentStop: (sessionId: string): Promise<void> => invoke("agent_stop", { sessionId }),
   openProjectInExplorer: (relativePath: string | null = null): Promise<void> =>

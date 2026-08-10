@@ -13,6 +13,7 @@
       #app { display: block; }
       .workbench { grid-template-columns: minmax(0, 1fr) minmax(520px, 52vw); }
       .test-stage { min-width: 0; background: #111; }
+      #chat-queue-probe { display: none; }
     </style>
   </head>
   <body>
@@ -23,13 +24,24 @@
     </script>
     <div id="app">
       <div class="workbench">
-        <main class="test-stage"></main>
+        <main class="test-stage">
+          <div id="chat-queue-probe">
+            <div id="chat"></div>
+            <div id="forge-dock"></div>
+          </div>
+        </main>
         <aside id="preview-test-host"></aside>
       </div>
     </div>
     <script type="module">
       import { api } from "./ipc.ts";
-      import { SitePreview, mergePreviewSessionState } from "./components/site-preview.ts";
+      import { Chat } from "./components/chat.ts";
+      import {
+        SitePreview,
+        designTaskProfile,
+        mergePreviewSessionState,
+        rankDesignSourceCandidates,
+      } from "./components/site-preview.ts";
       import { getProviderMeta, visibleProviders } from "./components/settings.ts";
 
       api.readProjectFile = async (relativePath) => ({
@@ -77,10 +89,27 @@
       const preview = new SitePreview(document.getElementById("preview-test-host"));
       window.__preview = preview;
       window.__previewPrompts = [];
-      preview.setDescribeHandler((prompt) => {
+      window.__previewPromptDispatches = [];
+      window.__designTaskProfile = designTaskProfile;
+      window.__rankDesignSourceCandidates = rankDesignSourceCandidates;
+      preview.setDescribeHandler((prompt, imagePath, taskProfile) => {
         window.__previewPrompts.push(prompt);
+        window.__previewPromptDispatches.push({ prompt, imagePath, taskProfile });
         return "sent";
       });
+      window.__chatQueueSends = [];
+      const chatQueueProbe = new Chat({
+        onSend: (prompt, taskProfile) => window.__chatQueueSends.push({ prompt, taskProfile }),
+        onStop: () => {},
+        onNeedProject: () => {},
+        onOpenProject: () => {},
+        onNewProject: () => {},
+        onRevealProject: () => {},
+        onOpenSettings: () => {},
+        getSessionId: () => "preview-queue-probe",
+      });
+      chatQueueProbe.setProjectReady(true);
+      window.__chatQueueProbe = chatQueueProbe;
       window.__mergePreviewSessionState = mergePreviewSessionState;
       document.body.dataset.providers = visibleProviders().map((provider) => provider.id).join(",");
       document.body.dataset.cursorModels = getProviderMeta("cursor")?.models.join(",") || "";
@@ -116,6 +145,9 @@
           "assets/import.css",
           "assets/style-block.png",
           "assets/style-attribute.png",
+          "src/pages/dashboard.tsx",
+          "app/pages/incident-reports/page.tsx",
+          "src/components/IncidentReportTable.tsx",
         ],
         title: "Mode test",
       });

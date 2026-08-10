@@ -3008,9 +3008,8 @@ pub fn execute(
                 .ok_or_else(|| anyhow::anyhow!("missing new_string"))?;
             let full = resolve_path(root, p)?;
             let src = std::fs::read_to_string(&full)?;
-            let out = apply_edit_file(&src, old, new).map_err(|detail| {
-                anyhow::anyhow!("old_string edit failed in {p}: {detail}")
-            })?;
+            let out = apply_edit_file(&src, old, new)
+                .map_err(|detail| anyhow::anyhow!("old_string edit failed in {p}: {detail}"))?;
             std::fs::write(&full, out)?;
             Ok(format!("Edited {p}"))
         }
@@ -4463,8 +4462,7 @@ mod edit_file_tests {
 
     impl TempProject {
         fn new() -> Self {
-            let root =
-                std::env::temp_dir().join(format!("ai-forge-edit-{}", uuid::Uuid::new_v4()));
+            let root = std::env::temp_dir().join(format!("ai-forge-edit-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&root).unwrap();
             Self { root }
         }

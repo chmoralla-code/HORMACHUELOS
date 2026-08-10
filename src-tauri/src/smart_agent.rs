@@ -71,24 +71,30 @@ impl Phase {
 #[derive(Debug)]
 pub struct SmartAgentRun {
     enabled: bool,
+    fast_design_edit: bool,
     phase: Phase,
     final_review_requested: bool,
     saw_validation: bool,
     saw_debug: bool,
+    saw_successful_change: bool,
     validation_tool_ids: HashSet<String>,
     debug_tool_ids: HashSet<String>,
+    change_tool_ids: HashSet<String>,
 }
 
 impl SmartAgentRun {
-    pub fn new(enabled: bool) -> Self {
+    pub fn new(enabled: bool, fast_design_edit: bool) -> Self {
         Self {
             enabled,
+            fast_design_edit,
             phase: Phase::Scope,
             final_review_requested: false,
             saw_validation: false,
             saw_debug: false,
+            saw_successful_change: false,
             validation_tool_ids: HashSet::new(),
             debug_tool_ids: HashSet::new(),
+            change_tool_ids: HashSet::new(),
         }
     }
 
@@ -98,9 +104,15 @@ impl SmartAgentRun {
 
     /// Provider-facing instruction that makes the reasoning process more
     /// deliberate without asking the model to expose private chain-of-thought.
-    pub fn system_instructions(enabled: bool) -> &'static str {
+    pub fn system_instructions(enabled: bool, fast_design_edit: bool) -> &'static str {
         if !enabled {
             return "";
+        }
+        if fast_design_edit {
+            return "\nFAST DESIGN EDIT LEDGER:\n\
+- Treat this as one short, selected-target change: locate from the supplied source hints, apply the smallest coherent patch, and run only the cheapest relevant check.\n\
+- Do not turn the edit into a broad audit or a multi-stage redesign. Expand discovery once only when the supplied target hint is wrong.\n\
+- After a successful focused check (or a targeted source re-read when no quick validator exists), call done immediately with a concise result.\n";
         }
         "\nSMART AGENT EXECUTION LEDGER:\n\
 - Treat this as one durable task: understand scope, inspect the current workspace, implement focused changes, validate the result, debug any failures or runtime issues, then deliver.\n\
@@ -130,8 +142,12 @@ impl SmartAgentRun {
             session_id,
             "task_plan",
             json!({
-                "title": "Smart Agent",
-                "summary": "Keeping this task focused, verified, and moving without manual continue prompts.",
+                "title": if self.fast_design_edit { "Fast Design Edit" } else { "Smart Agent" },
+                "summary": if self.fast_design_edit {
+                    "Locating the selected feature, applying a minimal patch, and checking only that result."
+                } else {
+                    "Keeping this task focused, verified, and moving without manual continue prompts."
+                },
                 "steps": steps,
                 "active_step": 0,
                 "status": "working",
@@ -217,6 +233,9 @@ impl SmartAgentRun {
             "write_file" | "edit_file" | "make_dir" | "move_file" | "copy_file"
             | "download_file" | "git_init" | "apply_patch" | "create_file" | "delete_file"
             | "rename_file" => {
+                if !tool_id.trim().is_empty() {
+                    self.change_tool_ids.insert(tool_id.to_string());
+                }
                 if self.phase >= Phase::Validate {
                     // Fixing issues found during Check stays in Debug, but the
                     // previous Check no longer covers this new workspace state.
@@ -257,6 +276,9 @@ impl SmartAgentRun {
                         );
                     }
                 } else {
+                    if is_mutating_command(command) && !tool_id.trim().is_empty() {
+                        self.change_tool_ids.insert(tool_id.to_string());
+                    }
                     self.begin_implementation(
                         app,
                         session_id,
@@ -326,6 +348,10 @@ impl SmartAgentRun {
         if !self.enabled {
             return;
         }
+        let was_change = self.change_tool_ids.remove(tool_id);
+        if was_change && ok {
+            self.saw_successful_change = true;
+        }
         let was_validation = self.validation_tool_ids.remove(tool_id);
         let was_debug = self.debug_tool_ids.remove(tool_id);
         if was_validation {
@@ -371,7 +397,10 @@ impl SmartAgentRun {
     /// after edits but before testing. It is deliberately bounded so a weak
     /// provider cannot be trapped in an endless self-review loop.
     pub fn needs_final_review(&self) -> bool {
-        self.enabled && !self.final_review_requested && !self.saw_validation
+        self.enabled
+            && !self.final_review_requested
+            && !self.saw_validation
+            && (!self.fast_design_edit || !self.saw_successful_change)
     }
 
     pub fn request_final_review(&mut self, app: &AppHandle, session_id: &str) -> bool {
@@ -492,6 +521,28 @@ fn is_debug_command(command: &str) -> bool {
     .any(|needle| command.contains(needle))
 }
 
+fn is_mutating_command(command: &str) -> bool {
+    let command = command.to_ascii_lowercase();
+    [
+        "set-content",
+        "add-content",
+        "out-file",
+        "tee-object",
+        "new-item",
+        "copy-item",
+        "move-item",
+        "remove-item",
+        "apply_patch",
+        "npm install",
+        "pnpm add",
+        "yarn add",
+        "bun add",
+        "cargo add",
+    ]
+    .iter()
+    .any(|needle| command.contains(needle))
+}
+
 fn is_command_tool(name: &str) -> bool {
     let name = name.trim().to_ascii_lowercase();
     matches!(
@@ -511,7 +562,7 @@ mod tests {
 
     #[test]
     fn final_review_is_requested_without_validation() {
-        let run = SmartAgentRun::new(true);
+        let run = SmartAgentRun::new(true, false);
         assert!(run.needs_final_review());
     }
 
@@ -535,15 +586,44 @@ mod tests {
     }
 
     #[test]
+    fn mutating_commands_are_distinct_from_read_only_inspection() {
+        assert!(is_mutating_command(
+            "Set-Content -Path src/app.css -Value $css"
+        ));
+        assert!(is_mutating_command("npm install lucide-react"));
+        assert!(!is_mutating_command("rg -n status src"));
+        assert!(!is_mutating_command("Get-Content src/app.css"));
+    }
+
+    #[test]
     fn disabled_smart_agent_never_requests_review() {
-        let run = SmartAgentRun::new(false);
+        let run = SmartAgentRun::new(false, false);
         assert!(!run.needs_final_review());
         assert!(!run.is_enabled());
     }
 
     #[test]
+    fn successful_fast_design_change_skips_a_second_model_review() {
+        let mut fast = SmartAgentRun::new(true, true);
+        fast.saw_successful_change = true;
+        assert!(!fast.needs_final_review());
+
+        let mut regular = SmartAgentRun::new(true, false);
+        regular.saw_successful_change = true;
+        assert!(regular.needs_final_review());
+    }
+
+    #[test]
+    fn fast_design_instructions_stay_targeted() {
+        let instructions = SmartAgentRun::system_instructions(true, true);
+        assert!(instructions.contains("one short, selected-target change"));
+        assert!(instructions.contains("call done immediately"));
+        assert!(!instructions.contains("actively debug failures"));
+    }
+
+    #[test]
     fn later_changes_invalidate_an_earlier_successful_check() {
-        let mut run = SmartAgentRun::new(true);
+        let mut run = SmartAgentRun::new(true, false);
         run.phase = Phase::Validate;
         run.saw_validation = true;
         run.validation_tool_ids.insert("previous-check".into());
@@ -560,7 +640,7 @@ mod tests {
 
     #[test]
     fn successful_validation_advances_into_debug() {
-        let mut run = SmartAgentRun::new(true);
+        let mut run = SmartAgentRun::new(true, false);
         run.phase = Phase::Validate;
         run.validation_tool_ids.insert("check-1".into());
         // AppHandle is unavailable in unit tests; only assert ledger fields.

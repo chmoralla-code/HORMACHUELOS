@@ -119,6 +119,7 @@ async function installHormachuelosLongRunMock(page, { lifecycleScenario = false 
 
     window.__HORMA_LONG_RUNS__ = 0;
     window.__HORMA_LONG_EVENTS__ = [];
+    window.__HORMA_AGENT_RUN_ARGS__ = [];
     window.__HORMA_LIFECYCLE__ = {
       firstTerminal: false,
       secondPreview: false,
@@ -338,6 +339,7 @@ async function installHormachuelosLongRunMock(page, { lifecycleScenario = false 
           case "read_project_file":
             return { path: args.relativePath, content: "// simulated\n", size: 13, language: "ts" };
           case "agent_run":
+            window.__HORMA_AGENT_RUN_ARGS__.push({ ...args });
             await simulateLongTask(args.prompt, args.sessionId);
             return null;
           case "agent_stop":
@@ -408,6 +410,8 @@ test("long HORMACHUELOS task recovers without a manual Continue message", async 
   await expect(smartAgentStatus).toContainText("Check");
 
   await expect.poll(() => page.evaluate(() => window.__HORMA_LONG_RUNS__)).toBe(1);
+  const runArgs = await page.evaluate(() => window.__HORMA_AGENT_RUN_ARGS__);
+  expect(runArgs[0].taskProfile).toBe("default");
   const trace = await page.evaluate(() => window.__HORMA_LONG_EVENTS__);
   expect(trace.filter((event) => event === "tool_call").length).toBeGreaterThanOrEqual(15);
   // More recoveries than the former global 12-pass safeguard, each after a

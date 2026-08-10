@@ -1,4 +1,4 @@
-import { api, type AgentEvent, type ComputerUseFxEvent } from "../ipc";
+import { api, type AgentEvent, type AgentTaskProfile, type ComputerUseFxEvent } from "../ipc";
 import { privateTypingStatus } from "./computer-use-hud";
 import { icon } from "./icons";
 import {
@@ -56,7 +56,12 @@ export class Chat {
   /** True while force-finishing live tool rows so we don't spawn idle Thinking… */
   private sealingTools = false;
   /** Messages queued while the agent is still working on the current run. */
-  private pendingQueue: { id: string; text: string; el: HTMLElement }[] = [];
+  private pendingQueue: {
+    id: string;
+    text: string;
+    taskProfile: AgentTaskProfile;
+    el: HTMLElement;
+  }[] = [];
   private drainingPending = false;
   toolCards = new Map<string, ToolCardEl>();
   /** Tools that have started; cards appear immediately and update on result. */
@@ -72,7 +77,7 @@ export class Chat {
   thinking: HTMLElement | null = null;
   thinkingBody: HTMLElement | null = null;
   thinkingText: string = "";
-  onSend: (prompt: string) => void;
+  onSend: (prompt: string, taskProfile?: AgentTaskProfile) => void;
   onStop: () => void;
   onNeedProject: () => void;
   /** Open an existing project folder (change AI work directory). */
@@ -157,7 +162,7 @@ export class Chat {
   private multiAgentToolIds = new Set<string>();
 
   constructor(handlers: {
-    onSend: (p: string) => void;
+    onSend: (p: string, taskProfile?: AgentTaskProfile) => void;
     onStop: () => void;
     onNeedProject: () => void;
     onOpenProject: () => void;
@@ -1245,7 +1250,11 @@ export class Chat {
    * Optional `imagePath` is attached like a pasted screenshot so vision models
    * (and auto-describe) can see the clicked preview control.
    */
-  submitPreviewPrompt(prompt: string, imagePath?: string | null): ComposerPromptDispatch {
+  submitPreviewPrompt(
+    prompt: string,
+    imagePath?: string | null,
+    taskProfile: AgentTaskProfile = "default",
+  ): ComposerPromptDispatch {
     const trimmedImage = String(imagePath || "").trim();
     const body = prompt.trim();
     const text = trimmedImage
@@ -1257,15 +1266,15 @@ export class Chat {
       return "needs_project";
     }
     if (this.usageExhausted) {
-      this.onSend(text);
+      this.onSend(text, taskProfile);
       return "usage_exhausted";
     }
     if (this.stopping || this.userCancelled) return "stopping";
     if (this.running || this.drainingPending) {
-      this.enqueuePending(text);
+      this.enqueuePending(text, taskProfile);
       return "queued";
     }
-    this.onSend(text);
+    this.onSend(text, taskProfile);
     return "sent";
   }
 
@@ -1325,13 +1334,13 @@ export class Chat {
   }
 
   /** Queue a message as a small chip above the chat box until the current run finishes. */
-  private enqueuePending(text: string) {
+  private enqueuePending(text: string, taskProfile: AgentTaskProfile = "default") {
     const id =
       typeof crypto !== "undefined" && "randomUUID" in crypto
         ? crypto.randomUUID()
         : `p-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const el = this.appendPendingChip(text, id);
-    this.pendingQueue.push({ id, text, el });
+    this.pendingQueue.push({ id, text, taskProfile, el });
     this.syncPendingRail();
     this.refreshPlaceholder();
   }
@@ -1418,7 +1427,7 @@ export class Chat {
     this.syncPendingRail();
     this.refreshPlaceholder();
     try {
-      this.onSend(next.text);
+      this.onSend(next.text, next.taskProfile);
     } finally {
       // onSend sets running=true; clear drain flag so further queues work mid-run
       this.drainingPending = false;
