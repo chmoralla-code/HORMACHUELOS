@@ -606,7 +606,7 @@ pub fn clear_website_session() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_custom_hosted_provider_alias, is_hormachuelos_model_alias,
+        capability_for_mode, is_custom_hosted_provider_alias, is_hormachuelos_model_alias,
         should_migrate_cursor_grok_to_xai, validate_provider_id, Settings, XAI_API_BASE_URL,
     };
 
