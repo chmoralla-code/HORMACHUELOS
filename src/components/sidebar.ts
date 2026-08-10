@@ -53,6 +53,8 @@ export class Sidebar {
   onNewProject: () => void;
   onOpenProject: () => void;
   onSelectProject: (path: string) => void;
+  /** Forget a remembered project; this never deletes its folder or files. */
+  onRemoveProject: (path: string) => void;
   onAddAnotherProject: () => void;
   /** Open Hormachuelos' app-managed workspace (no folder picker required). */
   onOpenQuickSessions: () => void;
@@ -101,6 +103,7 @@ export class Sidebar {
     onNewProject: () => void;
     onOpenProject: () => void;
     onSelectProject: (path: string) => void;
+    onRemoveProject: (path: string) => void;
     onAddAnotherProject: () => void;
     onOpenQuickSessions: () => void;
     onOpenSettings: () => void;
@@ -118,6 +121,7 @@ export class Sidebar {
     this.onNewProject = handlers.onNewProject;
     this.onOpenProject = handlers.onOpenProject;
     this.onSelectProject = handlers.onSelectProject;
+    this.onRemoveProject = handlers.onRemoveProject;
     this.onAddAnotherProject = handlers.onAddAnotherProject;
     this.onOpenQuickSessions = handlers.onOpenQuickSessions;
     this.onOpenSettings = handlers.onOpenSettings;
@@ -557,6 +561,11 @@ export class Sidebar {
 
     const list = el("div", { class: "sb-projects-list", role: "list", "aria-label": "Open projects" });
     if (this.quickSessionWorkspacePath) {
+      const quickRow = el("div", {
+        class: "sb-project-row is-quick",
+        role: "listitem",
+      });
+      quickRow.dataset.searchText = normalizeSidebarSearch(`Quick sessions ${this.quickSessionWorkspacePath}`);
       const quick = el(
         "button",
         {
@@ -568,14 +577,14 @@ export class Sidebar {
           "aria-current": this.quickSessionsActive ? "page" : "false",
         },
       ) as HTMLButtonElement;
-      quick.dataset.searchText = normalizeSidebarSearch(`Quick sessions ${this.quickSessionWorkspacePath}`);
       quick.appendChild(el("span", { class: "sb-project-mark", "aria-hidden": "true" }, ["Q"]));
       const copy = el("span", { class: "sb-project-copy" });
       copy.appendChild(el("strong", {}, ["Quick sessions"]));
       copy.appendChild(el("span", {}, [this.quickSessionsActive ? "No folder needed" : "App-managed workspace"]));
       quick.appendChild(copy);
       quick.addEventListener("click", () => this.onOpenQuickSessions());
-      list.appendChild(quick);
+      quickRow.appendChild(quick);
+      list.appendChild(quickRow);
     }
     if (this.projectWorkspaces.length === 0 && !this.quickSessionWorkspacePath) {
       list.appendChild(el("div", { class: "sb-project-empty" }, ["Create or open a project to keep it here."]));
@@ -585,6 +594,11 @@ export class Sidebar {
         const key = workspace.path.replace(/[\\/]+$/, "").toLocaleLowerCase();
         const active = key === activeKey;
         const running = this.runningProjectPaths.has(key);
+        const row = el("div", {
+          class: `sb-project-row${active ? " active" : ""}${running ? " running" : ""}`,
+          role: "listitem",
+        });
+        row.dataset.searchText = normalizeSidebarSearch(`${workspace.name} ${workspace.path}`);
         const item = el(
           "button",
           {
@@ -592,10 +606,8 @@ export class Sidebar {
             type: "button",
             title: `${workspace.path}${running ? "\nAgent run in progress" : ""}`,
             "aria-current": active ? "page" : "false",
-            role: "listitem",
           },
         ) as HTMLButtonElement;
-        item.dataset.searchText = normalizeSidebarSearch(`${workspace.name} ${workspace.path}`);
         item.appendChild(el("span", { class: "sb-project-mark", "aria-hidden": "true" }, [(workspace.name[0] || "P").toUpperCase()]));
         const copy = el("span", { class: "sb-project-copy" });
         copy.appendChild(el("strong", {}, [workspace.name]));
@@ -603,7 +615,27 @@ export class Sidebar {
         item.appendChild(copy);
         if (running) item.appendChild(el("span", { class: "sb-project-live", title: "Agent run in progress" }, ["●"]));
         item.addEventListener("click", () => this.onSelectProject(workspace.path));
-        list.appendChild(item);
+        const remove = el("button", {
+          class: "sb-project-remove",
+          type: "button",
+          title: running
+            ? `Stop the active agent before removing ${workspace.name}`
+            : `Remove ${workspace.name} from Projects (files stay on disk)`,
+          "aria-label": `Remove ${workspace.name} from Projects`,
+          "aria-disabled": String(running),
+          html: icon("close", 12),
+        }) as HTMLButtonElement;
+        remove.addEventListener("click", (event) => {
+          event.stopPropagation();
+          if (running) {
+            this.onRemoveProject(workspace.path);
+            return;
+          }
+          this.confirmProjectRemoval(workspace);
+        });
+        row.appendChild(item);
+        row.appendChild(remove);
+        list.appendChild(row);
       }
     }
     const noResults = el("div", { class: "sb-list-no-results" }, ["No matching projects."]);
@@ -615,7 +647,7 @@ export class Sidebar {
     const applyProjectFilter = () => {
       this.projectSearchQuery = searchInput.value;
       const query = normalizeSidebarSearch(this.projectSearchQuery);
-      const rows = Array.from(list.querySelectorAll<HTMLElement>(".sb-project-workspace"));
+      const rows = Array.from(list.querySelectorAll<HTMLElement>(".sb-project-row"));
       let matches = 0;
       for (const row of rows) {
         const visible = !query || String(row.dataset.searchText || "").includes(query);
@@ -684,6 +716,81 @@ export class Sidebar {
     });
     applyProjectFilter();
     return section;
+  }
+
+  private confirmProjectRemoval(workspace: ProjectWorkspace) {
+    const root = document.getElementById("modal-root");
+    const fallbackMessage = `Remove ${workspace.name} from the Projects list? Its folder, files, Git history, and saved sessions will stay on this computer.`;
+    if (!root) {
+      if (window.confirm(fallbackMessage)) this.onRemoveProject(workspace.path);
+      return;
+    }
+
+    clear(root);
+    const overlay = el("div", { class: "modal-overlay" });
+    const modal = el("div", {
+      class: "modal confirm-modal project-remove-modal",
+      role: "dialog",
+      "aria-modal": "true",
+      "aria-labelledby": "remove-project-title",
+      "aria-describedby": "remove-project-description",
+    });
+
+    const head = el("div", { class: "modal-head" });
+    head.appendChild(el("div", { class: "modal-title", id: "remove-project-title" }, [`Remove ${workspace.name}?`]));
+    const closeButton = el("button", {
+      class: "modal-close",
+      type: "button",
+      "aria-label": "Cancel project removal",
+      html: icon("close", 16),
+    }) as HTMLButtonElement;
+    head.appendChild(closeButton);
+    modal.appendChild(head);
+
+    const body = el("div", { class: "modal-body" });
+    body.appendChild(el("p", {
+      class: "confirm-modal-desc",
+      id: "remove-project-description",
+    }, ["This removes the shortcut from Hormachuelos so the Projects list stays focused."]));
+    const safeNote = el("div", { class: "project-remove-safe-note" });
+    safeNote.appendChild(el("span", { class: "project-remove-safe-icon", html: icon("folder", 15) }));
+    const safeCopy = el("div", { class: "project-remove-safe-copy" });
+    safeCopy.appendChild(el("strong", {}, ["Your project stays on this computer"]));
+    safeCopy.appendChild(el("span", {}, ["Files, Git history, and saved sessions are not deleted."]));
+    safeNote.appendChild(safeCopy);
+    body.appendChild(safeNote);
+    body.appendChild(el("code", { class: "project-remove-path", title: workspace.path }, [workspace.path]));
+    modal.appendChild(body);
+
+    const foot = el("div", { class: "modal-foot" });
+    const cancelButton = el("button", { class: "btn", type: "button" }, ["Keep project"]) as HTMLButtonElement;
+    const removeButton = el("button", { class: "btn danger", type: "button" }, ["Remove from list"]) as HTMLButtonElement;
+    foot.appendChild(cancelButton);
+    foot.appendChild(removeButton);
+    modal.appendChild(foot);
+
+    const close = () => {
+      document.removeEventListener("keydown", onKeyDown);
+      clear(root);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      close();
+    };
+    closeButton.addEventListener("click", close);
+    cancelButton.addEventListener("click", close);
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) close();
+    });
+    removeButton.addEventListener("click", () => {
+      close();
+      this.onRemoveProject(workspace.path);
+    });
+    document.addEventListener("keydown", onKeyDown);
+    overlay.appendChild(modal);
+    root.appendChild(overlay);
+    cancelButton.focus();
   }
 
   /**

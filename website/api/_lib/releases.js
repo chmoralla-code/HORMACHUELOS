@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.66";
-const BUILTIN_MSI_SHA256 = "1196ae59790dd64c3d097688e686fd84625f5bd5e54ce244ab513a690e9edf74";
-const BUILTIN_EXE_SHA256 = "af9a4470958ce7c382496c83150076a0834d7f95bed414820517e8e2b82eff51";
-const BUILTIN_RELEASE_NOTES = "Cleaner sidebar navigation: Projects and Sessions now have instant search, live result feedback, compact item counts, keyboard-friendly dismissal, and independent collapse controls remembered across restarts.";
+const BUILTIN_RELEASE_VERSION = "0.1.67";
+const BUILTIN_MSI_SHA256 = "d9c3ac278f05c2ac83519666653bbe8d81d7e8a8c6b45dc01a64f902db362853";
+const BUILTIN_EXE_SHA256 = "87a8e7519d2b5e0dcd1b9388ae85ab31dd0a1687272523b36fee3acd11b736b4";
+const BUILTIN_RELEASE_NOTES = "Project list cleanup: remove any remembered project with a focused row action and clear confirmation. Removing a project only forgets its shortcut—its folder, files, Git history, and saved sessions stay untouched. Active projects switch safely, running-agent projects are protected, and removals persist after restart.";
 
 const BUILTIN_FORCE_UPDATE = true;
 const GITHUB_RELEASES_BASE = "https://github.com/chmoralla-code/HORMACHUELOS/releases/download";

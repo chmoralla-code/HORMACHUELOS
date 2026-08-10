@@ -1,4 +1,4 @@
-"""Smoke-test the sidebar search/disclosure UX against the local Vite harness."""
+"""Smoke-test sidebar search, removal, and disclosure UX in the Vite harness."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ def main() -> None:
     parser.add_argument("--url", default="http://127.0.0.1:1420/update-harness.html")
     parser.add_argument(
         "--screenshot",
-        default="website/test-results/sidebar-search-collapse.png",
+        default="website/test-results/sidebar-project-removal.png",
     )
     args = parser.parse_args()
 
@@ -33,6 +33,23 @@ def main() -> None:
         assert sidebar.locator(".sb-project-workspace:visible").count() == 1
         assert "Beacon" in sidebar.locator(".sb-project-workspace:visible").inner_text()
 
+        sidebar.get_by_role(
+            "button", name="Remove Beacon from Projects"
+        ).click()
+        dialog = page.get_by_role("dialog", name="Remove Beacon?")
+        expect(dialog).to_be_visible()
+        expect(
+            dialog.get_by_text(
+                "Files, Git history, and saved sessions are not deleted.", exact=True
+            )
+        ).to_be_visible()
+        expect(dialog.get_by_role("button", name="Keep project")).to_be_focused()
+        page.screenshot(path=str(screenshot), full_page=True)
+        dialog.get_by_role("button", name="Remove from list").click()
+        expect(page.locator("body")).to_have_attribute(
+            "data-removed-project-path", r"C:\Projects\Beacon"
+        )
+
         sidebar.get_by_role("button", name="Collapse sessions").click()
         assert not sidebar.locator("#sidebar-session-body").is_visible()
         assert page.evaluate(
@@ -45,10 +62,9 @@ def main() -> None:
         session_search.fill("installation")
         assert sidebar.locator(".sb-session-item:visible").count() == 1
 
-        page.screenshot(path=str(screenshot), full_page=True)
         browser.close()
 
-    print(f"Sidebar search/collapse smoke test passed. Screenshot: {screenshot}")
+    print(f"Sidebar search/removal/collapse smoke test passed. Screenshot: {screenshot}")
 
 
 if __name__ == "__main__":

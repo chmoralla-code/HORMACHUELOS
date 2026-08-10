@@ -26,6 +26,7 @@ test("sidebar nests usage in a collapsed account card and gives sessions more ro
   await expect(sidebar.getByRole("button", { name: "Search sessions" })).toBeVisible();
   await expect(sidebar.getByRole("button", { name: "Collapse sessions" })).toBeVisible();
   await expect(projectRows).toHaveCount(3);
+  await expect(sidebar.getByRole("button", { name: /Remove .* from Projects/ })).toHaveCount(3);
   await expect(sessionRows).toHaveCount(3);
   await expect(sidebar.getByText("Account", { exact: true })).toBeVisible();
   await expect(sidebar.getByText("Synced · signed in", { exact: true })).toBeVisible();
@@ -68,6 +69,57 @@ test("sidebar nests usage in a collapsed account card and gives sessions more ro
 
   const fatal = consoleErrors.filter((entry) => !/favicon|vite/i.test(entry));
   expect(fatal, fatal.join("\n")).toEqual([]);
+});
+
+test("a specific project is removed only after a file-safe confirmation", async ({ page }) => {
+  await page.goto(`${APP}/update-harness.html`, { waitUntil: "networkidle" });
+  await page.locator("#background-action").evaluate((node) => { node.hidden = true; });
+
+  const sidebar = page.locator("#sidebar");
+  const removeBeacon = sidebar.getByRole("button", { name: "Remove Beacon from Projects" });
+  await removeBeacon.click();
+
+  const dialog = page.getByRole("dialog", { name: "Remove Beacon?" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText("Your project stays on this computer", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("Files, Git history, and saved sessions are not deleted.", { exact: true })).toBeVisible();
+  await expect(dialog.locator(".project-remove-path")).toHaveText("C:\\Projects\\Beacon");
+  await expect(dialog.getByRole("button", { name: "Keep project" })).toBeFocused();
+
+  await dialog.getByRole("button", { name: "Keep project" }).click();
+  await expect(dialog).toBeHidden();
+  await expect(page.locator("body")).not.toHaveAttribute("data-removed-project-path", /.+/);
+
+  await removeBeacon.click();
+  await page.getByRole("dialog", { name: "Remove Beacon?" })
+    .getByRole("button", { name: "Remove from list" })
+    .click();
+  await expect(page.locator("body")).toHaveAttribute("data-removed-project-path", "C:\\Projects\\Beacon");
+  await expect(page.locator("body")).not.toHaveAttribute("data-selected-project-path", /.+/);
+});
+
+test("workspace removal forgets only the matching shortcut and active pointer", async ({ page }) => {
+  await page.goto(`${APP}/update-harness.html`, { waitUntil: "networkidle" });
+
+  const result = await page.evaluate(async () => {
+    localStorage.setItem("ai-forge:project-workspaces", JSON.stringify([
+      { path: "C:\\Projects\\Atlas", name: "Atlas", addedAt: 1, lastOpenedAt: 3 },
+      { path: "C:\\Projects\\Beacon", name: "Beacon", addedAt: 1, lastOpenedAt: 2 },
+    ]));
+    localStorage.setItem("ai-forge:active-project-workspace", "C:\\Projects\\Atlas");
+    localStorage.setItem("ai-forge:sessions", "saved-session-sentinel");
+    const { removeProjectWorkspace } = await import("/components/projects.ts");
+    const remaining = removeProjectWorkspace("c:/projects/atlas/");
+    return {
+      paths: remaining.map((workspace) => workspace.path),
+      active: localStorage.getItem("ai-forge:active-project-workspace"),
+      sessions: localStorage.getItem("ai-forge:sessions"),
+    };
+  });
+
+  expect(result.paths).toEqual(["C:\\Projects\\Beacon"]);
+  expect(result.active).toBeNull();
+  expect(result.sessions).toBe("saved-session-sentinel");
 });
 
 test("project and session search filter immediately and support keyboard dismissal", async ({ page }) => {

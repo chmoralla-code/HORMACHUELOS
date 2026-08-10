@@ -149,6 +149,20 @@ impl AppState {
         let _ = save_recent(list.clone());
     }
 
+    /// Forget a recent project without deleting or modifying anything inside
+    /// the project directory.
+    pub fn remove_recent_project(&self, path: &str) -> Result<bool, String> {
+        let mut list = self.recent_projects.lock().unwrap();
+        let mut next = list.clone();
+        let removed = remove_recent_project_path(&mut next, path);
+        if removed {
+            save_recent(next.clone())
+                .map_err(|error| format!("Could not save the recent-project list: {error}"))?;
+            *list = next;
+        }
+        Ok(removed)
+    }
+
     /// Replace an accidentally selected empty child with the verified parent
     /// project so startup never reintroduces the stale workspace.
     pub fn replace_recent_project(&self, previous: &str, replacement: String) {
@@ -177,6 +191,13 @@ fn project_path_key(path: &str) -> String {
     value.trim_end_matches('\\').to_ascii_lowercase()
 }
 
+fn remove_recent_project_path(list: &mut Vec<String>, path: &str) -> bool {
+    let key = project_path_key(path);
+    let previous_len = list.len();
+    list.retain(|entry| project_path_key(entry) != key);
+    list.len() != previous_len
+}
+
 fn recent_path() -> Option<std::path::PathBuf> {
     let proj = directories::ProjectDirs::from("com", "ai-forge", "AI-Forge")?;
     let dir = proj.config_dir().to_path_buf();
@@ -198,4 +219,34 @@ fn save_recent(list: Vec<String>) -> anyhow::Result<()> {
     let raw = serde_json::to_string_pretty(&list)?;
     std::fs::write(&p, raw)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remove_recent_project_path;
+
+    #[test]
+    fn removing_a_recent_project_normalizes_windows_paths_without_touching_others() {
+        let mut projects = vec![
+            r"C:\Projects\Atlas".to_string(),
+            r"C:\Projects\Beacon".to_string(),
+            r"\\server\share\Cinder".to_string(),
+        ];
+
+        assert!(remove_recent_project_path(
+            &mut projects,
+            r"\\?\c:\projects\atlas\"
+        ));
+        assert_eq!(
+            projects,
+            vec![
+                r"C:\Projects\Beacon".to_string(),
+                r"\\server\share\Cinder".to_string()
+            ]
+        );
+        assert!(!remove_recent_project_path(
+            &mut projects,
+            r"C:\Projects\Missing"
+        ));
+    }
 }

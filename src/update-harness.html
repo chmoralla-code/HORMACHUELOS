@@ -18,6 +18,7 @@
       <aside id="sidebar" class="sidebar"></aside>
       <button id="background-action" type="button">Background action</button>
     </div>
+    <div id="modal-root" class="modal-root"></div>
     <script type="module">
       import { api } from "./ipc.ts";
       import { Sidebar } from "./components/sidebar.ts";
@@ -91,7 +92,12 @@
       const sidebar = new Sidebar({
         onNewProject: noop,
         onOpenProject: noop,
-        onSelectProject: noop,
+        onSelectProject: (path) => {
+          document.body.dataset.selectedProjectPath = path;
+        },
+        onRemoveProject: (path) => {
+          document.body.dataset.removedProjectPath = path;
+        },
         onAddAnotherProject: noop,
         onOpenQuickSessions: noop,
         onOpenSettings: noop,

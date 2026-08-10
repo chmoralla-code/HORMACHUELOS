@@ -42,6 +42,7 @@ import {
   activateProjectWorkspace,
   listProjectWorkspaces,
   rememberRecentProjectWorkspaces,
+  removeProjectWorkspace,
   replaceProjectWorkspacePath,
 } from "./components/projects";
 import {
@@ -1431,6 +1432,50 @@ async function selectProject(path: string, options: { quickSession?: boolean } =
   await refreshHeader();
 }
 
+function projectHasActiveRun(path: string): boolean {
+  const key = projectPathKey(path);
+  if (!key) return false;
+  return [...runningSessions].some((sessionId) => {
+    const runPath = sessionRegistry.get(sessionId)?.projectId
+      || runProjectPaths.get(sessionId)
+      || "";
+    return projectPathKey(runPath) === key;
+  });
+}
+
+/**
+ * Forget a sidebar shortcut without touching the project directory or its
+ * saved sessions. Native persistence is updated first so a failed disk write
+ * cannot leave the in-memory list disagreeing with the next app launch.
+ */
+async function removeProjectFromList(path: string) {
+  if (projectHasActiveRun(path)) {
+    reportError("Stop the active agent before removing this project from the list.");
+    return;
+  }
+
+  const wasActive = currentWorkspaceMode === "project"
+    && sameProjectPath(currentProjectPath, path);
+  await api.removeRecentProject(path);
+  const remaining = removeProjectWorkspace(path);
+
+  if (!wasActive) {
+    refreshSidebar();
+    return;
+  }
+
+  const nextProject = remaining[0]?.path;
+  if (nextProject) {
+    await selectProject(nextProject);
+  } else if (quickSessionWorkspacePath) {
+    await selectProject(quickSessionWorkspacePath, { quickSession: true });
+  } else {
+    // Startup normally prepares Quick Sessions. Keep the open folder usable
+    // if that preparation failed, while still removing its remembered row.
+    refreshSidebar();
+  }
+}
+
 async function createProject(path: string, templateId?: string) {
   persistCurrentSession();
   flushSessionSaves();
@@ -2115,6 +2160,8 @@ async function init() {
     onSelectProject: (path) => void selectProject(path, {
       quickSession: isQuickSessionWorkspace(path),
     }).catch((error) => reportError(String(error))),
+    onRemoveProject: (path) => void removeProjectFromList(path)
+      .catch((error) => reportError(String(error))),
     onAddAnotherProject: openNewProjectPicker,
     onOpenQuickSessions: () => void openQuickSessionWorkspace().catch((error) => reportError(String(error))),
     onOpenSettings: openSettings,
