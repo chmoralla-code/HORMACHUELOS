@@ -410,9 +410,9 @@ fn bounded_cursor_history(history: &[HistoryTurn]) -> Vec<BridgeHistoryTurn> {
 
 fn cursor_permission_enforcement(mode: &str) -> &'static str {
     match mode {
-        "full" | "multi_agent" => "cursor_sdk_agent",
+        "full" | "multi_agent" | "plan" => "cursor_sdk_agent",
         "auto" => "cursor_sdk_auto_review",
-        "research" | "plan" => "cursor_sdk_plan_read_only",
+        "ask" | "research" => "cursor_sdk_plan_read_only",
         _ => "cursor_sdk_plan_read_only",
     }
 }
@@ -554,13 +554,15 @@ pub async fn run_cursor_turn(
     resume_agent_id: Option<String>,
     requires_project_completion: bool,
     smart_agent_enabled: bool,
+    task_profile: &str,
 ) -> Result<Option<String>> {
     let mut continuation_pass: u32 = 0;
     let mut consecutive_stalled_recoveries: u8 = 0;
     let mut current_prompt = prompt.to_string();
     let mut current_agent_id = resume_agent_id;
     let smart_agent_active = smart_agent_enabled && requires_project_completion;
-    let mut smart_agent = SmartAgentRun::new(smart_agent_active);
+    let fast_design_edit = task_profile.eq_ignore_ascii_case("design_edit_fast");
+    let mut smart_agent = SmartAgentRun::new(smart_agent_active, fast_design_edit);
     let computer_use_active = computer_use_enabled && !crate::computer_use::is_paused();
     emit(
         &app,
@@ -575,6 +577,7 @@ pub async fn run_cursor_turn(
             "host_approval_callbacks": computer_use_active,
             "computer_use": computer_use_active,
             "smart_agent_enabled": smart_agent_active,
+            "task_profile": task_profile,
         }),
     );
     smart_agent.emit_plan(&app, session_id);
@@ -1122,8 +1125,9 @@ mod tests {
 
     #[test]
     fn restricted_modes_report_read_only_sdk_enforcement() {
+        assert_eq!(cursor_permission_enforcement("plan"), "cursor_sdk_agent");
         assert_eq!(
-            cursor_permission_enforcement("plan"),
+            cursor_permission_enforcement("ask"),
             "cursor_sdk_plan_read_only"
         );
         assert_eq!(

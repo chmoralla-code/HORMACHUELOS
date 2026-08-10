@@ -684,9 +684,10 @@ export async function getSettingsSafe(): Promise<Settings> {
 /** Normalize provider settings while preserving user-entered custom model IDs. */
 export function normalizeSettings(s: Settings): Settings {
   s.provider = String(s.provider || "").trim().toLowerCase();
-  if (!s.permission_mode || !["plan", "auto", "research", "full", "multi_agent"].includes(s.permission_mode)) {
+  if (!s.permission_mode || !["plan", "auto", "ask", "research", "full", "multi_agent"].includes(s.permission_mode)) {
     s.permission_mode = s.auto_approve ? "auto" : "plan";
   }
+  if (s.permission_mode === "research") s.permission_mode = "ask";
   s.auto_approve =
     s.permission_mode === "auto" ||
     s.permission_mode === "full" ||
@@ -694,7 +695,7 @@ export function normalizeSettings(s: Settings): Settings {
   const capsByMode: Record<string, string[]> = {
     plan: ["thinking", "guided"],
     auto: ["agent", "balanced"],
-    research: ["investigate", "brief"],
+    ask: ["investigate", "brief"],
     full: ["autonomous", "max"],
     multi_agent: ["autonomous", "max"],
   };
@@ -1338,9 +1339,9 @@ export class SettingsModal {
     body.appendChild(this.field("Permission mode", () => {
       const sel = el("select", { class: "field" }) as HTMLSelectElement;
       for (const [value, label] of [
-        ["plan", "Plan — refine request, suggest options, numbered plan, then Approve tools"],
+        ["plan", "Plan — refine request, suggest options, numbered plan, then execute with full permissions"],
         ["auto", "Auto — build with defaults; confirm delete/kill/outside project"],
-        ["research", "Research — investigate code with evidence; reads free, writes need Approve"],
+        ["ask", "Ask — investigate code with evidence; reads free, writes need Approve"],
         ["full", "Full — maximum autonomy, zero desktop prompts"],
         ["multi_agent", "Multi-Agent — Ship permission; independent workspace checks run together"],
       ] as const) {
@@ -1356,7 +1357,7 @@ export class SettingsModal {
       return sel;
     }));
     body.appendChild(el("div", { class: "set-hint", style: "margin-top:-6px;margin-bottom:12px" }, [
-      "Plan: improve brief, options, then Approve tools. Research: explore & answer with evidence (reads free). Auto: implement in-project quickly. Full: no tool prompts. Multi-Agent: Ship-level access with safe independent workspace checks started together. Same switch sits next to the chat box.",
+      "Plan: improve brief, options, then execute with Ship-level permissions. Ask: explore & answer with evidence (reads free). Auto: implement in-project quickly. Full: no tool prompts. Multi-Agent: Ship-level access with safe independent workspace checks started together. Same switch sits next to the chat box.",
     ]));
 
     body.appendChild(this.renderComputerUsePanel());

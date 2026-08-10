@@ -101,6 +101,7 @@ fn canonical_tool_name(name: &str) -> Option<&'static str> {
         "browsepage" => Some("browse_page"),
         "exportclientpack" => Some("export_client_pack"),
         "askuser" => Some("ask_user"),
+        "todowrite" | "updatetodos" | "updatetodo" | "todolist" => Some("todo_write"),
         "done" => Some("done"),
         "computerlistwindows" => Some("computer_list_windows"),
         "computerobserve" => Some("computer_observe"),
@@ -185,6 +186,7 @@ fn is_readonly_tool(name: &str) -> bool {
             | "view_image"
             | "view_video"
             | "ask_user"
+            | "todo_write"
             | "done"
             | "connect_account"
             | "integration_status"
@@ -296,27 +298,32 @@ fn tool_targets_outside_project(name: &str, args: &Value, root: &Path) -> bool {
 }
 
 /// Whether this tool requires user confirmation for the given permission mode.
-/// - plan: confirm every mutating / system tool (reads free)
-/// - research: same as plan for mutations; investigate with free reads
+/// - plan: Ship-level tool permissions (plan-first prompts elsewhere); no Approve for mutations
+/// - ask / research: confirm mutations; investigate with free reads (research is a legacy alias)
 /// - auto: auto-run in-project work; confirm high-risk + outside-project paths
 /// - full / multi_agent: follow the Ship full-permission policy
 pub fn needs_tool_confirm(name: &str, args: &Value, root: &Path, mode: &str) -> bool {
     let name = canonical_tool_name(name).unwrap_or(name);
-    let mode = mode.trim().to_ascii_lowercase();
+    let mode_owned = mode.trim().to_ascii_lowercase();
+    let mode = if mode_owned == "research" {
+        "ask"
+    } else {
+        mode_owned.as_str()
+    };
     if is_computer_tool(name) {
         return matches!(
             name,
             "computer_click" | "computer_type_text" | "computer_press_key" | "computer_drag"
         );
     }
-    if mode == "full" || mode == "multi_agent" {
+    if mode == "full" || mode == "multi_agent" || mode == "plan" {
         return false;
     }
     if is_readonly_tool(name) {
         return false;
     }
-    if mode == "plan" || mode == "research" {
-        // Plan / Research: every write / command / mutation needs Approve
+    if mode == "ask" {
+        // Ask: every write / command / mutation needs Approve
         return true;
     }
     // Auto (default for any unknown mode)
@@ -335,8 +342,8 @@ pub fn needs_tool_confirm(name: &str, args: &Value, root: &Path, mode: &str) -> 
 #[cfg(test)]
 mod permission_mode_tests {
     use super::{
-        is_parallel_safe_readonly_tool, is_supported_tool_name, needs_tool_confirm,
-        normalize_tool_name, schemas,
+        execute, is_parallel_safe_readonly_tool, is_supported_tool_name, needs_tool_confirm,
+        normalize_tool_name, schemas, ToolRunContext,
     };
     use serde_json::json;
     use std::collections::BTreeSet;
@@ -406,21 +413,21 @@ mod permission_mode_tests {
     }
 
     #[test]
-    fn plan_confirms_writes_not_reads() {
+    fn plan_uses_ship_level_tool_permissions() {
         let root = Path::new("C:\\proj");
-        assert!(needs_tool_confirm(
+        assert!(!needs_tool_confirm(
             "write_file",
             &json!({ "path": "a.txt", "content": "x" }),
             root,
             "plan"
         ));
-        assert!(needs_tool_confirm(
+        assert!(!needs_tool_confirm(
             "run_command",
             &json!({ "command": "echo hi" }),
             root,
             "plan"
         ));
-        assert!(needs_tool_confirm(
+        assert!(!needs_tool_confirm(
             "start_dev_server",
             &json!({ "command": "npm run dev" }),
             root,
@@ -433,14 +440,14 @@ mod permission_mode_tests {
             "plan"
         ));
         assert!(!needs_tool_confirm("list_dir", &json!({}), root, "plan"));
-        assert!(needs_tool_confirm(
+        assert!(!needs_tool_confirm(
             "run_terminal",
             &json!({ "command": "echo hi" }),
             root,
             "plan"
         ));
         assert!(!needs_tool_confirm(
-            "read_filelist_processes",
+            "delete_file",
             &json!({ "path": "a.txt" }),
             root,
             "plan"
@@ -508,6 +515,7 @@ mod permission_mode_tests {
             "browse_page",
             "export_client_pack",
             "ask_user",
+            "todo_write",
             "done",
             "computer_list_windows",
             "computer_observe",
@@ -524,7 +532,7 @@ mod permission_mode_tests {
         .collect::<BTreeSet<_>>();
 
         assert_eq!(actual, expected);
-        assert_eq!(actual.len(), 43);
+        assert_eq!(actual.len(), 44);
     }
 
     #[test]
@@ -578,38 +586,35 @@ mod permission_mode_tests {
     }
 
     #[test]
-    fn research_confirms_writes_not_reads() {
+    fn ask_and_legacy_research_confirm_writes_not_reads() {
         let root = Path::new("C:\\proj");
-        assert!(needs_tool_confirm(
-            "write_file",
-            &json!({ "path": "a.txt", "content": "x" }),
-            root,
-            "research"
-        ));
-        assert!(needs_tool_confirm(
-            "run_command",
-            &json!({ "command": "echo hi" }),
-            root,
-            "research"
-        ));
-        assert!(!needs_tool_confirm(
-            "read_file",
-            &json!({ "path": "a.txt" }),
-            root,
-            "research"
-        ));
-        assert!(!needs_tool_confirm(
-            "list_dir",
-            &json!({}),
-            root,
-            "research"
-        ));
-        assert!(!needs_tool_confirm(
-            "grep",
-            &json!({ "pattern": "foo" }),
-            root,
-            "research"
-        ));
+        for mode in ["ask", "research"] {
+            assert!(needs_tool_confirm(
+                "write_file",
+                &json!({ "path": "a.txt", "content": "x" }),
+                root,
+                mode
+            ));
+            assert!(needs_tool_confirm(
+                "run_command",
+                &json!({ "command": "echo hi" }),
+                root,
+                mode
+            ));
+            assert!(!needs_tool_confirm(
+                "read_file",
+                &json!({ "path": "a.txt" }),
+                root,
+                mode
+            ));
+            assert!(!needs_tool_confirm("list_dir", &json!({}), root, mode));
+            assert!(!needs_tool_confirm(
+                "grep",
+                &json!({ "pattern": "foo" }),
+                root,
+                mode
+            ));
+        }
     }
 
     #[test]
@@ -639,6 +644,29 @@ mod permission_mode_tests {
             root,
             "auto"
         ));
+    }
+
+    #[test]
+    fn todo_write_aliases_and_summarizes_task_lists() {
+        assert_eq!(normalize_tool_name("TodoWrite"), "todo_write");
+        assert_eq!(normalize_tool_name("UpdateTodos"), "todo_write");
+        let output = execute(
+            "todo_write",
+            &json!({
+                "todos": [
+                    { "id": "1", "content": "Seed IR names", "status": "completed" },
+                    { "id": "2", "content": "Build HR page", "status": "in_progress" }
+                ],
+                "merge": true
+            }),
+            Path::new("."),
+            30,
+            &ToolRunContext::noop(),
+        )
+        .expect("todo_write");
+        assert!(output.contains("2 item(s)"));
+        assert!(output.contains("in progress"));
+        assert!(output.contains("Seed IR names"));
     }
 
     #[test]
@@ -906,7 +934,7 @@ pub fn schemas(computer_use_enabled: bool) -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "edit_file",
-                "description": "Replace an exact string in a file. Fails if old_string appears multiple times or is not found.",
+                "description": "Replace an exact string in a file. Matching ignores a leading UTF-8 BOM and tolerates LF/CRLF differences. Fails if old_string appears multiple times or is not found.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1316,6 +1344,40 @@ pub fn schemas(computer_use_enabled: bool) -> Vec<Value> {
                         "allow_other": { "type": "boolean", "description": "If true, also allow a custom typed answer", "default": true }
                     },
                     "required": ["question", "options"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "todo_write",
+                "description": "Create or update a structured task list for multi-step work. Prefer this over narrating progress. Never claim a todo/task-list tool is unavailable.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "todos": {
+                            "type": "array",
+                            "description": "Full or partial task list for this run.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": { "type": "string", "description": "Stable task id" },
+                                    "content": { "type": "string", "description": "Short task description" },
+                                    "status": {
+                                        "type": "string",
+                                        "enum": ["pending", "in_progress", "completed", "cancelled"]
+                                    }
+                                },
+                                "required": ["id", "content", "status"]
+                            }
+                        },
+                        "merge": {
+                            "type": "boolean",
+                            "description": "When true, merge/update by id. When false, replace the list.",
+                            "default": true
+                        }
+                    },
+                    "required": ["todos"]
                 }
             }
         }),
@@ -2703,6 +2765,191 @@ pub fn attached_video_paths(prompt: &str) -> Vec<String> {
     out
 }
 
+const UTF8_BOM: &str = "\u{FEFF}";
+
+fn strip_utf8_bom(s: &str) -> &str {
+    s.strip_prefix(UTF8_BOM).unwrap_or(s)
+}
+
+fn normalize_newlines(s: &str) -> String {
+    s.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn dominant_line_ending(s: &str) -> &'static str {
+    if s.contains("\r\n") {
+        "\r\n"
+    } else if s.contains('\r') {
+        "\r"
+    } else {
+        "\n"
+    }
+}
+
+fn with_line_endings(s: &str, ending: &str) -> String {
+    let normalized = normalize_newlines(s);
+    if ending == "\n" {
+        normalized
+    } else {
+        normalized.replace('\n', ending)
+    }
+}
+
+fn push_unique_string(out: &mut Vec<String>, value: String) {
+    if !out.iter().any(|existing| existing == &value) {
+        out.push(value);
+    }
+}
+
+/// Build old_string search variants for BOM / CRLF / trailing-newline traps.
+fn edit_old_string_candidates(old: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let trimmed_bom = strip_utf8_bom(old);
+    push_unique_string(&mut out, old.to_string());
+    if trimmed_bom != old {
+        push_unique_string(&mut out, trimmed_bom.to_string());
+    }
+
+    let bases = out.clone();
+    for base in bases {
+        let lf = normalize_newlines(&base);
+        push_unique_string(&mut out, lf.clone());
+        push_unique_string(&mut out, with_line_endings(&base, "\r\n"));
+        if lf.ends_with('\n') {
+            push_unique_string(&mut out, lf.trim_end_matches('\n').to_string());
+            push_unique_string(
+                &mut out,
+                with_line_endings(lf.trim_end_matches('\n'), "\r\n"),
+            );
+        } else if !lf.is_empty() {
+            push_unique_string(&mut out, format!("{lf}\n"));
+            push_unique_string(&mut out, format!("{lf}\r\n"));
+        }
+    }
+    out
+}
+
+fn adapt_new_string_to_match(new: &str, matched_old: &str, file_body: &str) -> String {
+    let ending = if matched_old.contains("\r\n") {
+        "\r\n"
+    } else if matched_old.contains('\r') && !matched_old.contains('\n') {
+        "\r"
+    } else if matched_old.contains('\n') {
+        "\n"
+    } else {
+        dominant_line_ending(file_body)
+    };
+    with_line_endings(strip_utf8_bom(new), ending)
+}
+
+/// Apply a unique string replacement with BOM and newline tolerance.
+fn apply_edit_file(src: &str, old: &str, new: &str) -> Result<String, String> {
+    let exact = src.matches(old).count();
+    if exact == 1 {
+        return Ok(src.replacen(old, new, 1));
+    }
+    if exact > 1 {
+        return Err(format!(
+            "old_string found {exact} times; need a unique match"
+        ));
+    }
+
+    let has_bom = src.starts_with(UTF8_BOM);
+    let body = strip_utf8_bom(src);
+    let candidates = edit_old_string_candidates(old);
+    let mut unique_match: Option<String> = None;
+    let mut ambiguous = 0usize;
+
+    for candidate in candidates {
+        if candidate.is_empty() {
+            continue;
+        }
+        let count = body.matches(&candidate).count();
+        if count == 1 {
+            unique_match = Some(candidate);
+            break;
+        }
+        if count > 1 {
+            ambiguous = count;
+            break;
+        }
+    }
+
+    if ambiguous > 1 {
+        return Err(format!(
+            "old_string found {ambiguous} times; need a unique match"
+        ));
+    }
+
+    let Some(matched_old) = unique_match else {
+        return Err(
+            "old_string not found (also tried LF/CRLF and leading-BOM-tolerant variants; re-read the file and copy the exact text)"
+                .to_string(),
+        );
+    };
+
+    let adapted_new = adapt_new_string_to_match(new, &matched_old, body);
+    let edited = body.replacen(&matched_old, &adapted_new, 1);
+    if has_bom {
+        Ok(format!("{UTF8_BOM}{edited}"))
+    } else {
+        Ok(edited)
+    }
+}
+
+fn summarize_todo_write(args: &Value) -> String {
+    let todos = args
+        .get("todos")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut pending = 0usize;
+    let mut in_progress = 0usize;
+    let mut completed = 0usize;
+    let mut cancelled = 0usize;
+    let mut lines = Vec::new();
+    for item in todos.iter().take(24) {
+        let id = item
+            .get("id")
+            .and_then(|value| value.as_str())
+            .unwrap_or("task")
+            .trim();
+        let content = item
+            .get("content")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .trim();
+        let status = item
+            .get("status")
+            .and_then(|value| value.as_str())
+            .unwrap_or("pending")
+            .trim()
+            .to_ascii_lowercase();
+        match status.as_str() {
+            "in_progress" => in_progress += 1,
+            "completed" => completed += 1,
+            "cancelled" => cancelled += 1,
+            _ => pending += 1,
+        }
+        if !content.is_empty() {
+            let clipped: String = content.chars().take(120).collect();
+            lines.push(format!("- [{status}] {id}: {clipped}"));
+        }
+    }
+    let total = pending + in_progress + completed + cancelled;
+    let header = if total == 0 {
+        "Task list updated (empty).".to_string()
+    } else {
+        format!(
+            "Task list updated: {total} item(s) — {in_progress} in progress, {pending} pending, {completed} completed, {cancelled} cancelled."
+        )
+    };
+    if lines.is_empty() {
+        header
+    } else {
+        format!("{header}\n{}", lines.join("\n"))
+    }
+}
+
 pub fn execute(
     name: &str,
     args: &Value,
@@ -2761,14 +3008,8 @@ pub fn execute(
                 .ok_or_else(|| anyhow::anyhow!("missing new_string"))?;
             let full = resolve_path(root, p)?;
             let src = std::fs::read_to_string(&full)?;
-            let count = src.matches(old).count();
-            if count == 0 {
-                anyhow::bail!("old_string not found in {p}");
-            }
-            if count > 1 {
-                anyhow::bail!("old_string found {count} times in {p}; need a unique match");
-            }
-            let out = src.replacen(old, new, 1);
+            let out = apply_edit_file(&src, old, new)
+                .map_err(|detail| anyhow::anyhow!("old_string edit failed in {p}: {detail}"))?;
             std::fs::write(&full, out)?;
             Ok(format!("Edited {p}"))
         }
@@ -3186,6 +3427,7 @@ pub fn execute(
                 .unwrap_or("Done.");
             Ok(format!("__DONE__{summary}"))
         }
+        "todo_write" => Ok(summarize_todo_write(args)),
         "web_search" => {
             let query = args
                 .get("query")
@@ -4205,5 +4447,93 @@ mod security_tests {
             std::thread::sleep(Duration::from_millis(25));
         };
         kill_process_tree(child_pid);
+    }
+}
+
+#[cfg(test)]
+mod edit_file_tests {
+    use super::{apply_edit_file, execute, ToolRunContext};
+    use serde_json::json;
+    use std::path::PathBuf;
+
+    struct TempProject {
+        root: PathBuf,
+    }
+
+    impl TempProject {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!("ai-forge-edit-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&root).unwrap();
+            Self { root }
+        }
+    }
+
+    impl Drop for TempProject {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn apply_edit_file_matches_across_bom() {
+        let src = "\u{FEFF}export function hello() {\n  return 1;\n}\n";
+        let out = apply_edit_file(
+            src,
+            "export function hello() {\n  return 1;\n}",
+            "export function hello() {\n  return 2;\n}",
+        )
+        .expect("BOM-tolerant match");
+        assert!(out.starts_with('\u{FEFF}'));
+        assert!(out.contains("return 2;"));
+        assert!(!out.contains("return 1;"));
+    }
+
+    #[test]
+    fn apply_edit_file_matches_lf_needle_in_crlf_file() {
+        let src = "line one\r\nline two\r\nline three\r\n";
+        let out = apply_edit_file(src, "line two\n", "line 2\n").expect("CRLF tolerant");
+        assert_eq!(out, "line one\r\nline 2\r\nline three\r\n");
+    }
+
+    #[test]
+    fn apply_edit_file_tolerates_trailing_newline_mismatch() {
+        let src = "alpha\nbeta\ngamma\n";
+        let out = apply_edit_file(src, "beta", "BETA").expect("no trailing newline");
+        assert_eq!(out, "alpha\nBETA\ngamma\n");
+    }
+
+    #[test]
+    fn apply_edit_file_reports_clear_miss() {
+        let err = apply_edit_file("hello\n", "missing", "x").expect_err("should miss");
+        assert!(err.contains("old_string not found"));
+        assert!(err.contains("LF/CRLF") || err.contains("BOM"));
+    }
+
+    #[test]
+    fn edit_file_tool_writes_bom_preserving_patch() {
+        let project = TempProject::new();
+        let path = project.root.join("print-pdf-docs.ts");
+        std::fs::write(
+            &path,
+            "\u{FEFF}const title = \"Docs\";\r\nexport { title };\r\n",
+        )
+        .unwrap();
+        let output = execute(
+            "edit_file",
+            &json!({
+                "path": "print-pdf-docs.ts",
+                "old_string": "const title = \"Docs\";\n",
+                "new_string": "const title = \"Manual\";\n"
+            }),
+            &project.root,
+            5,
+            &ToolRunContext::noop(),
+        )
+        .expect("edit_file should succeed");
+        assert_eq!(output, "Edited print-pdf-docs.ts");
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.starts_with('\u{FEFF}'));
+        assert!(written.contains("Manual"));
+        assert!(written.contains("\r\n"));
     }
 }

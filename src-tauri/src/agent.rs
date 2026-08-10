@@ -18,6 +18,92 @@ use tauri::{AppHandle, Emitter};
 
 type ConsoleLineSink = Arc<dyn Fn(&str, &str) + Send + Sync>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentTaskProfile {
+    Default,
+    DesignEdit,
+    DesignEditFast,
+}
+
+impl AgentTaskProfile {
+    fn from_wire(value: Option<&str>) -> Self {
+        match value
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "design_edit" => Self::DesignEdit,
+            "design_edit_fast" => Self::DesignEditFast,
+            _ => Self::Default,
+        }
+    }
+
+    const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::DesignEdit => "design_edit",
+            Self::DesignEditFast => "design_edit_fast",
+        }
+    }
+
+    const fn is_design_edit(self) -> bool {
+        matches!(self, Self::DesignEdit | Self::DesignEditFast)
+    }
+
+    const fn is_fast_design_edit(self) -> bool {
+        matches!(self, Self::DesignEditFast)
+    }
+
+    fn instructions(self) -> &'static str {
+        match self {
+            Self::Default => "",
+            Self::DesignEdit => {
+                "\nDESIGN MODE TARGETED EDIT:\n\
+- The user selected a concrete preview target and pressed Apply with AI. That is explicit approval to implement this in-project design change; skip a separate planning/confirmation turn while preserving normal safety boundaries.\n\
+- Start with the supplied preview route, DOM selector/excerpt, visible text, and ranked source candidates. Keep discovery bounded to the selected feature.\n\
+- Do not inspect unrelated authentication, sessions, business logic, git history, or external websites unless the requested change truly depends on them.\n\
+- Preserve surrounding behavior, make the smallest coherent patch, and use the most focused relevant validation. Expand scope only when concrete source evidence requires it.\n"
+            }
+            Self::DesignEditFast => {
+                "\nDESIGN MODE FAST EDIT (higher priority than broad planning/investigation rules):\n\
+- The user selected an exact preview target and pressed Apply with AI. Implement now; do not ask for a plan or repeat the request. Normal safety boundaries still apply.\n\
+- Use the supplied route, DOM selector/excerpt, visible text, screenshot description, and ranked source candidates first. Usually one targeted read/search batch is enough. If a hint is wrong, expand once with a grep for the most distinctive route or visible-text phrase.\n\
+- Aim for locate -> minimal patch -> smallest useful check -> done. Prefer 1-3 files and avoid unrelated refactors.\n\
+- For a copy, spacing, color, typography, table, or local layout change, do not inspect login/session flows, browse the web, run a full end-to-end suite, or perform a broad repository audit. Use a targeted typecheck/lint/build when quick, or re-read the changed source and preview it.\n\
+- Debug only a concrete failure. Once the requested target is changed and the focused check passes, finish immediately with a concise result.\n"
+            }
+        }
+    }
+}
+
+fn model_effort_for_task(configured: &str, profile: AgentTaskProfile) -> String {
+    match profile {
+        AgentTaskProfile::Default => configured.to_string(),
+        // A selected micro-edit has rich target context; low reasoning avoids
+        // spending minutes re-planning a one-control copy/style patch.
+        AgentTaskProfile::DesignEditFast => "low".into(),
+        AgentTaskProfile::DesignEdit => match configured.trim().to_ascii_lowercase().as_str() {
+            "low" | "light" => "low".into(),
+            _ => "medium".into(),
+        },
+    }
+}
+
+fn cursor_resume_id_for_task(
+    existing: Option<String>,
+    profile: AgentTaskProfile,
+) -> Option<String> {
+    if profile.is_fast_design_edit() {
+        // Cursor's resumed agent carries its full SDK conversation. A selected
+        // micro-edit is self-contained, so a fresh bounded turn avoids making
+        // every tweak slower as the main chat grows.
+        None
+    } else {
+        existing
+    }
+}
+
 /// Poll until Stop was requested. Used with `tokio::select!` so in-flight
 /// LLM HTTP futures are dropped (and aborted) instead of blocking cancel.
 async fn wait_until_cancelled(cancel: &AtomicBool) {
@@ -443,6 +529,10 @@ fn task_likely_requires_project_completion(prompt: &str) -> bool {
         || (has_execution_action && has_execution_target)
 }
 
+fn task_requires_project_completion(prompt: &str, profile: AgentTaskProfile) -> bool {
+    profile.is_design_edit() || task_likely_requires_project_completion(prompt)
+}
+
 /// Prior session turn for agent memory (from the frontend transcript).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HistoryTurn {
@@ -500,6 +590,47 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> (&str, bool) {
 const NATIVE_HISTORY_MAX_TURNS: usize = 24;
 const NATIVE_HISTORY_MAX_BYTES: usize = 24_000;
 const NATIVE_HISTORY_MAX_TURN_BYTES: usize = 3_000;
+const FAST_DESIGN_HISTORY_MAX_TURNS: usize = 4;
+const FAST_DESIGN_HISTORY_MAX_BYTES: usize = 6_000;
+const FAST_DESIGN_HISTORY_MAX_TURN_BYTES: usize = 1_800;
+
+/// Design Mode already supplies the route, selector, DOM excerpt, screenshot,
+/// and source candidates. Keep only a tiny conversational tail so long chats
+/// cannot dominate the latency or distract a fresh target-scoped agent.
+fn compact_fast_design_history(history: &[HistoryTurn]) -> Vec<HistoryTurn> {
+    let mut remaining = FAST_DESIGN_HISTORY_MAX_BYTES;
+    let mut newest_first = Vec::new();
+
+    for turn in history.iter().rev() {
+        if newest_first.len() >= FAST_DESIGN_HISTORY_MAX_TURNS || remaining == 0 {
+            break;
+        }
+        let role = turn.role.trim().to_ascii_lowercase();
+        if role != "user" && role != "assistant" {
+            continue;
+        }
+        let content = turn.content.trim();
+        if content.is_empty() {
+            continue;
+        }
+        let limit = remaining.min(FAST_DESIGN_HISTORY_MAX_TURN_BYTES);
+        let (content, _) = truncate_utf8(content, limit);
+        if content.is_empty() {
+            continue;
+        }
+        remaining = remaining.saturating_sub(content.len());
+        newest_first.push(HistoryTurn {
+            role,
+            content: content.to_string(),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        });
+    }
+
+    newest_first.reverse();
+    newest_first
+}
 
 /// Convert saved transcript entries into compact plain conversation memory.
 /// Historical tool calls/results are deliberately represented as text instead
@@ -1062,8 +1193,10 @@ pub async fn run_loop(
     run: Arc<SessionRun>,
     history: Vec<HistoryTurn>,
     cursor_resume_agent_id: Option<String>,
+    task_profile: Option<String>,
 ) -> Result<Option<String>> {
     let root = Path::new(&project_root);
+    let task_profile = AgentTaskProfile::from_wire(task_profile.as_deref());
     let cancel = run.cancel.clone();
     let known_integration_secrets = Arc::new(crate::integrations::loaded_tokens());
     let mut prompt =
@@ -1134,7 +1267,7 @@ pub async fn run_loop(
         note.push_str(&prompt);
         prompt = note;
     }
-    let requires_project_completion = task_likely_requires_project_completion(&prompt);
+    let requires_project_completion = task_requires_project_completion(&prompt, task_profile);
 
     let mut history = history;
     for turn in &mut history {
@@ -1152,6 +1285,9 @@ pub async fn run_loop(
             }
         }
     }
+    if task_profile.is_fast_design_edit() {
+        history = compact_fast_design_history(&history);
+    }
 
     // Cursor Cloud API has no /chat/completions — use the local Cursor SDK agent.
     // Cursor model ids are served only by the local Cursor SDK. They are not
@@ -1162,6 +1298,7 @@ pub async fn run_loop(
     // is active, fall through to hosted OpenAI-compatible models so friends
     // installing the app are not blocked on a personal Cursor key.
     let mut settings = settings;
+    settings.model_effort = model_effort_for_task(&settings.model_effort, task_profile);
     if uses_cursor_sdk(&settings.provider) {
         match crate::config::load_cursor_sdk_api_key(&settings.provider) {
             Ok(key) => {
@@ -1175,8 +1312,11 @@ pub async fn run_loop(
                 let model_display = display_model_name(&settings.model);
                 let provider_display = display_provider_name(&settings.provider);
                 let permission_mode = normalized_permission_mode(&settings.permission_mode);
-                let smart_agent_policy =
-                    crate::smart_agent::SmartAgentRun::system_instructions(smart_agent_enabled);
+                let smart_agent_policy = crate::smart_agent::SmartAgentRun::system_instructions(
+                    smart_agent_enabled,
+                    task_profile.is_fast_design_edit(),
+                );
+                let task_profile_policy = task_profile.instructions();
                 let completion_contract = if requires_project_completion {
                     "\n\nAUTONOMOUS LONG-TASK CONTRACT:\n\
 - This is an implementation task. Keep using tools until the requested website, app, APK, software, or fix is actually complete and verified.\n\
@@ -1187,7 +1327,7 @@ pub async fn run_loop(
                     ""
                 };
                 let wrapped_prompt = format!(
-                    "{identity}\n\n{policy}{computer_policy}{completion_contract}{smart_agent_policy}\n\n\
+                    "{identity}\n\n{policy}{computer_policy}{completion_contract}{smart_agent_policy}{task_profile_policy}\n\n\
 IN-APP PREVIEW:\n\
 - Hormachuelos has a built-in Preview panel on the right. Do NOT open websites/games in Chrome or the system browser.\n\
 - After creating or updating HTML (index.html, game pages, etc.), call open_path on that HTML file so the in-app Preview opens.\n\
@@ -1198,9 +1338,12 @@ Current user request:\n{prompt}",
                     computer_policy = cursor_computer_use_instructions(settings.computer_use_enabled),
                     completion_contract = completion_contract,
                     smart_agent_policy = smart_agent_policy,
+                    task_profile_policy = task_profile_policy,
                     prompt = prompt,
                 );
-                return crate::cursor_bridge::run_cursor_turn(
+                let resume_agent_id =
+                    cursor_resume_id_for_task(cursor_resume_agent_id.clone(), task_profile);
+                let cursor_result = crate::cursor_bridge::run_cursor_turn(
                     app,
                     &project_root,
                     &wrapped_prompt,
@@ -1212,11 +1355,20 @@ Current user request:\n{prompt}",
                     &session_id,
                     run,
                     &history,
-                    cursor_resume_agent_id,
+                    resume_agent_id,
                     requires_project_completion,
                     smart_agent_enabled,
+                    task_profile.wire_name(),
                 )
                 .await;
+                // Fast Design turns use an isolated Cursor agent. Preserve the
+                // main conversation's durable id instead of replacing it with
+                // the disposable micro-edit agent.
+                return if task_profile.is_fast_design_edit() {
+                    cursor_result.map(|_| cursor_resume_agent_id)
+                } else {
+                    cursor_result
+                };
             }
             Err(cursor_err) => {
                 let license = crate::license::LicenseStatus::load().unwrap_or_default();
@@ -1337,38 +1489,38 @@ Current user request:\n{prompt}",
         on_console_line: Some(on_console_line),
     };
 
-    let mode = settings.permission_mode.to_ascii_lowercase();
+    let mode = normalized_permission_mode(&settings.permission_mode);
     let mode_rules = match mode.as_str() {
         "plan" => "\
 === ACTIVE MODE: PLAN (maximize planning quality) ===\n\
 You are a product + technical planner first, implementer second.\n\
 \n\
 GOAL: Understand the user, improve the request, propose options, get agreement, then implement carefully.\n\
-Every file change or command still requires user Approve/Deny in the UI.\n\
+You have Ship-level / full tool permissions after the plan is accepted — no Approve prompts for ordinary mutations.\n\
 \n\
 MANDATORY FIRST RESPONSE (no write/run/scaffold tools yet):\n\
 1. Restate the goal in one plain sentence.\n\
 2. Improve / tweak the request: clarify ambiguous parts, suggest a better scope if the ask is too vague or too huge.\n\
 3. Present a short plan with numbered steps (stack, files/folders, build order, how to verify).\n\
 4. You MUST call the ask_user TOOL (not just write options in prose). The desktop UI only shows clickable choices when ask_user is invoked.\n\
-5. ask_user parameters: question (string), options (array of 2â€“6 short strings), allow_other=true.\n\
+5. ask_user parameters: question (string), options (array of 2–6 short strings), allow_other=true.\n\
    Example options: [\"React + Vite\", \"Plain HTML/CSS/JS\", \"Next.js\"].\n\
-   NEVER list choices only in markdown â€” always use the tool.\n\
+   NEVER list choices only in markdown — always use the tool.\n\
 \n\
 AFTER the user answers ask_user (or clearly says \"go ahead\" / \"build it\"):\n\
-- Implement only the agreed plan.\n\
+- Implement only the agreed plan with full autonomy (same tool freedom as Ship / Full).\n\
 - Prefer read_file / list_dir / glob / grep first if you need project context.\n\
-- Mutating tools (write/edit/run/git/delete/etc.) will prompt for approval â€” expect that.\n\
-- If the user rejects a tool, adapt the plan; do not spam the same tool.\n\
+- Edit files, run commands, install packages, and use mutating tools freely.\n\
+- If the user rejects the plan or asks to change it, adapt; do not spam the same approach.\n\
 \n\
 PLAN MODE RULES:\n\
 - Do NOT scaffold or write files on the first turn of a new build request.\n\
 - Do NOT call done until real implementation is finished (or the user only wanted a plan and says stop).\n\
 - Pure questions still get direct answers with no tools.\n\
 - Keep language simple and human. No marketing fluff.",
-        "research" => "\
-=== ACTIVE MODE: RESEARCH (investigate first, change later) ===\n\
-You are a research analyst and code archaeologist â€” not a builder by default.\n\
+        "ask" => "\
+=== ACTIVE MODE: ASK (investigate first, change later) ===\n\
+You are a research analyst and code archaeologist — not a builder by default.\n\
 \n\
 GOAL: Answer questions with evidence from the project (and allowed tools). Prefer facts over implementation.\n\
 \n\
@@ -1376,24 +1528,24 @@ BEHAVIOR:\n\
 - Investigate with read-only tools first: list_dir, glob, grep, read_file, file_info.\n\
 - Dig across multiple files when needed; cite concrete paths and short excerpts.\n\
 - Structure answers as a research brief when the question is non-trivial:\n\
-  1) Summary (1â€“3 sentences)\n\
+  1) Summary (1–3 sentences)\n\
   2) Findings (bullets with file paths)\n\
   3) Risks / unknowns\n\
   4) Suggested next step: switch to Plan or Build if they want implementation\n\
-- Use ask_user only when the research question is ambiguous (scope / which subsystem).\n\
+- Use ask_user only when the question is ambiguous (scope / which subsystem).\n\
 - open_url is fine for docs or references the user asked about.\n\
 \n\
 DO NOT (unless the user explicitly says implement / fix / build / apply):\n\
 - Scaffold projects, mass-edit files, install packages, or ship features.\n\
-- Call done as if a product was delivered â€” research ends with an evidence-based answer.\n\
+- Call done as if a product was delivered — ask mode ends with an evidence-based answer.\n\
 \n\
-IF the user explicitly asks you to implement after research:\n\
+IF the user explicitly asks you to implement after investigating:\n\
 - Mutating tools (write/edit/run/git/delete/etc.) still require Approve in the UI.\n\
 - Prefer a minimal change set; re-check files before editing.\n\
 \n\
-RESEARCH MODE RULES:\n\
+ASK MODE RULES:\n\
 - Reads are free; every mutation needs approval.\n\
-- Do not invent architecture that is not in the repo â€” verify with tools.\n\
+- Do not invent architecture that is not in the repo — verify with tools.\n\
 - Keep language clear and human. No marketing fluff.",
         "auto" => "\
 === ACTIVE MODE: AUTO (balanced builder) ===\n\
@@ -1436,11 +1588,11 @@ BEHAVIOR:\n\
     };
 
     let execution_style = match mode.as_str() {
-        "plan" => "7. In PLAN mode: explain plans and options clearly. After the user accepts, implement step by step.\n",
-        "research" => "7. In RESEARCH mode: evidence first (paths + findings). Do not implement unless the user explicitly asks.\n",
+        "plan" => "7. In PLAN mode: explain plans and options clearly. After the user accepts, implement with full tool permissions.\n",
+        "ask" => "7. In ASK mode: evidence first (paths + findings). Do not implement unless the user explicitly asks.\n",
         "auto" => "7. In AUTO mode: keep responses concise. Prefer doing work over long preambles.\n",
         "multi_agent" => "7. In MULTI-AGENT mode: start independent local inspection tools together, then keep dependent actions ordered.\n",
-        _ => "7. In FULL mode: keep responses very short. Don't explain what you are about to do â€” do it.\n",
+        _ => "7. In FULL mode: keep responses very short. Don't explain what you are about to do — do it.\n",
     };
 
     let has_history = history.iter().any(|t| !t.content.trim().is_empty());
@@ -1484,7 +1636,11 @@ BEHAVIOR:\n\
     } else {
         ""
     };
-    let project_context = project_context_block(root);
+    let project_context = if task_profile.is_fast_design_edit() {
+        String::new()
+    } else {
+        project_context_block(root)
+    };
     let model_id = settings.model.trim();
     let model_display = display_model_name(model_id);
     let provider_id = settings.provider.trim();
@@ -1498,8 +1654,11 @@ BEHAVIOR:\n\
             ""
         };
     let smart_agent_enabled = settings.smart_agent_enabled && requires_project_completion;
-    let smart_agent_policy =
-        crate::smart_agent::SmartAgentRun::system_instructions(smart_agent_enabled);
+    let smart_agent_policy = crate::smart_agent::SmartAgentRun::system_instructions(
+        smart_agent_enabled,
+        task_profile.is_fast_design_edit(),
+    );
+    let task_profile_policy = task_profile.instructions();
     let tool_scheduling_rules = if mode == "multi_agent" {
         "15. MULTI-AGENT SCHEDULING: put independent, local, read-only discovery calls first in one tool response so the host can spawn them together. Use only read_file, list_dir, glob, grep, git_status, and file_info in that parallel pack. Each is a distinct function call with one exact snake_case name and separate arguments. Never parallelize writes, commands, browser actions, approvals, account actions, or computer control."
     } else {
@@ -1520,6 +1679,7 @@ ACTIVE RUNTIME (report these values accurately when asked):\n\
 {accounts}\
 {computer_policy}\
 {smart_agent_policy}\
+{task_profile_policy}\
 CAPABILITIES:\n\
 - Workspace inspection tools — read_file, list_dir, glob, grep, git_status, and file_info — must use ONLY project-relative paths or patterns. The host already knows the root: use \".\" or \"src/main.ts\", never C:\\Users\\…. For other file tools, prefer project-relative paths and use an absolute path only when that tool explicitly permits it.\n\
 - run_command runs PowerShell hidden — scaffold, install, build, test, system tasks, CLIs. Use `cwd` when needed.\n\
@@ -1539,6 +1699,7 @@ CAPABILITIES:\n\
 - System tools: list_drives, sys_info, env_vars, list_processes, kill_process, open_url, open_path, download_file, move_file, copy_file, delete_file, make_dir, file_info, connect_account, integration_status, web_search, browse_page, export_client_pack.\n\
 - TOOL NAMING: call exactly one tool per function call and use its exact snake_case name. Never merge names. For example, call read_file to inspect package.json and list_processes separately when checking running apps.\n\
 - ask_user: multiple-choice questions for real decisions (stack, style, scope). Use allow_other when freeform answers help.\n\
+- todo_write: structured task list for multi-step work. Prefer it over narrating progress. Never say a todo/task-list tool is unavailable or that you will \"track progress directly\".\n\
 - export_client_pack: zip the project for client handoff (excludes node_modules/.git/target/dist) and write CLIENT_HANDOFF.md.\n\
 - web_search / browse_page: research the public web when local files are not enough.\n\
 - view_image: view/describe an image file (PNG/JPG/WEBP/GIF/BMP). Attached images are usually auto-described already; call view_image only when you need a closer look or a path was not auto-viewed.\n\
@@ -1560,9 +1721,10 @@ BASE RULES (mode rules above win on conflict):\n\
 12. For deploy/git hosting: use connected integrations first. If missing, call connect_account (in-chat secure form + browser) — do not run interactive CLI login via run_command and do not request credentials in the chat message box.\n\
 13. Format final prose as clean Markdown: use a short Result heading followed by clear sections and bullets; use Markdown tables only for comparisons. Every table must include a header row and separator row; never use unaligned plain-text columns. Never print raw JSON, function-call syntax, tool arguments, or a literal `done` payload for the user. When work is complete, call the done tool instead of repeating its title, files, and features as loose prose.\n\
 14. Never stop after only announcing the next step (e.g. \"Let me find…\", \"I'll check…\", \"Looking for…\"). If you need to act, call a tool in the SAME turn. Narration without tools is incomplete.\n\
+15. Never claim tools are missing when work can continue with available tools. If you want a task list, call todo_write — do not apologize about a missing todo tool.\n\
 {tool_scheduling_rules}\n\
 {memory_rules}\n\
-TOOL REFERENCE: read_file, write_file, edit_file, list_dir, glob, grep, run_command, start_dev_server, git_init, git_add_all, git_commit, git_status, list_drives, sys_info, env_vars, list_processes, kill_process, open_url, open_path, download_file, move_file, copy_file, delete_file, make_dir, file_info, view_image, view_video, connect_account, integration_status, web_search, browse_page, export_client_pack, computer_list_windows, computer_observe, computer_focus_window, computer_click, computer_type_text, computer_press_key, computer_scroll, computer_drag, computer_game_sequence, ask_user, done.",
+TOOL REFERENCE: read_file, write_file, edit_file, list_dir, glob, grep, run_command, start_dev_server, git_init, git_add_all, git_commit, git_status, list_drives, sys_info, env_vars, list_processes, kill_process, open_url, open_path, download_file, move_file, copy_file, delete_file, make_dir, file_info, view_image, view_video, connect_account, integration_status, web_search, browse_page, export_client_pack, computer_list_windows, computer_observe, computer_focus_window, computer_click, computer_type_text, computer_press_key, computer_scroll, computer_drag, computer_game_sequence, ask_user, todo_write, done.",
         root = root.display(),
         provider_display = provider_display,
         model_display = model_display,
@@ -1574,16 +1736,19 @@ TOOL REFERENCE: read_file, write_file, edit_file, list_dir, glob, grep, run_comm
         accounts = accounts,
         computer_policy = computer_policy,
         smart_agent_policy = smart_agent_policy,
+        task_profile_policy = task_profile_policy,
         execution_style = execution_style,
         tool_scheduling_rules = tool_scheduling_rules,
         memory_rules = memory_rules,
     );
 
     // First-turn nudges only when this session has no prior chat.
-    let user_content = if mode == "research" && !has_history {
+    let user_content = if task_profile.is_design_edit() {
+        prompt.clone()
+    } else if mode == "ask" && !has_history {
         format!(
             "{prompt}\n\n\
-[Research mode active] Investigate with read/search tools as needed, then answer with evidence \
+[Ask mode active] Investigate with read/search tools as needed, then answer with evidence \
 (paths + findings). Do not implement or scaffold unless I explicitly ask. Prefer a short research brief \
 for non-trivial questions."
         )
@@ -1591,21 +1756,21 @@ for non-trivial questions."
         format!(
             "{prompt}\n\n\
 [Plan mode active] First response: (1) restate & improve my request, (2) short numbered plan, \
-(3) you MUST call the ask_user tool with options: string[] (2â€“6 choices) and allow_other=true. \
-Writing \"choose one\" in text alone does NOT show UI buttons â€” only the ask_user tool does. \
-Do not write/scaffold files until I pick an option."
+(3) you MUST call the ask_user tool with options: string[] (2–6 choices) and allow_other=true. \
+Writing \"choose one\" in text alone does NOT show UI buttons — only the ask_user tool does. \
+Do not write/scaffold files until I pick an option. After I accept, implement with full tool permissions."
         )
     } else if mode == "plan" {
         format!(
             "{prompt}\n\n\
-[Plan mode Â· continuing session] Use session history. Mutating tools still need approval. \
-If you need a decision, call ask_user (options as a string array) â€” do not only list options in text. \
+[Plan mode · continuing session] Use session history. After agreement you have full tool permissions. \
+If you need a decision, call ask_user (options as a string array) — do not only list options in text. \
 Continue or adjust earlier plans instead of restarting from zero unless the user wants a new direction."
         )
-    } else if mode == "research" {
+    } else if mode == "ask" {
         format!(
             "{prompt}\n\n\
-[Research mode Â· continuing session] Use session history. Keep investigating with evidence. \
+[Ask mode · continuing session] Use session history. Keep investigating with evidence. \
 Do not implement unless I explicitly ask. Mutating tools still need approval."
         )
     } else if mode == "full" {
@@ -1648,7 +1813,10 @@ The tool entries are historical summaries; use fresh tools for the current works
     // count resets after every tool turn; it is not an iteration limit.
     let mut consecutive_stalled_recoveries: u8 = 0;
     let mut provider_blip_recoveries: u8 = 0;
-    let mut smart_agent = crate::smart_agent::SmartAgentRun::new(smart_agent_enabled);
+    let mut smart_agent = crate::smart_agent::SmartAgentRun::new(
+        smart_agent_enabled,
+        task_profile.is_fast_design_edit(),
+    );
     emit(
         &app,
         &session_id,
@@ -1657,6 +1825,7 @@ The tool entries are historical summaries; use fresh tools for the current works
             "prompt": prompt,
             "permission_mode": mode,
             "smart_agent_enabled": smart_agent_enabled,
+            "task_profile": task_profile.wire_name(),
         }),
     );
     smart_agent.emit_plan(&app, &session_id);
@@ -2003,7 +2172,10 @@ The tool entries are historical summaries; use fresh tools for the current works
                 // thinking or mid-sentence. Resume the same run instead of
                 // leaving a dangling "Let me…" as the final answer.
                 Some(AutomaticContinuationReason::OutputLimit)
-            } else if requires_project_completion && !auth_request_routed && mode != "plan" {
+            } else if requires_project_completion
+                && !auth_request_routed
+                && (mode != "plan" || task_profile.is_design_edit())
+            {
                 Some(AutomaticContinuationReason::CompletionCheck)
             } else if announced && !auth_request_routed && mode != "plan" {
                 Some(AutomaticContinuationReason::AnnouncedAction)
@@ -2065,6 +2237,7 @@ The tool entries are historical summaries; use fresh tools for the current works
             // Plan mode often lists choices in prose without calling ask_user â€” the UI then shows nothing.
             // Nudge the model to call the tool so clickable options appear.
             let should_nudge_plan = mode == "plan"
+                && !task_profile.is_design_edit()
                 && !auth_request_routed
                 && plan_ask_nudges < 2
                 && resp
@@ -2316,8 +2489,8 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
                 };
                 (true, response)
             } else {
-                let mode = settings.permission_mode.to_ascii_lowercase();
-                // Confirm tools based on permission mode (plan / auto / full)
+                let mode = normalized_permission_mode(&settings.permission_mode);
+                // Confirm tools based on permission mode (plan / ask / auto / full)
                 if tools::needs_tool_confirm(&tc.name, &tc.arguments, root, &mode) {
                     let approved = await_tool_confirm(
                         &app,
@@ -2562,7 +2735,9 @@ fn uses_cursor_sdk(provider: &str) -> bool {
 
 fn normalized_permission_mode(mode: &str) -> String {
     match mode.trim().to_ascii_lowercase().as_str() {
-        "plan" | "research" | "auto" | "full" | "multi_agent" => mode.trim().to_ascii_lowercase(),
+        // Legacy "research" sessions/settings map to ask.
+        "ask" | "research" => "ask".into(),
+        "plan" | "auto" | "full" | "multi_agent" => mode.trim().to_ascii_lowercase(),
         _ => "plan".into(),
     }
 }
@@ -2619,11 +2794,14 @@ fn cursor_permission_instructions(mode: &str) -> &'static str {
         "auto" => {
             "Execution mode: AUTO. Work inside the selected project directory and rely on Cursor Auto-review. If an action cannot be reviewed safely, stop and explain the limitation."
         }
-        "research" => {
-            "Execution mode: RESEARCH. This is a read-only planning turn: investigate and explain, but do not edit files, run shell commands, or invoke mutating tools."
+        "ask" => {
+            "Execution mode: ASK. This is a read-only investigation turn: investigate and explain, but do not edit files, run shell commands, or invoke mutating tools."
+        }
+        "plan" => {
+            "Execution mode: PLAN. Present a plan and call ask_user before mutating work. After the user accepts, you have Ship-level / full tool permissions — edit files, run commands, and use mutating tools without further approval prompts."
         }
         _ => {
-            "Execution mode: PLAN. This is a read-only planning turn: propose steps and ask questions, but do not edit files, run shell commands, or invoke mutating tools."
+            "Execution mode: PLAN. Present a plan and call ask_user before mutating work. After the user accepts, you have Ship-level / full tool permissions — edit files, run commands, and use mutating tools without further approval prompts."
         }
     }
 }
@@ -2755,16 +2933,19 @@ fn project_context_block(root: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        can_recover_from_provider_blip, compact_history_messages, cursor_computer_use_instructions,
-        cursor_effort_for_request, cursor_permission_instructions, display_model_name,
-        display_provider_name, identity_instructions, next_stalled_recovery_count,
-        normalize_tool_calls, normalized_permission_mode, orphaned_tool_previews,
-        parallel_readonly_batch_len, public_tool_arguments, public_tool_preview_delta,
-        reply_announces_pending_action, reply_was_cut_off, resolve_tool_preview_name,
-        response_made_concrete_progress, starts_as_explanatory_request,
+        can_recover_from_provider_blip, compact_fast_design_history, compact_history_messages,
+        cursor_computer_use_instructions, cursor_effort_for_request,
+        cursor_permission_instructions, cursor_resume_id_for_task, display_model_name,
+        display_provider_name, identity_instructions, model_effort_for_task,
+        next_stalled_recovery_count, normalize_tool_calls, normalized_permission_mode,
+        orphaned_tool_previews, parallel_readonly_batch_len, public_tool_arguments,
+        public_tool_preview_delta, reply_announces_pending_action, reply_was_cut_off,
+        resolve_tool_preview_name, response_made_concrete_progress, starts_as_explanatory_request,
         stop_reason_requires_continuation, task_likely_requires_project_completion,
-        tool_confirm_summary, truncate_utf8, uses_cursor_sdk, HistoryToolCall, HistoryTurn,
-        MAX_CONSECUTIVE_STALLED_RECOVERIES, NATIVE_HISTORY_MAX_BYTES, NATIVE_HISTORY_MAX_TURNS,
+        task_requires_project_completion, tool_confirm_summary, truncate_utf8, uses_cursor_sdk,
+        AgentTaskProfile, HistoryToolCall, HistoryTurn, FAST_DESIGN_HISTORY_MAX_BYTES,
+        FAST_DESIGN_HISTORY_MAX_TURNS, MAX_CONSECUTIVE_STALLED_RECOVERIES,
+        NATIVE_HISTORY_MAX_BYTES, NATIVE_HISTORY_MAX_TURNS,
     };
     use crate::llm::{ChatMessage, LlmResponse, ToolCall};
     use anyhow::anyhow;
@@ -2842,6 +3023,78 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Continue from the latest"));
+    }
+
+    #[test]
+    fn fast_design_profile_caps_effort_and_isolates_cursor_memory() {
+        assert_eq!(
+            AgentTaskProfile::from_wire(Some("design_edit_fast")),
+            AgentTaskProfile::DesignEditFast
+        );
+        assert_eq!(
+            model_effort_for_task("ultra", AgentTaskProfile::DesignEditFast),
+            "low"
+        );
+        assert_eq!(
+            model_effort_for_task("ultra", AgentTaskProfile::DesignEdit),
+            "medium"
+        );
+        assert_eq!(
+            model_effort_for_task("xhigh", AgentTaskProfile::Default),
+            "xhigh"
+        );
+        assert_eq!(
+            cursor_resume_id_for_task(
+                Some("long-session-agent".into()),
+                AgentTaskProfile::DesignEditFast,
+            ),
+            None
+        );
+        assert_eq!(
+            cursor_resume_id_for_task(
+                Some("long-session-agent".into()),
+                AgentTaskProfile::Default,
+            )
+            .as_deref(),
+            Some("long-session-agent")
+        );
+        assert!(task_requires_project_completion(
+            "Use the primary color.",
+            AgentTaskProfile::DesignEditFast,
+        ));
+        assert!(!task_requires_project_completion(
+            "Use the primary color.",
+            AgentTaskProfile::Default,
+        ));
+    }
+
+    #[test]
+    fn fast_design_history_keeps_only_a_small_conversation_tail() {
+        let mut history = (0..20)
+            .map(|index| HistoryTurn {
+                role: if index % 2 == 0 { "user" } else { "assistant" }.into(),
+                content: format!("turn-{index}: {}", "x".repeat(2_500)),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            })
+            .collect::<Vec<_>>();
+        history.push(HistoryTurn {
+            role: "tool".into(),
+            content: "large old command output".repeat(1_000),
+            tool_calls: None,
+            tool_call_id: Some("old-tool".into()),
+            name: Some("run_command".into()),
+        });
+
+        let compact = compact_fast_design_history(&history);
+        let bytes = compact.iter().map(|turn| turn.content.len()).sum::<usize>();
+
+        assert!(compact.len() <= FAST_DESIGN_HISTORY_MAX_TURNS);
+        assert!(bytes <= FAST_DESIGN_HISTORY_MAX_BYTES);
+        assert!(compact.iter().all(|turn| turn.role != "tool"));
+        assert!(compact.iter().all(|turn| turn.tool_calls.is_none()));
+        assert!(compact.last().unwrap().content.starts_with("turn-19"));
     }
 
     #[test]
@@ -2994,8 +3247,11 @@ mod tests {
     #[test]
     fn unknown_permission_modes_fail_closed_to_plan() {
         assert_eq!(normalized_permission_mode("unexpected"), "plan");
-        assert!(cursor_permission_instructions("plan").contains("read-only"));
-        assert!(cursor_permission_instructions("research").contains("read-only"));
+        assert!(cursor_permission_instructions("plan").contains("Ship-level"));
+        assert!(!cursor_permission_instructions("plan").contains("read-only"));
+        assert_eq!(normalized_permission_mode("research"), "ask");
+        assert_eq!(normalized_permission_mode("ask"), "ask");
+        assert!(cursor_permission_instructions("ask").contains("read-only"));
         assert_eq!(normalized_permission_mode("multi_agent"), "multi_agent");
         assert!(cursor_permission_instructions("multi_agent").contains("MULTI-AGENT"));
     }

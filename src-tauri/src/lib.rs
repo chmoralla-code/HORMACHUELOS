@@ -123,7 +123,8 @@ async fn save_settings(
     // Normalize permission mode + auto_approve together
     let mode = settings.permission_mode.trim().to_ascii_lowercase();
     settings.permission_mode = match mode.as_str() {
-        "plan" | "auto" | "research" | "full" | "multi_agent" => mode,
+        "ask" | "research" => "ask".into(),
+        "plan" | "auto" | "full" | "multi_agent" => mode,
         _ => {
             if settings.auto_approve {
                 "auto".into()
@@ -897,12 +898,14 @@ fn clear_project_files(state: tauri::State<'_, state::AppState>) -> Result<u64, 
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn agent_run(
     prompt: String,
     session_id: String,
     history: Option<Vec<agent::HistoryTurn>>,
     project_root: Option<String>,
     cursor_agent_id: Option<String>,
+    task_profile: Option<String>,
     app: tauri::AppHandle,
     state: tauri::State<'_, state::AppState>,
 ) -> Result<Option<String>, String> {
@@ -998,6 +1001,7 @@ async fn agent_run(
         run,
         history.unwrap_or_default(),
         cursor_resume,
+        task_profile,
     )
     .await;
     match &result {

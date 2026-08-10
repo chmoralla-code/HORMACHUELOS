@@ -1,4 +1,11 @@
-import { api, onAgentEvent, onComputerUseFx, onComputerUseStatus, type AgentEvent } from "./ipc";
+import {
+  api,
+  onAgentEvent,
+  onComputerUseFx,
+  onComputerUseStatus,
+  type AgentEvent,
+  type AgentTaskProfile,
+} from "./ipc";
 import { Sidebar } from "./components/sidebar";
 import { Chat } from "./components/chat";
 import { ConsolePanel } from "./components/console";
@@ -1552,7 +1559,7 @@ function openClientSuccessCenter() {
   clientSuccessCenter?.open();
 }
 
-async function sendPrompt(prompt: string) {
+async function sendPrompt(prompt: string, taskProfile: AgentTaskProfile = "default") {
   cancelDoneWorkingCue();
   if (!currentProjectPath) {
     reportError("Open or create a project before starting.");
@@ -1678,6 +1685,7 @@ async function sendPrompt(prompt: string) {
       history,
       projectRoot,
       resumeAgentId,
+      taskProfile,
     );
     if (typeof nextAgentId === "string" && nextAgentId.trim()) {
       const owning = sessionForId(sessionId);
@@ -1979,7 +1987,8 @@ async function init() {
   // Preview actions use Chat's normal send/queue rules. That means a Build
   // choice always reaches the selected model, even when another task is still
   // running, instead of being silently dropped by a direct agent_run call.
-  sitePreview.setDescribeHandler((prompt, imagePath) => chat.submitPreviewPrompt(prompt, imagePath));
+  sitePreview.setDescribeHandler((prompt, imagePath, taskProfile) =>
+    chat.submitPreviewPrompt(prompt, imagePath, taskProfile));
   chat.setProjectReady(false);
   const HOSTED_SITE = "https://hormachuelos.vercel.app";
   let websiteUser: WebsiteAccount | null = null;

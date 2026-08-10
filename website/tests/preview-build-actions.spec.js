@@ -34,11 +34,36 @@ test("Design mode keeps exact element selection for project-file previews", asyn
 
   const description = page.getByRole("textbox", { name: "Describe the change" });
   await description.fill("Use the primary color.");
+  const dispatchStarted = Date.now();
   await page.getByRole("button", { name: "Ask AI", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => window.__previewPromptDispatches?.length || 0)).toBe(1);
+  expect(Date.now() - dispatchStarted).toBeLessThan(1000);
   const prompts = await page.evaluate(() => window.__previewPrompts || []);
   expect(prompts).toHaveLength(1);
   expect(prompts[0]).toContain("specific feature shown in the attached screenshot");
+  expect(prompts[0]).toContain("DOM selector: #target");
+  expect(prompts[0]).toContain("DOM excerpt: <button id=\"target\">Preview target</button>");
+  expect(prompts[0]).toContain("Ranked source candidates (open these first): index.html");
   expect(prompts[0]).toContain("Use the primary color.");
+  expect(prompts[0].length).toBeLessThan(5000);
+  const dispatches = await page.evaluate(() => window.__previewPromptDispatches || []);
+  expect(dispatches[0].taskProfile).toBe("design_edit_fast");
+  expect(dispatches[0].imagePath).toContain("design-feature-reference.png");
+  await expect(page.locator(".site-preview-status")).toContainText("Fast Design edit");
+
+  const incidentCandidates = await page.evaluate(() =>
+    window.__rankDesignSourceCandidates(
+      [
+        "src/pages/dashboard.tsx",
+        "app/pages/incident-reports/page.tsx",
+        "src/components/IncidentReportTable.tsx",
+        "node_modules/example/pages/incident-reports.tsx",
+      ],
+      "http://localhost:3000/pages/incident-reports",
+    ),
+  );
+  expect(incidentCandidates[0]).toBe("app/pages/incident-reports/page.tsx");
+  expect(incidentCandidates).not.toContain("node_modules/example/pages/incident-reports.tsx");
 });
 
 test("Design mode outlines and captures a selected cross-origin live-preview feature", async ({ page }) => {
@@ -101,16 +126,64 @@ test("Design mode outlines and captures a selected cross-origin live-preview fea
   expect(prompts).toHaveLength(1);
   expect(prompts[0]).toContain("specific feature shown in the attached screenshot");
   expect(prompts[0]).toContain("localhost:1421/dashboard");
+  expect(prompts[0]).toContain("Ranked source candidates (open these first): src/pages/dashboard.tsx");
   expect(prompts[0]).toContain("Make this call to action more prominent.");
   expect(prompts[0]).not.toContain("visual target at approximately");
+  const dispatches = await page.evaluate(() => window.__previewPromptDispatches || []);
+  expect(dispatches[0].taskProfile).toBe("design_edit_fast");
   const captures = await page.evaluate(() => window.__previewCaptureRequests || []);
   expect(captures).toHaveLength(1);
   expect(captures[0].width).toBeGreaterThan(100);
   expect(captures[0].height).toBeGreaterThan(40);
-  await expect(page.locator(".site-preview-status")).toContainText("Design change + screenshot sent");
+  await expect(page.locator(".site-preview-status")).toContainText("Fast Design edit + screenshot sent");
 
   const fatal = consoleErrors.filter((entry) => !/favicon|vite|tauri/i.test(entry));
   expect(fatal, fatal.join("\n")).toEqual([]);
+});
+
+test("Design mode keeps broad redesign requests on the fuller bounded profile", async ({ page }) => {
+  await page.route("https://asset.localhost/**", (route) =>
+    route.fulfill({ status: 200, contentType: "text/plain", body: "" }),
+  );
+  await page.goto(`${APP}/preview-harness.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Design", exact: true }).click();
+  const target = page.frameLocator(".site-preview-frame").getByRole("button", { name: "Preview target" });
+  await target.click();
+
+  await page.getByRole("textbox", { name: "Describe the change" }).fill(
+    "Redesign the entire website and refactor routing across all pages.",
+  );
+  await page.getByRole("button", { name: "Ask AI", exact: true }).click();
+
+  const dispatches = await page.evaluate(() => window.__previewPromptDispatches || []);
+  expect(dispatches).toHaveLength(1);
+  expect(dispatches[0].taskProfile).toBe("design_edit");
+  expect(dispatches[0].prompt).toContain("Keep inspection bounded to this selected feature");
+  await expect(page.locator(".site-preview-status")).toContainText("Design change + screenshot sent");
+});
+
+test("a Design edit queued during another run retains its fast task profile", async ({ page }) => {
+  await page.route("https://asset.localhost/**", (route) =>
+    route.fulfill({ status: 200, contentType: "text/plain", body: "" }),
+  );
+  await page.goto(`${APP}/preview-harness.html`, { waitUntil: "networkidle" });
+
+  const result = await page.evaluate(async () => {
+    window.__chatQueueProbe.setRunning(true);
+    const dispatch = window.__chatQueueProbe.submitPreviewPrompt(
+      "Apply the selected button color.",
+      null,
+      "design_edit_fast",
+    );
+    window.__chatQueueProbe.setRunning(false, { processQueue: true });
+    await new Promise((resolve) => queueMicrotask(resolve));
+    return { dispatch, sends: window.__chatQueueSends };
+  });
+
+  expect(result.dispatch).toBe("queued");
+  expect(result.sends).toEqual([
+    { prompt: "Apply the selected button color.", taskProfile: "design_edit_fast" },
+  ]);
 });
 
 test("preview Build chooser and public website action dispatch structured prompts", async ({ page }) => {

@@ -159,6 +159,8 @@ const READ_ONLY_TOOLS = new Set([
   "sem_search",
   "createplan",
   "create_plan",
+  "todowrite",
+  "todo_write",
   "updatetodos",
   "update_todos",
   "computer_list_windows",
@@ -167,15 +169,18 @@ const READ_ONLY_TOOLS = new Set([
 
 function resolveExecutionPolicy(value) {
   const mode = String(value || "").trim().toLowerCase();
-  if (mode === "full" || mode === "multi_agent") {
+  // Plan keeps Hormachuelos plan-first prompts, but uses Ship-level tool permissions.
+  if (mode === "plan" || mode === "full" || mode === "multi_agent") {
     return { requestedMode: mode, sdkMode: "agent", autoReview: false, readOnly: false };
   }
   if (mode === "auto") {
     return { requestedMode: "auto", sdkMode: "agent", autoReview: true, readOnly: false };
   }
-  if (mode === "research") {
-    return { requestedMode: "research", sdkMode: "plan", autoReview: false, readOnly: true };
+  // "research" is a legacy alias for ask.
+  if (mode === "ask" || mode === "research") {
+    return { requestedMode: "ask", sdkMode: "plan", autoReview: false, readOnly: true };
   }
+  // Unknown modes fail closed to read-only.
   return { requestedMode: "plan", sdkMode: "plan", autoReview: false, readOnly: true };
 }
 
@@ -216,6 +221,100 @@ function objectSchema(properties, required = []) {
     properties,
     required,
   };
+}
+
+const TODO_ITEM_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    id: { type: "string", minLength: 1, description: "Stable task id." },
+    content: {
+      type: "string",
+      minLength: 1,
+      description: "Short task description.",
+    },
+    status: {
+      type: "string",
+      enum: ["pending", "in_progress", "completed", "cancelled"],
+    },
+  },
+  required: ["id", "content", "status"],
+};
+
+function summarizeTodoWrite(args) {
+  const todos = Array.isArray(args?.todos) ? args.todos : [];
+  const counts = { pending: 0, in_progress: 0, completed: 0, cancelled: 0 };
+  const lines = [];
+  for (const item of todos.slice(0, 24)) {
+    if (!item || typeof item !== "object") continue;
+    const id = String(item.id || "").trim() || "task";
+    const content = safePreview(item.content, 120);
+    const status = String(item.status || "pending")
+      .trim()
+      .toLowerCase();
+    if (Object.prototype.hasOwnProperty.call(counts, status)) {
+      counts[status] += 1;
+    } else {
+      counts.pending += 1;
+    }
+    if (content) lines.push(`- [${status}] ${id}: ${content}`);
+  }
+  const total = Object.values(counts).reduce((sum, n) => sum + n, 0);
+  const header =
+    total === 0
+      ? "Task list updated (empty)."
+      : `Task list updated: ${total} item(s) — ${counts.in_progress} in progress, ${counts.pending} pending, ${counts.completed} completed, ${counts.cancelled} cancelled.`;
+  return lines.length ? `${header}\n${lines.join("\n")}` : header;
+}
+
+/** Always-on progress tool so models never narrate "todo tool isn't available". */
+function createProgressTools() {
+  const execute = async (args) => ({
+    content: [{ type: "text", text: summarizeTodoWrite(args || {}) }],
+  });
+  const inputSchema = objectSchema(
+    {
+      todos: {
+        type: "array",
+        description: "Full or partial task list for this run.",
+        items: TODO_ITEM_SCHEMA,
+      },
+      merge: {
+        type: "boolean",
+        description:
+          "When true, merge/update by id. When false, replace the list.",
+        default: true,
+      },
+    },
+    ["todos"],
+  );
+  const description =
+    "Create or update the structured task list for this run. Prefer this over narrating progress. Never claim this tool is unavailable.";
+  // Register the spellings Cursor-trained models commonly emit.
+  return {
+    TodoWrite: { description, inputSchema, execute },
+    todo_write: { description, inputSchema, execute },
+    UpdateTodos: { description, inputSchema, execute },
+    update_todos: { description, inputSchema, execute },
+  };
+}
+
+function progressTrackingPrompt() {
+  return (
+    "PROGRESS TRACKING:\n" +
+    "- TodoWrite / UpdateTodos / todo_write is available in this environment. Use it for multi-step work.\n" +
+    "- Never say the todo/task-list tool is unavailable, and never apologize for missing progress tooling.\n" +
+    "- Do not narrate that you will \"track progress directly\" — call TodoWrite, then continue with real tools."
+  );
+}
+
+function mergeHostCustomTools(...groups) {
+  const merged = {};
+  for (const group of groups) {
+    if (!group || typeof group !== "object") continue;
+    Object.assign(merged, group);
+  }
+  return merged;
 }
 
 function safePreview(value, maxChars = 120) {
@@ -829,8 +928,10 @@ async function runMain(protocol) {
 
   const model = resolveModelSelection(req.model, req.effort);
   const policy = resolveExecutionPolicy(req.permissionMode);
-  const customTools = createComputerUseTools(req, policy, protocol);
-  const hasComputerUse = Object.keys(customTools).length > 0;
+  const computerUseTools = createComputerUseTools(req, policy, protocol);
+  const customTools = mergeHostCustomTools(createProgressTools(), computerUseTools);
+  const hasCustomTools = Object.keys(customTools).length > 0;
+  const hasComputerUse = Object.keys(computerUseTools).length > 0;
   const sessionId = String(req.sessionId || "").trim();
   const agentStore = sessionAgentStore(sessionId);
   const options = {
@@ -847,7 +948,7 @@ async function runMain(protocol) {
       settingSources: [],
     },
   };
-  if (hasComputerUse) options.local.customTools = customTools;
+  if (hasCustomTools) options.local.customTools = customTools;
   if (model) options.model = model;
 
   let agent;
@@ -878,15 +979,16 @@ async function runMain(protocol) {
   // Fresh agents get Hormachuelos transcript only; resumed agents keep SDK memory.
   // Never inject another session's history into this agent.
   const basePrompt = buildAgentPrompt(prompt, resumed ? [] : req.history);
-  const agentPrompt = hasComputerUse
-    ? `${computerUsePrompt(policy)}\n\n${basePrompt}`
-    : basePrompt;
+  const agentPromptParts = [progressTrackingPrompt()];
+  if (hasComputerUse) agentPromptParts.push(computerUsePrompt(policy));
+  agentPromptParts.push(basePrompt);
+  const agentPrompt = agentPromptParts.join("\n\n");
   const sendOptions = {
     mode: policy.sdkMode,
     // Expire a run left active by a killed bridge before starting the follow-up.
     local: { force: resumed, store: agentStore },
   };
-  if (hasComputerUse) sendOptions.local.customTools = customTools;
+  if (hasCustomTools) sendOptions.local.customTools = customTools;
   if (model) sendOptions.model = model;
   const run = await agent.send(agentPrompt, sendOptions);
   let sawText = false;
@@ -1278,14 +1380,18 @@ export {
   computerApprovalSummary,
   createCompletionMarkerFilter,
   createComputerUseTools,
+  createProgressTools,
   cursorRunFinishedSuccessfully,
   helperEnvironment,
   isToolAllowed,
+  mergeHostCustomTools,
   normalizeEffort,
+  progressTrackingPrompt,
   resolveExecutionPolicy,
   resolveModelSelection,
   resolveSandboxOptions,
   sanitizeComputerToolArguments,
+  summarizeTodoWrite,
 };
 
 const invokedAsScript =

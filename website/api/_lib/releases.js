@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.61";
-const BUILTIN_MSI_SHA256 = "1635696d9e7143ca11c46319191c566bf9b310d35aea28a8697fc3ea7478a6c6";
-const BUILTIN_EXE_SHA256 = "744005d82b342391eb1cd7bab4251c1d144ac17a68dd948771de3ef3079c1c64";
-const BUILTIN_RELEASE_NOTES = "Fixed AI sessions that could announce done working too early or leave interrupted tool cards stuck. Completion now waits for queued and background work, streamed previews close safely, Smart Agent state resets between runs, and Cursor only marks explicitly verified tasks complete. Also adds full-size chat image viewing and more accurate design-mode feature selection.";
+const BUILTIN_RELEASE_VERSION = "0.1.63";
+const BUILTIN_MSI_SHA256 = "83572271128187624fa0a7c0c5adb922ba1f3fb635955d7071ccc826204df2ad";
+const BUILTIN_EXE_SHA256 = "1aa223c9979d03a8e456d06351fe91aec8245e92e79b565b7f364ca7460d5856";
+const BUILTIN_RELEASE_NOTES = "Faster Design Mode edits with exact preview targeting, route-ranked source hints, isolated low-effort micro-edit agents, and long-session queue reliability.";
 
 const BUILTIN_FORCE_UPDATE = true;
 const GITHUB_RELEASES_BASE = "https://github.com/chmoralla-code/HORMACHUELOS/releases/download";
