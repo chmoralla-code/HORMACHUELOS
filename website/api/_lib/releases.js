@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.58";
-const BUILTIN_MSI_SHA256 = "cf0ab76da4c1ce62e087b09379ed3f6fcbf9cd87977931da516734b12cb1e2f1";
-const BUILTIN_EXE_SHA256 = "c505055b03302794d7f6c2c9b67038b8da8ab1197cd9c3a191b4cd455b200177";
-const BUILTIN_RELEASE_NOTES = "Multi-Agent visual effects, colors, and tool activity now stay with their project and session after switching folders. Added safe per-file and clear-all project controls. Fixed streamed tool-call naming so parallel tools remain separate.";
+const BUILTIN_RELEASE_VERSION = "0.1.59";
+const BUILTIN_MSI_SHA256 = "75881d747bef4252144e7fe2d538af31e69cb78390f85f0d55499117f84d449b";
+const BUILTIN_EXE_SHA256 = "3b216da20892b771ddc826f653917abf62ca5ed1f437d4254bc9b19e491ef2b0";
+const BUILTIN_RELEASE_NOTES = "Fixed automatic continuation loops: recovery status stays out of the Thinking transcript, and repeated no-tool response-limit replies now pause safely instead of running indefinitely. Long tasks that keep using tools continue normally.";
 const GITHUB_RELEASES_BASE = "https://github.com/chmoralla-code/HORMACHUELOS/releases/download";
 
 /**

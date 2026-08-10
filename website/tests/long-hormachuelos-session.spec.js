@@ -151,9 +151,12 @@ async function installHormachuelosLongRunMock(page) {
           content: "ok",
         });
         if (round < totalWorkRounds - 1) {
-          event("reasoning", {
+          // A recovery is live status, not model reasoning. Treating it as
+          // reasoning made the same continuation sentence accumulate inside
+          // the thought transcript while a long run was still progressing.
+          event("status", {
             iteration: round,
-            text: "Hosted stream was interrupted; continuing the same task from the latest workspace state...",
+            message: "Response limit reached — resuming from the next unfinished step…",
           });
         }
         await delay(12);
@@ -289,9 +292,10 @@ test("long HORMACHUELOS task recovers without a manual Continue message", async 
   expect(trace.filter((event) => event === "tool_call").length).toBeGreaterThanOrEqual(15);
   // More recoveries than the former global 12-pass safeguard, each after a
   // concrete tool turn. A long task must still complete as a single run.
-  expect(trace.filter((event) => event === "reasoning").length).toBeGreaterThanOrEqual(14);
+  expect(trace.filter((event) => event === "status").length).toBeGreaterThanOrEqual(14);
   expect(trace).toContain("end:completed");
   expect(trace).not.toContain("end:continuation_safety_guard");
+  await expect(page.locator("#chat")).not.toContainText("Response limit reached");
 
   const send = page.getByRole("button", { name: "Send message", exact: true });
   await expect(send).toBeEnabled();

@@ -36,21 +36,18 @@ fn emit_cancelled(app: &AppHandle, session_id: &str, iteration: u32) {
 }
 
 // The normal tool loop intentionally remains unbounded. This guard applies
-// only to *consecutive* provider replies that took no concrete tool action.
-// A productive tool turn resets it, so a large website, APK, benchmark, or
-// software task never stops merely because it has been running for a while.
+// only to *consecutive automatic recoveries* that took no concrete tool
+// action. Text alone must not reset it: otherwise a provider that repeatedly
+// hits its response limit can echo progress prose forever and leave the run
+// stuck. A productive tool turn resets it, so a large website, APK, benchmark,
+// or software task never stops merely because it has been running for a while.
 const MAX_CONSECUTIVE_STALLED_RECOVERIES: u8 = 4;
 
-/// A continuation reply is only a stall when it is empty or wordless. A model
-/// mid-thought that streams a real progress sentence is still making progress,
-/// so it must not advance the safety counter that ends a run.
-fn reply_looks_stalled(resp: &LlmResponse) -> bool {
-    let has_text = resp
-        .text
-        .as_deref()
-        .map(|text| !text.trim().is_empty())
-        .unwrap_or(false);
-    !has_text
+/// Only an actual tool call proves that an automatic recovery moved the task
+/// forward. Provider prose is still shown to the client, but it cannot keep a
+/// recovery loop alive by itself.
+fn response_made_concrete_progress(resp: &LlmResponse) -> bool {
+    !resp.tool_calls.is_empty()
 }
 
 fn next_stalled_recovery_count(previous: u8, made_concrete_progress: bool) -> u8 {
@@ -74,17 +71,11 @@ enum AutomaticContinuationReason {
 impl AutomaticContinuationReason {
     fn status_text(self) -> &'static str {
         match self {
-            Self::OutputLimit => {
-                "The model reached its response limit. Continuing automatically from the next unfinished step..."
-            }
-            Self::CompletionCheck => {
-                "Checking the in-progress task and continuing automatically if work remains..."
-            }
-            Self::AnnouncedAction => {
-                "The model described the next step but did not run a tool. Continuing automatically..."
-            }
+            Self::OutputLimit => "Response limit reached — resuming from the next unfinished step…",
+            Self::CompletionCheck => "Checking the latest work before continuing…",
+            Self::AnnouncedAction => "Resuming the next required action…",
             Self::ProviderBlip => {
-                "The provider briefly failed. Continuing automatically from the next unfinished step..."
+                "Provider paused briefly — retrying from the last unfinished step…"
             }
         }
     }
@@ -1790,17 +1781,8 @@ The tool entries are historical summaries; use fresh tools for the current works
                     &session_id,
                     "status",
                     json!({
-                        "message": "Provider hiccup — continuing…",
+                        "message": reason.status_text(),
                         "attempt": provider_blip_recoveries,
-                    }),
-                );
-                emit(
-                    &app,
-                    &session_id,
-                    "reasoning",
-                    json!({
-                        "text": reason.status_text(),
-                        "iteration": iteration,
                     }),
                 );
                 messages.push(ChatMessage::user(reason.instruction()));
@@ -1915,14 +1897,9 @@ The tool entries are historical summaries; use fresh tools for the current works
             };
 
             if let Some(reason) = continuation_reason {
-                let made_concrete_progress = match reason {
-                    AutomaticContinuationReason::AnnouncedAction
-                    | AutomaticContinuationReason::ProviderBlip => false,
-                    _ => !reply_looks_stalled(&resp),
-                };
                 consecutive_stalled_recoveries = next_stalled_recovery_count(
                     consecutive_stalled_recoveries,
-                    made_concrete_progress,
+                    response_made_concrete_progress(&resp),
                 );
                 if consecutive_stalled_recoveries >= MAX_CONSECUTIVE_STALLED_RECOVERIES {
                     smart_agent.pause(
@@ -1959,9 +1936,9 @@ The tool entries are historical summaries; use fresh tools for the current works
                 emit(
                     &app,
                     &session_id,
-                    "reasoning",
+                    "status",
                     json!({
-                        "text": reason.status_text(),
+                        "message": reason.status_text(),
                         "iteration": iteration,
                     }),
                 );
@@ -2015,8 +1992,10 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
 
         // A provider tool call is concrete forward progress. Reset only the
         // recovery watchdog, never the task or conversation history.
-        consecutive_stalled_recoveries =
-            next_stalled_recovery_count(consecutive_stalled_recoveries, true);
+        consecutive_stalled_recoveries = next_stalled_recovery_count(
+            consecutive_stalled_recoveries,
+            response_made_concrete_progress(&resp),
+        );
         let assistant_msg = ChatMessage::assistant(
             resp.text.as_deref().unwrap_or(""),
             Some(resp.tool_calls.clone()),
@@ -2666,7 +2645,7 @@ mod tests {
         display_provider_name, identity_instructions, next_stalled_recovery_count,
         normalize_tool_calls, normalized_permission_mode, parallel_readonly_batch_len,
         public_tool_arguments, public_tool_preview_delta, reply_announces_pending_action,
-        reply_looks_stalled, resolve_tool_preview_name, starts_as_explanatory_request,
+        resolve_tool_preview_name, response_made_concrete_progress, starts_as_explanatory_request,
         stop_reason_requires_continuation, task_likely_requires_project_completion,
         tool_confirm_summary, truncate_utf8, uses_cursor_sdk, HistoryToolCall, HistoryTurn,
         MAX_CONSECUTIVE_STALLED_RECOVERIES, NATIVE_HISTORY_MAX_BYTES, NATIVE_HISTORY_MAX_TURNS,
@@ -2998,43 +2977,42 @@ mod tests {
     }
 
     #[test]
-    fn text_only_replies_do_not_count_as_stalls() {
-        // A model mid-thought that streams a real progress sentence must not
-        // advance the safety counter, even when it has not called a tool yet.
-        let with_text = LlmResponse {
+    fn automatic_recovery_requires_tool_activity_to_reset_its_watchdog() {
+        let text_only = LlmResponse {
             text: Some("Let me inspect the workspace first.".into()),
             tool_calls: Vec::new(),
             reasoning_content: None,
-            stop_reason: "stop".into(),
+            stop_reason: "length".into(),
             usage_tokens: 10,
         };
-        assert!(!reply_looks_stalled(&with_text));
+        assert!(!response_made_concrete_progress(&text_only));
 
-        // Empty or wordless replies are genuine stalls and must count.
-        let empty = LlmResponse {
-            text: None,
-            tool_calls: Vec::new(),
-            reasoning_content: None,
-            stop_reason: "stop".into(),
-            usage_tokens: 10,
-        };
-        assert!(reply_looks_stalled(&empty));
-        let whitespace = LlmResponse {
-            text: Some("   \n\t  ".into()),
-            tool_calls: Vec::new(),
-            reasoning_content: None,
-            stop_reason: "stop".into(),
-            usage_tokens: 10,
-        };
-        assert!(reply_looks_stalled(&whitespace));
-
-        // After a text checkpoint the watchdog stays at zero; only true
-        // wordless stalls accumulate toward the safety cap.
-        let mut stalls = 0;
-        for _ in 0..(MAX_CONSECUTIVE_STALLED_RECOVERIES * 2) {
-            stalls = next_stalled_recovery_count(stalls, !reply_looks_stalled(&with_text));
+        // A response-limit loop can still show useful text, but it must not
+        // run forever unless it starts using tools again.
+        let mut recoveries = 0;
+        for _ in 0..MAX_CONSECUTIVE_STALLED_RECOVERIES {
+            recoveries = next_stalled_recovery_count(
+                recoveries,
+                response_made_concrete_progress(&text_only),
+            );
         }
-        assert_eq!(stalls, 0);
+        assert_eq!(recoveries, MAX_CONSECUTIVE_STALLED_RECOVERIES);
+
+        let with_tool = LlmResponse {
+            text: None,
+            tool_calls: vec![ToolCall {
+                id: "inspect-project".into(),
+                name: "list_dir".into(),
+                arguments: json!({ "path": "." }),
+            }],
+            reasoning_content: None,
+            stop_reason: "tool_calls".into(),
+            usage_tokens: 10,
+        };
+        assert!(response_made_concrete_progress(&with_tool));
+        recoveries =
+            next_stalled_recovery_count(recoveries, response_made_concrete_progress(&with_tool));
+        assert_eq!(recoveries, 0);
     }
 
     #[test]
