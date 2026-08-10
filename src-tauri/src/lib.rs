@@ -620,6 +620,20 @@ async fn create_project_dir(
     Ok(())
 }
 
+/// Guard for the **New build** flow: tells the picker whether the chosen
+/// parent directory is itself an existing source project (manifest + layout
+/// or .git). Creating a fresh blank project inside such a folder creates the
+/// exact "empty project nested in the real one" trap users hit when they mean
+/// to *open* the parent instead.
+#[tauri::command]
+fn check_project_parent_is_existing_project(path: String) -> bool {
+    let parent = std::path::Path::new(&path);
+    match parent.canonicalize() {
+        Ok(parent) if parent.is_dir() => workspace::looks_like_project_root(&parent),
+        _ => false,
+    }
+}
+
 #[tauri::command]
 fn list_project_templates() -> Vec<serde_json::Value> {
     templates::TEMPLATES
@@ -1203,6 +1217,7 @@ pub fn run() {
             list_provider_models,
             list_hosted_provider_catalog,
             create_project_dir,
+            check_project_parent_is_existing_project,
             list_project_templates,
             list_project_files,
             read_project_file,

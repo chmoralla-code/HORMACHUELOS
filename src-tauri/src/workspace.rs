@@ -119,7 +119,7 @@ fn directory_is_empty(path: &Path) -> Result<bool> {
     Ok(entries.next().transpose()?.is_none())
 }
 
-fn looks_like_project_root(path: &Path) -> bool {
+pub fn looks_like_project_root(path: &Path) -> bool {
     let has_manifest = PROJECT_MANIFESTS
         .iter()
         .any(|name| path.join(name).is_file());
@@ -567,7 +567,7 @@ Prepared with Hormachuelos.\n\n\
 mod tests {
     use super::{
         clear_project_files, delete_project_file, export_client_pack, list_project_files,
-        read_project_file, resolve_open_project_root, ProjectNode,
+        looks_like_project_root, read_project_file, resolve_open_project_root, ProjectNode,
     };
     use std::path::{Path, PathBuf};
 
@@ -639,6 +639,24 @@ mod tests {
 
         let resolved = resolve_open_project_root(&child).expect("resolve project root");
         assert_eq!(resolved, child.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn project_parent_guard_detects_existing_project_roots() {
+        let workspace = TestWorkspace::new();
+        // A real source project (manifest + layout dir).
+        std::fs::write(workspace.path().join("package.json"), "{}").unwrap();
+        std::fs::create_dir_all(workspace.path().join("src")).unwrap();
+        assert!(looks_like_project_root(workspace.path()));
+
+        // A nested folder inside that project is not itself a project root.
+        let nested = workspace.path().join("subfolder");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert!(!looks_like_project_root(&nested));
+
+        // A plain folder with no manifest/layout signal is not a project root.
+        let plain = TestWorkspace::new();
+        assert!(!looks_like_project_root(plain.path()));
     }
 
     #[test]

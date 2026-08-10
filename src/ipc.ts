@@ -163,6 +163,9 @@ export const api = {
     invoke("list_hosted_provider_catalog"),
   createProjectDir: (path: string, templateId?: string): Promise<void> =>
     invoke("create_project_dir", { path, templateId: templateId ?? null }),
+  /** True when a parent folder is itself an existing source project (manifest + layout/.git). */
+  checkProjectParentIsExistingProject: (path: string): Promise<boolean> =>
+    invoke("check_project_parent_is_existing_project", { path }),
   /** Create or reopen Hormachuelos' private no-folder workspace for quick sessions. */
   ensureQuickSessionWorkspace: (): Promise<string> => invoke("ensure_quick_session_workspace"),
   listProjectTemplates: (): Promise<ProjectTemplate[]> => invoke("list_project_templates"),

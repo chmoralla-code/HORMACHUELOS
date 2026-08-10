@@ -43,11 +43,69 @@ fn emit_cancelled(app: &AppHandle, session_id: &str, iteration: u32) {
 // or software task never stops merely because it has been running for a while.
 const MAX_CONSECUTIVE_STALLED_RECOVERIES: u8 = 4;
 
-/// Only an actual tool call proves that an automatic recovery moved the task
-/// forward. Provider prose is still shown to the client, but it cannot keep a
-/// recovery loop alive by itself.
+/// True when the provider streamed real reasoning ("thinking") tokens.
+fn has_streamed_reasoning(resp: &LlmResponse) -> bool {
+    resp.reasoning_content
+        .as_deref()
+        .map(|reasoning| !reasoning.trim().is_empty())
+        .unwrap_or(false)
+}
+
+/// An automatic recovery counts as forward progress when the model took a
+/// concrete tool action, or streamed real reasoning that ended in a clean,
+/// finished reply. Reasoning is genuine model work — DeepSeek / Hormachuelos
+/// v4 thinking blocks — so a reply that thinks AND finishes (or calls tools)
+/// must reset the watchdog like a tool call. A cut-off reply (empty or
+/// sentence-unfinished text) is a recovery from a stall, not concrete
+/// progress: it still advances the watchdog so a provider that keeps
+/// truncating mid-generation cannot loop forever.
 fn response_made_concrete_progress(resp: &LlmResponse) -> bool {
-    !resp.tool_calls.is_empty()
+    if !resp.tool_calls.is_empty() {
+        return true;
+    }
+    has_streamed_reasoning(resp) && !reply_was_cut_off(resp)
+}
+
+/// Sentence-starter words a truncated reply often ends on ("Let", "Now", …).
+const CUT_OFF_SENTENCE_STARTERS: [&str; 7] =
+    ["let", "i'll", "i will", "now", "next", "first", "then"];
+
+/// True when a reply was cut off before the model actually finished — the
+/// classic "the AI suddenly stops mid-word" case. A reply with streamed
+/// reasoning but an empty or sentence-unfinished visible message (and no tool
+/// call) is not a deliberate stop: ending the run there leaves the user
+/// staring at a dangling "Let me…". Short interjections ("Sure", "Got it") and
+/// answers that end with punctuation or a closed delimiter are normal endings
+/// and are excluded.
+fn reply_was_cut_off(resp: &LlmResponse) -> bool {
+    if !resp.tool_calls.is_empty() {
+        return false;
+    }
+    if !has_streamed_reasoning(resp) {
+        return false;
+    }
+    let text = resp.text.as_deref().unwrap_or("").trim();
+    if text.is_empty() {
+        // Thought but produced no visible answer and no tool call yet.
+        return true;
+    }
+    // A very short reply with no punctuation is usually a complete interjection
+    // ("Sure", "OK"). Only treat it as cut off when it ends on a word that
+    // clearly begins more content ("Let", "Now", "I'll").
+    if text.split_whitespace().count() <= 2
+        && !CUT_OFF_SENTENCE_STARTERS
+            .iter()
+            .any(|starter| text.to_ascii_lowercase().starts_with(starter))
+    {
+        return false;
+    }
+    let ends_cleanly = text
+        .chars()
+        .last()
+        .map(|c| matches!(c, '.' | '!' | '?' | '…' | ':' | ';' | ')' | ']' | '}' | '`'))
+        .unwrap_or(false)
+        || text.ends_with("```");
+    !ends_cleanly
 }
 
 fn next_stalled_recovery_count(previous: u8, made_concrete_progress: bool) -> u8 {
@@ -1886,7 +1944,13 @@ The tool entries are historical summaries; use fresh tools for the current works
 
         if resp.tool_calls.is_empty() {
             let announced = reply_announces_pending_action(resp.text.as_deref().unwrap_or(""));
+            let cut_off = reply_was_cut_off(&resp);
             let continuation_reason = if stop_reason_requires_continuation(&resp.stop_reason) {
+                Some(AutomaticContinuationReason::OutputLimit)
+            } else if cut_off && !auth_request_routed {
+                // The provider ended the stream while the model was still
+                // thinking or mid-sentence. Resume the same run instead of
+                // leaving a dangling "Let me…" as the final answer.
                 Some(AutomaticContinuationReason::OutputLimit)
             } else if requires_project_completion && !auth_request_routed && mode != "plan" {
                 Some(AutomaticContinuationReason::CompletionCheck)
@@ -2645,10 +2709,11 @@ mod tests {
         display_provider_name, identity_instructions, next_stalled_recovery_count,
         normalize_tool_calls, normalized_permission_mode, parallel_readonly_batch_len,
         public_tool_arguments, public_tool_preview_delta, reply_announces_pending_action,
-        resolve_tool_preview_name, response_made_concrete_progress, starts_as_explanatory_request,
-        stop_reason_requires_continuation, task_likely_requires_project_completion,
-        tool_confirm_summary, truncate_utf8, uses_cursor_sdk, HistoryToolCall, HistoryTurn,
-        MAX_CONSECUTIVE_STALLED_RECOVERIES, NATIVE_HISTORY_MAX_BYTES, NATIVE_HISTORY_MAX_TURNS,
+        reply_was_cut_off, resolve_tool_preview_name, response_made_concrete_progress,
+        starts_as_explanatory_request, stop_reason_requires_continuation,
+        task_likely_requires_project_completion, tool_confirm_summary, truncate_utf8,
+        uses_cursor_sdk, HistoryToolCall, HistoryTurn, MAX_CONSECUTIVE_STALLED_RECOVERIES,
+        NATIVE_HISTORY_MAX_BYTES, NATIVE_HISTORY_MAX_TURNS,
     };
     use crate::llm::{ChatMessage, LlmResponse, ToolCall};
     use anyhow::anyhow;
@@ -3013,6 +3078,114 @@ mod tests {
         recoveries =
             next_stalled_recovery_count(recoveries, response_made_concrete_progress(&with_tool));
         assert_eq!(recoveries, 0);
+    }
+
+    #[test]
+    fn finished_reasoning_with_text_counts_as_progress_but_empty_replies_do_not() {
+        // A reasoning model that thinks AND finishes a clean visible answer made
+        // real forward progress: it must reset the watchdog like a tool call.
+        let finished = LlmResponse {
+            text: Some("The project uses a Tauri shell with a Vite frontend.".into()),
+            tool_calls: Vec::new(),
+            reasoning_content: Some("I inspected the structure first.".into()),
+            stop_reason: "stop".into(),
+            usage_tokens: 10,
+        };
+        assert!(response_made_concrete_progress(&finished));
+
+        let mut recoveries = 0;
+        for _ in 0..(MAX_CONSECUTIVE_STALLED_RECOVERIES * 2) {
+            recoveries =
+                next_stalled_recovery_count(recoveries, response_made_concrete_progress(&finished));
+        }
+        assert_eq!(recoveries, 0);
+
+        // Reasoning with NO visible answer and NO tool call is a cut-off/stalled
+        // reply, not concrete progress — it still advances the watchdog so a
+        // provider that keeps truncating cannot loop forever.
+        let empty = LlmResponse {
+            text: None,
+            tool_calls: Vec::new(),
+            reasoning_content: Some("I need to inspect the project layout first.".into()),
+            stop_reason: "stop".into(),
+            usage_tokens: 10,
+        };
+        assert!(!response_made_concrete_progress(&empty));
+    }
+
+    #[test]
+    fn cut_off_replies_are_detected_and_resumed() {
+        // The model produced reasoning but the visible answer was cut off at a
+        // dangling word (the exact "suddenly stops at 'Let'" symptom).
+        let dangling = LlmResponse {
+            text: Some("Let".into()),
+            tool_calls: Vec::new(),
+            reasoning_content: Some("I should list the directory first.".into()),
+            stop_reason: "stop".into(),
+            usage_tokens: 10,
+        };
+        assert!(reply_was_cut_off(&dangling));
+
+        // Reasoning with no visible text at all is also mid-thought, not done.
+        let thought_only = LlmResponse {
+            text: None,
+            tool_calls: Vec::new(),
+            reasoning_content: Some("Let me find the relevant files.".into()),
+            stop_reason: "stop".into(),
+            usage_tokens: 10,
+        };
+        assert!(reply_was_cut_off(&thought_only));
+
+        // A finished answer ends cleanly and must NOT be resumed.
+        let complete = LlmResponse {
+            text: Some("The project is a Next.js app with a Tauri shell.".into()),
+            tool_calls: Vec::new(),
+            reasoning_content: Some("I inspected the structure.".into()),
+            stop_reason: "stop".into(),
+            usage_tokens: 10,
+        };
+        assert!(!reply_was_cut_off(&complete));
+
+        // Short replies that are complete are not cut off either — even when
+        // they carry reasoning and no trailing punctuation ("Sure", "OK").
+        let short = LlmResponse {
+            text: Some("Done!".into()),
+            tool_calls: Vec::new(),
+            reasoning_content: None,
+            stop_reason: "stop".into(),
+            usage_tokens: 10,
+        };
+        assert!(!reply_was_cut_off(&short));
+        let interjection = LlmResponse {
+            text: Some("Sure".into()),
+            tool_calls: Vec::new(),
+            reasoning_content: Some("No further action needed.".into()),
+            stop_reason: "stop".into(),
+            usage_tokens: 10,
+        };
+        assert!(!reply_was_cut_off(&interjection));
+        let got_it = LlmResponse {
+            text: Some("Got it".into()),
+            tool_calls: Vec::new(),
+            reasoning_content: Some("Understood.".into()),
+            stop_reason: "stop".into(),
+            usage_tokens: 10,
+        };
+        assert!(!reply_was_cut_off(&got_it));
+
+        // Tool-call replies are handled by the tool path, never resumed as cut.
+        let with_tool = LlmResponse {
+            text: Some("Let".into()),
+            tool_calls: vec![ToolCall {
+                id: "inspect".into(),
+                name: "list_dir".into(),
+                arguments: json!({ "path": "." }),
+            }],
+            reasoning_content: Some("I should inspect the project.".into()),
+            stop_reason: "tool_calls".into(),
+            usage_tokens: 10,
+        };
+        assert!(!reply_was_cut_off(&with_tool));
     }
 
     #[test]

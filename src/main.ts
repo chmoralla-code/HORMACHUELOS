@@ -1426,10 +1426,20 @@ async function createProject(path: string, templateId?: string) {
 function openNewProjectPicker() {
   const root = document.getElementById("modal-root")!;
   clear(root);
-  const picker = new ProjectPicker(root, "new", async (path, templateId) => {
-    clear(root);
-    await createProject(path, templateId);
-  }, () => clear(root));
+  const picker = new ProjectPicker(
+    root,
+    "new",
+    async (path, templateId) => {
+      clear(root);
+      await createProject(path, templateId);
+    },
+    () => clear(root),
+    // Escape hatch from the "parent is already a project" guard: open the
+    // existing folder directly instead of nesting a blank project inside it.
+    async (parentPath) => {
+      await selectProject(parentPath);
+    }
+  );
   void picker.render();
 }
 

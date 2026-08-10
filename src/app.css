@@ -3860,6 +3860,37 @@
 .set-hint { font-size: 11px; color: var(--fg-3); margin-top: 4px; }
 .set-key-row { display: flex; gap: 8px; }
 .set-key-row .field { flex: 1; }
+
+.picker-project-warn {
+  margin-top: 10px;
+  padding: 9px 11px;
+  border: 1px solid rgba(255, 176, 32, 0.35);
+  border-radius: 9px;
+  background: rgba(255, 176, 32, 0.08);
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #f0c46a;
+}
+.picker-project-warn-text { flex: 1; min-width: 0; }
+.picker-project-warn .btn.sm {
+  flex-shrink: 0;
+  white-space: nowrap;
+  color: #f0c46a;
+  border-color: rgba(255, 176, 32, 0.45);
+}
+.picker-project-warn .btn.sm:hover {
+  background: rgba(255, 176, 32, 0.14);
+  color: #ffd98a;
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
 .set-status { font-size: 11px; margin-top: 4px; font-family: var(--font-mono); }
 .set-status.set { color: var(--fg-2); }
 .set-status.unset { color: var(--fg-4); }
