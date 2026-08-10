@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.64";
-const BUILTIN_MSI_SHA256 = "da894d7bb98d457e888a64d7b3880fb31200b6759c61e0fba6e01050144938ad";
-const BUILTIN_EXE_SHA256 = "3a3a1f9865460937c5b3f1cf9270ff319fea2b5463c28dd7aa939d01dfc9c205";
-const BUILTIN_RELEASE_NOTES = "Long-session reliability: unfinished agents resume instead of saying done, Cursor and native tool results stay synchronized, stalled search/read cards recover automatically, project-root path mistakes are repaired safely, and large-project sessions retain bounded context without premature completion.";
+const BUILTIN_RELEASE_VERSION = "0.1.65";
+const BUILTIN_MSI_SHA256 = "7feeb405512b989e492a52905e35403ee1aaddc51dbbce62e913306b4a88515d";
+const BUILTIN_EXE_SHA256 = "2dd24db00b21ad7c56006a91ab66648acf7f93cfb30883e1569feb71c64a7e3a";
+const BUILTIN_RELEASE_NOTES = "Sidebar clarity and installer polish: usage now lives in a collapsed Account panel to give projects and sessions more room; updates now show download, verification, install, and relaunch progress with clearer Windows approval recovery and a native secure-install window.";
 
 const BUILTIN_FORCE_UPDATE = true;
 const GITHUB_RELEASES_BASE = "https://github.com/chmoralla-code/HORMACHUELOS/releases/download";

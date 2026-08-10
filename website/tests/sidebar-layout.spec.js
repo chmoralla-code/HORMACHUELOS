@@ -7,7 +7,7 @@ test.use({
   viewport: { width: 1280, height: 900 },
 });
 
-test("sidebar keeps projects, sessions, usage, and account status readable", async ({ page }) => {
+test("sidebar nests usage in a collapsed account card and gives sessions more room", async ({ page }) => {
   const consoleErrors = [];
   page.on("pageerror", (error) => consoleErrors.push(error.message));
   page.on("console", (message) => {
@@ -23,15 +23,27 @@ test("sidebar keeps projects, sessions, usage, and account status readable", asy
   await expect(sidebar.getByRole("button", { name: "Add another project" })).toBeVisible();
   await expect(projectRows).toHaveCount(3);
   await expect(sessionRows).toHaveCount(3);
-  await expect(sidebar.getByText("Usage", { exact: true })).toBeVisible();
   await expect(sidebar.getByText("Account", { exact: true })).toBeVisible();
   await expect(sidebar.getByText("Synced · signed in", { exact: true })).toBeVisible();
+
+  const account = sidebar.locator(".sb-account");
+  const usageDisclosure = account.locator(".sb-account-usage");
+  const usageToggle = usageDisclosure.locator("summary");
+  const usagePanel = usageDisclosure.locator(".sb-usage");
+
+  await expect(sidebar.locator(".sb-usage-section")).toHaveCount(0);
+  await expect(sidebar.getByRole("button", { name: "Manage website account" })).toBeVisible();
+  await expect(usageDisclosure).not.toHaveAttribute("open", "");
+  await expect(usageToggle).toHaveAttribute("aria-expanded", "false");
+  await expect(usageToggle.getByText("Usage", { exact: true })).toBeVisible();
+  await expect(usageToggle.getByText("93% left", { exact: true })).toBeVisible();
+  await expect(usagePanel).toBeHidden();
 
   const projectList = await sidebar.locator(".sb-projects-list").boundingBox();
   const sessionList = await sidebar.locator(".sb-recent").boundingBox();
   expect(projectList).not.toBeNull();
   expect(sessionList).not.toBeNull();
-  expect(sessionList.height).toBeGreaterThanOrEqual(108);
+  expect(sessionList.height).toBeGreaterThanOrEqual(180);
 
   for (let index = 0; index < await projectRows.count(); index += 1) {
     const box = await projectRows.nth(index).boundingBox();
@@ -39,23 +51,49 @@ test("sidebar keeps projects, sessions, usage, and account status readable", asy
     expect(box.y + box.height).toBeLessThanOrEqual(projectList.y + projectList.height + 1);
   }
 
+  await usageToggle.focus();
+  await page.keyboard.press("Enter");
+  await expect(usageDisclosure).toHaveAttribute("open", "");
+  await expect(usageToggle).toHaveAttribute("aria-expanded", "true");
+  await expect(usagePanel).toBeVisible();
+  await expect(usagePanel.getByText("93% usage remaining", { exact: true })).toBeVisible();
+
+  await page.keyboard.press("Space");
+  await expect(usageDisclosure).not.toHaveAttribute("open", "");
+  await expect(usagePanel).toBeHidden();
+
   const fatal = consoleErrors.filter((entry) => !/favicon|vite/i.test(entry));
   expect(fatal, fatal.join("\n")).toEqual([]);
 });
 
-test("sidebar keeps an active session reachable in a compact desktop window", async ({ page }) => {
+test("collapsed account usage keeps the full session list visible in a compact desktop window", async ({ page }) => {
   await page.setViewportSize({ width: 768, height: 720 });
   await page.goto(`${APP}/update-harness.html`, { waitUntil: "networkidle" });
 
-  const firstSession = page.locator("#sidebar .sb-session-item").first();
+  const sidebar = page.locator("#sidebar");
+  const projects = sidebar.locator(".sb-project-workspace");
+  const sessions = sidebar.locator(".sb-session-item");
+  const lastProject = projects.last();
+  const firstSession = sessions.first();
+  const lastSession = sessions.last();
+  await expect(lastProject).toBeVisible();
   await expect(firstSession).toBeVisible();
+  await expect(lastSession).toBeVisible();
 
-  const box = await firstSession.boundingBox();
-  const usage = await page.locator("#sidebar .sb-usage-section").boundingBox();
-  const account = await page.locator("#sidebar .sb-account-section").boundingBox();
-  expect(box).not.toBeNull();
-  expect(usage).not.toBeNull();
+  const lastProjectBox = await lastProject.boundingBox();
+  const projectList = await sidebar.locator(".sb-projects-list").boundingBox();
+  const lastSessionBox = await lastSession.boundingBox();
+  const sessionList = await sidebar.locator(".sb-recent").boundingBox();
+  const account = await sidebar.locator(".sb-account-section").boundingBox();
+  const usageDisclosure = sidebar.locator(".sb-account-usage");
+  expect(lastProjectBox).not.toBeNull();
+  expect(projectList).not.toBeNull();
+  expect(lastSessionBox).not.toBeNull();
+  expect(sessionList).not.toBeNull();
   expect(account).not.toBeNull();
-  expect(box.y + box.height).toBeLessThanOrEqual(720);
-  expect(usage.y + usage.height).toBeLessThanOrEqual(account.y + 1);
+  expect(lastProjectBox.y + lastProjectBox.height).toBeLessThanOrEqual(projectList.y + projectList.height + 1);
+  expect(sessionList.height).toBeGreaterThanOrEqual(135);
+  expect(lastSessionBox.y + lastSessionBox.height).toBeLessThanOrEqual(account.y + 1);
+  await expect(usageDisclosure).not.toHaveAttribute("open", "");
+  await expect(usageDisclosure.locator(".sb-usage")).toBeHidden();
 });

@@ -25,6 +25,18 @@
 
       window.__updateMode = "available";
       window.__installError = "";
+      window.__manualInstallProgress = false;
+      window.__finishInstall = null;
+      const updateProgressListeners = new Set();
+      window.__emitInstallProgress = (event) => {
+        for (const listener of updateProgressListeners) listener(event);
+      };
+      const updateDialogOptions = {
+        progressSubscriber: async (listener) => {
+          updateProgressListeners.add(listener);
+          return () => updateProgressListeners.delete(listener);
+        },
+      };
       api.appVersion = async () => "0.1.4";
       api.appInstallKind = async () => "msi";
       api.openExternalUrl = async (url) => {
@@ -35,9 +47,21 @@
       };
       api.installAppUpdate = async (downloadUrl, version, sha256) => {
         if (window.__installError) throw window.__installError;
-        document.body.dataset.installedUrl = downloadUrl;
-        document.body.dataset.installedVersion = version;
-        document.body.dataset.installedSha256 = sha256;
+        const finish = () => {
+          document.body.dataset.installedUrl = downloadUrl;
+          document.body.dataset.installedVersion = version;
+          document.body.dataset.installedSha256 = sha256;
+        };
+        if (window.__manualInstallProgress) {
+          await new Promise((resolve) => {
+            window.__finishInstall = () => {
+              finish();
+              resolve();
+            };
+          });
+          return;
+        }
+        finish();
       };
       window.fetch = async () => {
         if (window.__updateMode === "error") {
@@ -71,7 +95,7 @@
         onAddAnotherProject: noop,
         onOpenQuickSessions: noop,
         onOpenSettings: noop,
-        onCheckForUpdates: () => document.body.appendChild(showUpdateDialog()),
+        onCheckForUpdates: () => document.body.appendChild(showUpdateDialog(updateDialogOptions)),
         onNewSession: noop,
         onSelectSession: noop,
         onDeleteAllSessions: noop,

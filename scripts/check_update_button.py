@@ -16,7 +16,7 @@ def main() -> None:
         page.goto(BASE_URL, wait_until="networkidle")
 
         # Secondary project controls are collapsed so the project, session,
-        # and usage panels have permanent room in the sidebar. The update
+        # and account panels have permanent room in the sidebar. The update
         # action must remain directly visible.
         workspace_actions = page.locator("summary.sb-actions-toggle")
         expect(workspace_actions).to_be_visible()
@@ -25,7 +25,7 @@ def main() -> None:
         for selector in [
             ".sb-projects-section .sb-section-label",
             ".sb-sessions-section .sb-section-label",
-            ".sb-usage-section .sb-section-label",
+            ".sb-account-usage > summary",
         ]:
             expect(page.locator(selector)).to_be_visible()
 
@@ -34,13 +34,13 @@ def main() -> None:
         )
         update_button.wait_for(state="visible")
         workspace_actions.click()
-        for name in ["New Build", "Open Project", "Client Pack", "Settings"]:
+        for name in ["New Build", "Open Project", "Client Pack"]:
             expect(page.get_by_role("button", name=name, exact=True)).to_be_visible()
         expect(update_button).to_be_visible()
         assert update_button.evaluate(
             "button => { const r = button.getBoundingClientRect(); const top = document.elementFromPoint(r.left + 8, r.top + 8); return top === button || button.contains(top); }"
         )
-        page.get_by_role("button", name="Settings", exact=True).click()
+        page.get_by_role("button", name="Client Pack", exact=True).click()
         assert not page.locator(".sb-action-menu").evaluate("menu => menu.open")
         assert update_button.get_attribute("data-update-available") == "true"
         assert update_button.locator(".sb-action-label").count() == 1
@@ -78,7 +78,8 @@ def main() -> None:
         notes_group = dialog.locator(".update-notes-group")
         assert notes_group.count() == 1
         assert "Added the in-app Update button." in notes_group.inner_text()
-        assert "Sessions, projects, settings, and account data stay" in dialog.inner_text()
+        assert "Local workspace protected" in dialog.inner_text()
+        assert "SHA-256 verification" in dialog.inner_text()
         not_now_button.click()
         assert dialog.count() == 0
         assert not app.evaluate("node => node.inert")
@@ -114,8 +115,9 @@ def main() -> None:
         update_button.click()
         install_dialog = page.get_by_role("dialog", name="Update available")
         install_dialog.wait_for(state="visible")
+        install_overlay = page.locator(".update-dialog-overlay")
         install_dialog.get_by_role(
-            "button", name="Install v0.1.5 and restart", exact=True
+            "button", name="Install v0.1.5", exact=True
         ).click()
         page.wait_for_function("document.body.dataset.installedVersion === '0.1.5'")
         assert page.locator("body").get_attribute("data-installed-url") == (
@@ -125,7 +127,7 @@ def main() -> None:
         assert page.locator("body").get_attribute("data-installed-sha256") == "b" * 64
         backup = json.loads(page.locator("body").get_attribute("data-update-backup"))
         assert backup["entries"]["ai-forge:test-update-state"] == "preserved"
-        expect(install_dialog.locator(".update-install-status")).to_contain_text("restart automatically")
+        expect(install_overlay.locator(".update-install-status")).to_contain_text("Relaunching Hormachuelos")
 
         # The compact-height layout must retain one readable project and
         # session row as well as the usage tracker. This mirrors a client
@@ -135,7 +137,7 @@ def main() -> None:
         for selector in [
             ".sb-projects-section",
             ".sb-sessions-section",
-            ".sb-usage-section",
+            ".sb-account-usage",
             ".sb-update-action",
         ]:
             expect(compact_page.locator(selector)).to_be_visible()

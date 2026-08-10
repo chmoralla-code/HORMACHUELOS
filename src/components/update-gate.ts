@@ -25,6 +25,10 @@ export type UpdateCheck = {
 export type UpdateInstallOptions = {
   /** Flush any in-memory chat/session work immediately before the backup. */
   beforeInstall?: () => void | Promise<void>;
+  /** Override the native progress source in browser harnesses. */
+  progressSubscriber?: (
+    callback: (event: AppUpdateProgress) => void,
+  ) => Promise<(() => void) | null>;
 };
 
 type UpdateStateBackup = {
@@ -95,21 +99,19 @@ function progressMessage(event: AppUpdateProgress): string {
   const percent = Number.isFinite(event.percent) && Number(event.percent) >= 0
     ? Math.min(100, Math.round(Number(event.percent)))
     : null;
-  // Keep the update experience intentionally small: a download indicator and
-  // then one automatic restart. The native updater still verifies the package
-  // and performs the replacement silently, but that does not need a separate
-  // user-facing installation step.
+  if (event.phase === "preparing") return "Securing your workspace…";
   if (event.phase === "downloading") {
     return `Downloading update${percent === null ? "" : ` ${percent}%`}…`;
   }
-  if (event.phase === "preparing" || event.phase === "verifying") {
-    return "Preparing update…";
+  if (event.phase === "verifying") return "Verifying secure package…";
+  if (event.phase === "installing") {
+    return /administrator approval/i.test(String(event.message || ""))
+      ? "Approve the Windows administrator prompt…"
+      : "Installing Hormachuelos…";
   }
-  if (event.phase === "installing" || event.phase === "restarting") {
-    return "Restarting Hormachuelos…";
-  }
-  const fallback = `${event.phase[0].toUpperCase()}${event.phase.slice(1)}`;
-  return `${String(event.message || fallback).replace(/…$/, "")}…`;
+  if (event.phase === "restarting") return "Relaunching Hormachuelos…";
+  const fallback = String(event.message || "Update paused").replace(/…$/, "");
+  return `${fallback}…`;
 }
 
 function updateFailureMessage(error: unknown): string {
@@ -153,6 +155,191 @@ function buildReleaseNotes(release: AppRelease): HTMLElement {
   return group;
 }
 
+const INSTALL_STAGES = [
+  { phase: "downloading", label: "Download" },
+  { phase: "verifying", label: "Verify" },
+  { phase: "installing", label: "Install" },
+  { phase: "restarting", label: "Relaunch" },
+] as const;
+
+const PHASE_DETAILS: Record<Exclude<AppUpdateProgress["phase"], "error">, string> = {
+  preparing: "Saving a recovery snapshot before anything changes.",
+  downloading: "Fetching the verified Windows installer.",
+  verifying: "Matching the package against its published SHA-256 checksum.",
+  installing: "Windows is replacing the app while your local data stays untouched.",
+  restarting: "Your projects and sessions will return automatically.",
+};
+
+const PHASE_LABELS: Record<Exclude<AppUpdateProgress["phase"], "error">, string> = {
+  preparing: "PRE-FLIGHT // 01",
+  downloading: "TRANSFER // 01 OF 04",
+  verifying: "INTEGRITY // 02 OF 04",
+  installing: "INSTALL // 03 OF 04",
+  restarting: "RELAUNCH // 04 OF 04",
+};
+
+const PHASE_TOKENS: Record<Exclude<AppUpdateProgress["phase"], "error">, string> = {
+  preparing: "SAFE",
+  downloading: "LIVE",
+  verifying: "CHECK",
+  installing: "APPLY",
+  restarting: "100%",
+};
+
+type InstallProgressView = {
+  root: HTMLElement;
+  update: (message: string, event?: AppUpdateProgress) => void;
+  fail: (message: string) => void;
+};
+
+function buildInstallProgress(): InstallProgressView {
+  const root = el("section", {
+    class: "update-install-progress",
+    "aria-label": "Installer activity",
+    hidden: "",
+  });
+
+  const hero = el("div", { class: "update-install-hero" });
+  const emblem = el("div", { class: "update-install-emblem", "aria-hidden": "true" }, [
+    el("span", { class: "update-install-orbit orbit-one" }),
+    el("span", { class: "update-install-orbit orbit-two" }),
+    el("span", { class: "update-install-core" }, ["H"]),
+  ]);
+  const copy = el("div", { class: "update-install-copy" });
+  const phaseLabel = el("span", { class: "update-install-phase" }, ["PRE-FLIGHT // 01"]);
+  const status = el("strong", {
+    class: "update-install-status",
+    role: "status",
+    "aria-live": "polite",
+    "aria-atomic": "true",
+  }, ["Securing your workspace…"]);
+  const detail = el("p", { class: "update-install-detail" }, [PHASE_DETAILS.preparing]);
+  copy.append(phaseLabel, status, detail);
+  hero.append(emblem, copy);
+  root.appendChild(hero);
+
+  const meterHeader = el("div", { class: "update-install-meter-head" });
+  meterHeader.appendChild(el("span", {}, ["INSTALL SEQUENCE"]));
+  const percent = el("strong", { class: "update-install-percent" }, ["SAFE"]);
+  meterHeader.appendChild(percent);
+  root.appendChild(meterHeader);
+
+  const meter = el("div", {
+    class: "update-install-meter is-indeterminate",
+    role: "progressbar",
+    "aria-label": "Update installation progress",
+    "aria-valuemin": "0",
+    "aria-valuemax": "100",
+    "aria-valuetext": "Securing your workspace",
+  });
+  const fill = el("div", { class: "update-install-meter-fill" });
+  meter.appendChild(fill);
+  root.appendChild(meter);
+
+  const stageList = el("ol", { class: "update-install-stages", "aria-label": "Installation stages" });
+  const stageItems = INSTALL_STAGES.map((stage, index) => {
+    const item = el("li", {
+      class: `update-install-step${index === 0 ? " is-active" : ""}`,
+      "data-stage": stage.phase,
+    });
+    item.append(
+      el("span", { class: "update-install-step-marker", "aria-hidden": "true" }, [String(index + 1)]),
+      el("span", { class: "update-install-step-label" }, [stage.label]),
+    );
+    stageList.appendChild(item);
+    return item;
+  });
+  root.appendChild(stageList);
+  root.appendChild(el("p", { class: "update-install-foot" }, [
+    "Keep Hormachuelos open — it will relaunch itself when the handoff is complete.",
+  ]));
+
+  const update = (message: string, event?: AppUpdateProgress) => {
+    const phase = event?.phase && event.phase !== "error" ? event.phase : "preparing";
+    const stageIndex = phase === "preparing"
+      ? 0
+      : INSTALL_STAGES.findIndex((stage) => stage.phase === phase);
+    const rawPercent = phase === "downloading" && Number.isFinite(event?.percent)
+      ? Math.max(0, Math.min(100, Math.round(Number(event?.percent))))
+      : phase === "restarting"
+        ? 100
+        : null;
+
+    root.hidden = false;
+    root.dataset.phase = phase;
+    root.dataset.stageIndex = String(Math.max(0, stageIndex));
+    root.classList.remove("is-error", "is-restarting");
+    root.classList.toggle("is-restarting", phase === "restarting");
+    status.classList.remove("is-error");
+    phaseLabel.textContent = PHASE_LABELS[phase];
+    status.textContent = message;
+    detail.textContent = PHASE_DETAILS[phase];
+    percent.textContent = rawPercent === null ? PHASE_TOKENS[phase] : `${rawPercent}%`;
+
+    meter.classList.toggle("is-indeterminate", rawPercent === null);
+    if (rawPercent === null) {
+      meter.removeAttribute("aria-valuenow");
+      meter.setAttribute("aria-valuetext", message.replace(/…$/, ""));
+      fill.style.removeProperty("width");
+    } else {
+      meter.setAttribute("aria-valuenow", String(rawPercent));
+      meter.setAttribute("aria-valuetext", `${rawPercent}% complete`);
+      fill.style.width = `${rawPercent}%`;
+    }
+
+    for (let index = 0; index < stageItems.length; index += 1) {
+      const item = stageItems[index];
+      const complete = index < stageIndex;
+      item.classList.toggle("is-complete", complete);
+      item.classList.toggle("is-active", index === stageIndex);
+      item.classList.remove("is-error");
+      const marker = item.querySelector(".update-install-step-marker");
+      if (marker) marker.textContent = complete ? "✓" : String(index + 1);
+    }
+  };
+
+  const fail = (message: string) => {
+    const stageIndex = Math.max(0, Number(root.dataset.stageIndex || 0));
+    root.hidden = false;
+    root.dataset.phase = "error";
+    root.classList.remove("is-restarting");
+    root.classList.add("is-error");
+    phaseLabel.textContent = "UPDATE SAFE // PAUSED";
+    status.textContent = message;
+    status.classList.add("is-error");
+    detail.textContent = "Your current installation is untouched. You can retry whenever you're ready.";
+    percent.textContent = "SAFE";
+    meter.classList.remove("is-indeterminate");
+    meter.removeAttribute("aria-valuenow");
+    meter.setAttribute("aria-valuetext", "Update stopped safely");
+    fill.style.width = "0%";
+    for (let index = 0; index < stageItems.length; index += 1) {
+      stageItems[index].classList.toggle("is-active", index === stageIndex);
+      stageItems[index].classList.toggle("is-error", index === stageIndex);
+    }
+  };
+
+  return { root, update, fail };
+}
+
+function buildUpdatePreflight(): HTMLElement {
+  const preflight = el("div", { class: "update-preflight", "aria-label": "Update safeguards" });
+  const addSignal = (title: string, detail: string) => {
+    const item = el("div", { class: "update-preflight-item" });
+    item.append(
+      el("span", { class: "update-preflight-mark", "aria-hidden": "true" }, ["✓"]),
+      el("span", { class: "update-preflight-copy" }, [
+        el("strong", {}, [title]),
+        el("small", {}, [detail]),
+      ]),
+    );
+    preflight.appendChild(item);
+  };
+  addSignal("Local workspace protected", "A recovery snapshot is saved first.");
+  addSignal("SHA-256 verification", "The package is checked before launch.");
+  return preflight;
+}
+
 async function installInsideApp(
   release: AppRelease,
   options: UpdateInstallOptions,
@@ -169,18 +356,26 @@ async function installInsideApp(
     }
     throw new Error("This release has no Windows installer.");
   }
+  const preparingEvent: AppUpdateProgress = {
+    phase: "preparing",
+    percent: 0,
+    message: "Preparing the secure update",
+  };
+  onProgress(progressMessage(preparingEvent), preparingEvent);
   await options.beforeInstall?.();
   await api.saveUpdateBackup(serializeUpdateState());
-  const unlisten = await onAppUpdateProgress(
+  const subscribeToProgress = options.progressSubscriber || onAppUpdateProgress;
+  const unlisten = await subscribeToProgress(
     (event) => onProgress(progressMessage(event), event),
   ).catch(() => null);
   try {
-    onProgress("Preparing update…");
     await api.installAppUpdate(installer.url, release.version, installer.sha256);
-    onProgress("Restarting Hormachuelos…", {
+    const restartingEvent: AppUpdateProgress = {
       phase: "restarting",
+      percent: 100,
       message: "Restarting Hormachuelos",
-    });
+    };
+    onProgress(progressMessage(restartingEvent), restartingEvent);
   } finally {
     unlisten?.();
   }
@@ -210,7 +405,15 @@ export function showUpdateDialog(options: UpdateInstallOptions = {}): HTMLElemen
   });
   const card = el("div", { class: "auth-gate-card update-dialog-card" });
   const top = el("div", { class: "update-dialog-top" });
-  top.appendChild(el("div", { class: "auth-gate-brand" }, ["HORMACHUELOS"]));
+  const brandRail = el("div", { class: "update-dialog-brand-rail" });
+  brandRail.append(
+    el("div", { class: "auth-gate-brand" }, ["HORMACHUELOS"]),
+    el("div", { class: "update-dialog-channel" }, [
+      el("span", { class: "update-dialog-channel-dot", "aria-hidden": "true" }),
+      "SECURE UPDATE",
+    ]),
+  );
+  top.appendChild(brandRail);
   const closeBtn = el("button", {
     class: "update-dialog-close",
     type: "button",
@@ -287,56 +490,89 @@ export function showUpdateDialog(options: UpdateInstallOptions = {}): HTMLElemen
   };
   const renderCheck = (check: UpdateCheck) => {
     content.replaceChildren();
+    content.classList.remove("is-installing", "is-error");
+    overlay.classList.remove("is-installing", "is-error");
+    card.classList.remove("is-installing", "is-error");
     const latest = check.latest;
     if (check.updateAvailable && latest) {
-      addTitle("Update available");
-      content.appendChild(buildVersionSummary(check.currentVersion, latest.version));
-      content.appendChild(buildReleaseNotes(latest));
-
-      const dataHint = el("p", { class: "auth-gate-hint update-data-hint" }, [
-        "Your sessions, projects, settings, and account data stay on this device.",
+      const kicker = el("div", { class: "update-dialog-kicker" }, [
+        el("span", { "aria-hidden": "true" }, ["◆"]),
+        "VERIFIED DESKTOP RELEASE",
       ]);
-      content.appendChild(dataHint);
-      const status = el("div", {
-        class: "update-install-status",
-        role: "status",
-        "aria-live": "polite",
-        hidden: "",
-      });
-      content.appendChild(status);
+      const title = el("h1", {
+        class: "auth-gate-title update-dialog-title",
+        id: "update-dialog-title",
+      }, ["Update available"]);
+      const subtitle = el("p", { class: "auth-gate-sub update-dialog-subtitle" }, [
+        "A fresh build is ready. Install it here and Hormachuelos will reopen on its own.",
+      ]);
+      content.append(kicker, title, subtitle);
 
+      const readyView = el("div", { class: "update-ready-view" });
+      readyView.append(
+        buildVersionSummary(check.currentVersion, latest.version),
+        buildReleaseNotes(latest),
+        buildUpdatePreflight(),
+      );
+      content.appendChild(readyView);
+
+      const progress = buildInstallProgress();
+      content.appendChild(progress.root);
       const installBtn = el("button", { class: "btn primary", type: "button" }, [
-        `Download v${latest.version} and restart`,
+        `Install v${latest.version}`,
       ]) as HTMLButtonElement;
-      const laterBtn = el("button", { class: "btn", type: "button" }, ["Not now"]);
+      const laterBtn = el("button", { class: "btn update-later-btn", type: "button" }, ["Not now"]);
+      const actions = el("div", { class: "update-dialog-actions" }, [installBtn, laterBtn]);
       laterBtn.addEventListener("click", close);
-      installBtn.addEventListener("click", () => {
+
+      const startInstall = () => {
         if (installing) return;
         installing = true;
         overlay.setAttribute("aria-busy", "true");
+        overlay.classList.remove("is-error");
+        overlay.classList.add("is-installing");
+        card.classList.remove("is-error");
+        card.classList.add("is-installing");
+        content.classList.remove("is-error");
+        content.classList.add("is-installing");
         closeBtn.disabled = true;
         installBtn.disabled = true;
         laterBtn.disabled = true;
-        status.hidden = false;
-        status.classList.remove("is-error");
+        readyView.hidden = true;
+        actions.hidden = true;
+        title.textContent = `Installing v${latest.version}`;
+        subtitle.textContent = "Your workspace is protected. Keep this window open for the automatic relaunch.";
+        const preparingEvent: AppUpdateProgress = {
+          phase: "preparing",
+          percent: 0,
+          message: "Preparing the secure update",
+        };
+        progress.update(progressMessage(preparingEvent), preparingEvent);
         void installInsideApp(latest, options, (message, event) => {
-          status.textContent = message;
-          status.dataset.phase = event?.phase || "preparing";
+          progress.update(message, event);
         }).catch((error) => {
           installing = false;
           overlay.removeAttribute("aria-busy");
+          overlay.classList.remove("is-installing");
+          overlay.classList.add("is-error");
+          card.classList.remove("is-installing");
+          card.classList.add("is-error");
+          content.classList.remove("is-installing");
+          content.classList.add("is-error");
           closeBtn.disabled = false;
           installBtn.disabled = false;
           laterBtn.disabled = false;
-          status.hidden = false;
-          status.classList.add("is-error");
-          status.dataset.phase = "error";
-          status.textContent = updateFailureMessage(error);
+          actions.hidden = false;
+          title.textContent = "Update paused";
+          subtitle.textContent = "Hormachuelos stayed open and no installed files were changed.";
+          progress.fail(updateFailureMessage(error));
+          installBtn.textContent = "Try installation again";
+          laterBtn.textContent = "Close";
           installBtn.focus({ preventScroll: true });
         });
-      });
-      content.appendChild(installBtn);
-      content.appendChild(laterBtn);
+      };
+      installBtn.addEventListener("click", startInstall);
+      content.appendChild(actions);
       ensureFocusInside();
       return;
     }
@@ -378,58 +614,76 @@ export function showUpdateGate(
 ): HTMLElement {
   const latest = check.latest!;
   const overlay = el("div", {
-    class: "auth-gate-overlay",
+    class: "auth-gate-overlay update-required-overlay",
     role: "dialog",
     "aria-modal": "true",
     "aria-labelledby": "required-update-title",
   });
-  const card = el("div", { class: "auth-gate-card" });
+  const card = el("div", { class: "auth-gate-card update-dialog-card update-required-card" });
   card.appendChild(el("div", { class: "auth-gate-brand" }, ["HORMACHUELOS"]));
-  card.appendChild(el("h1", { class: "auth-gate-title", id: "required-update-title" }, ["Update required"]));
-  card.appendChild(buildVersionSummary(check.currentVersion, latest.version));
-  card.appendChild(buildReleaseNotes(latest));
-  card.appendChild(
-    el("p", { class: "auth-gate-hint update-data-hint" }, [
-      "Your sessions, projects, settings, and account data stay on this device.",
-    ]),
-  );
+  card.appendChild(el("div", { class: "update-dialog-kicker" }, [
+    el("span", { "aria-hidden": "true" }, ["◆"]),
+    "REQUIRED SECURE RELEASE",
+  ]));
+  const title = el("h1", {
+    class: "auth-gate-title update-dialog-title",
+    id: "required-update-title",
+  }, ["Update required"]);
+  const subtitle = el("p", { class: "auth-gate-sub update-dialog-subtitle" }, [
+    "This build is required before agents can run again.",
+  ]);
+  card.append(title, subtitle);
 
-  const actions = el("div", { style: "display:flex;flex-direction:column;gap:8px;margin-top:8px" });
+  const readyView = el("div", { class: "update-ready-view" }, [
+    buildVersionSummary(check.currentVersion, latest.version),
+    buildReleaseNotes(latest),
+    buildUpdatePreflight(),
+  ]);
+  card.appendChild(readyView);
+  const progress = buildInstallProgress();
+  card.appendChild(progress.root);
+
+  const actions = el("div", { class: "update-dialog-actions is-required" });
   const updateBtn = el("button", { class: "btn primary", type: "button" }, [
-    `Download v${latest.version} and restart`,
+    `Install v${latest.version}`,
   ]) as HTMLButtonElement;
-  const status = el("div", {
-    class: "update-install-status",
-    role: "status",
-    "aria-live": "polite",
-    hidden: "",
-  });
   updateBtn.addEventListener("click", () => {
     if (updateBtn.disabled) return;
     updateBtn.disabled = true;
     overlay.setAttribute("aria-busy", "true");
-    status.hidden = false;
-    status.classList.remove("is-error");
+    overlay.classList.remove("is-error");
+    overlay.classList.add("is-installing");
+    card.classList.remove("is-error");
+    card.classList.add("is-installing");
+    readyView.hidden = true;
+    actions.hidden = true;
+    title.textContent = `Installing v${latest.version}`;
+    subtitle.textContent = "Your local workspace is protected during the secure handoff.";
+    const preparingEvent: AppUpdateProgress = {
+      phase: "preparing",
+      percent: 0,
+      message: "Preparing the secure update",
+    };
+    progress.update(progressMessage(preparingEvent), preparingEvent);
     void installInsideApp(latest, options, (message, event) => {
-      status.textContent = message;
-      status.dataset.phase = event?.phase || "preparing";
+      progress.update(message, event);
     }).catch((error) => {
       overlay.removeAttribute("aria-busy");
+      overlay.classList.remove("is-installing");
+      overlay.classList.add("is-error");
+      card.classList.remove("is-installing");
+      card.classList.add("is-error");
       updateBtn.disabled = false;
-      status.classList.add("is-error");
-      status.dataset.phase = "error";
-      status.textContent = updateFailureMessage(error);
+      actions.hidden = false;
+      title.textContent = "Update paused";
+      subtitle.textContent = "The current installation is still safe. Retry to continue.";
+      progress.fail(updateFailureMessage(error));
+      updateBtn.textContent = "Try installation again";
       updateBtn.focus({ preventScroll: true });
     });
   });
   actions.appendChild(updateBtn);
-  actions.appendChild(status);
   card.appendChild(actions);
-  card.appendChild(
-    el("p", { class: "auth-gate-hint" }, [
-      "The update downloads here, then Hormachuelos restarts automatically.",
-    ]),
-  );
   overlay.appendChild(card);
   return overlay;
 }
