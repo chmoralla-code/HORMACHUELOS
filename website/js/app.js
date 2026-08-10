@@ -20,21 +20,21 @@ const ASSET_BASE =
  * The update API can still replace it with an admin-published asset URL.
  */
 const RELEASE_DOWNLOAD_BASE =
-  "https://github.com/chmoralla-code/HORMACHUELOS/releases/download/v0.1.57";
+  "https://github.com/chmoralla-code/HORMACHUELOS/releases/download/v0.1.58";
 
 /** Desktop installer files for the current production release. */
 const DESKTOP_DOWNLOADS = {
-  version: "0.1.57",
+  version: "0.1.58",
   windows: {
     msi: {
       label: "Windows installer (MSI)",
-      href: `${RELEASE_DOWNLOAD_BASE}/Hormachuelos_0.1.57_x64_en-US.msi`,
-      file: "Hormachuelos_0.1.57_x64_en-US.msi",
+      href: `${RELEASE_DOWNLOAD_BASE}/Hormachuelos_0.1.58_x64_en-US.msi`,
+      file: "Hormachuelos_0.1.58_x64_en-US.msi",
     },
     setup: {
       label: "Windows setup (EXE)",
-      href: `${RELEASE_DOWNLOAD_BASE}/Hormachuelos_0.1.57_x64-setup.exe`,
-      file: "Hormachuelos_0.1.57_x64-setup.exe",
+      href: `${RELEASE_DOWNLOAD_BASE}/Hormachuelos_0.1.58_x64-setup.exe`,
+      file: "Hormachuelos_0.1.58_x64-setup.exe",
     },
   },
 };

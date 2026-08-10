@@ -1797,6 +1797,8 @@ function handleAgentEvent(e: AgentEvent) {
         e.kind === "cancelled" ||
         e.kind === "reasoning" ||
         e.kind === "thinking" ||
+        e.kind === "start" ||
+        e.kind === "multi_agent_batch" ||
         e.kind === "tool_call" ||
         e.kind === "question"
       ) {
@@ -1879,7 +1881,7 @@ function handleAgentEvent(e: AgentEvent) {
     void maybeOpenBuildPreview(sid, e.kind);
   }
   // Persist session after meaningful events
-  if (smartStateChanged || e.kind === "text" || e.kind === "tool_result" || e.kind === "done" || e.kind === "end" || e.kind === "cancelled" || e.kind === "reasoning") {
+  if (smartStateChanged || e.kind === "text" || e.kind === "tool_result" || e.kind === "done" || e.kind === "end" || e.kind === "cancelled" || e.kind === "reasoning" || e.kind === "start" || e.kind === "multi_agent_batch") {
     persistCurrentSession(e.kind === "text" || e.kind === "reasoning");
   }
 }

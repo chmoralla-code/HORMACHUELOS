@@ -30,6 +30,23 @@ function nodeMatches(node: ProjectNode, query: string): boolean {
   return node.path.toLowerCase().includes(query) || node.children.some((child) => nodeMatches(child, query));
 }
 
+function countProjectItems(nodes: ProjectNode[]): { files: number; folders: number } {
+  return nodes.reduce(
+    (total, node) => {
+      if (node.isDir) {
+        total.folders += 1;
+        const childTotals = countProjectItems(node.children);
+        total.files += childTotals.files;
+        total.folders += childTotals.folders;
+      } else {
+        total.files += 1;
+      }
+      return total;
+    },
+    { files: 0, folders: 0 },
+  );
+}
+
 export class WorkspacePanel {
   private inspector = document.getElementById("inspector")!;
   private filesPanel = document.getElementById("files-panel")!;
@@ -39,6 +56,9 @@ export class WorkspacePanel {
   private treeRoot!: HTMLElement;
   private changesRoot!: HTMLElement;
   private searchInput!: HTMLInputElement;
+  private fileCount!: HTMLElement;
+  private fileNotice!: HTMLElement;
+  private clearFilesButton!: HTMLButtonElement;
   private projectPath: string | null = null;
   private tree: ProjectTree | null = null;
   private expanded = new Set<string>();
@@ -47,6 +67,7 @@ export class WorkspacePanel {
   private baseline: Map<string, string> | null = null;
   private refreshTimer: number | null = null;
   private finishing = false;
+  private fileActionInFlight = false;
   private activePreview: FilePreview | null = null;
 
   constructor() {
@@ -78,15 +99,30 @@ export class WorkspacePanel {
   private buildFilesPanel() {
     clear(this.filesPanel);
     const toolbar = el("div", { class: "project-toolbar" });
+    const toolbarTop = el("div", { class: "project-toolbar-top" });
+    const identity = el("div", { class: "project-toolbar-identity" });
+    identity.appendChild(el("div", { class: "project-toolbar-title" }, ["Project files"]));
+    this.fileCount = el("div", { class: "project-file-count", "aria-live": "polite" }, ["No project selected"]);
+    identity.appendChild(this.fileCount);
+    const actions = el("div", { class: "project-toolbar-actions" });
+    const refresh = el("button", {
+      class: "inspector-action", type: "button", "aria-label": "Refresh project files", title: "Refresh project files", html: icon("refresh", 14),
+    }) as HTMLButtonElement;
+    refresh.addEventListener("click", () => void this.refresh());
+    this.clearFilesButton = el("button", {
+      class: "project-clear-files", type: "button", disabled: "", "aria-label": "Clear all project files", title: "Clear all project files", html: `${icon("trash", 13)}<span>Clear files</span>`,
+    }) as HTMLButtonElement;
+    this.clearFilesButton.addEventListener("click", () => void this.requestClearProjectFiles());
+    actions.append(refresh, this.clearFilesButton);
+    toolbarTop.append(identity, actions);
     this.searchInput = el("input", {
       class: "project-filter", type: "search", placeholder: "Filter project files", "aria-label": "Filter project files",
     }) as HTMLInputElement;
     this.searchInput.addEventListener("input", () => this.renderTree());
-    const refresh = el("button", { class: "inspector-action", "aria-label": "Refresh project files", html: icon("refresh", 14) });
-    refresh.addEventListener("click", () => void this.refresh());
-    toolbar.append(this.searchInput, refresh);
+    toolbar.append(toolbarTop, this.searchInput);
+    this.fileNotice = el("div", { class: "project-file-notice", role: "status", hidden: "" });
     this.treeRoot = el("div", { class: "project-tree", role: "tree", "aria-label": "Project files" });
-    this.filesPanel.append(toolbar, this.treeRoot);
+    this.filesPanel.append(toolbar, this.fileNotice, this.treeRoot);
   }
 
   private buildChangesPanel() {
@@ -117,6 +153,7 @@ export class WorkspacePanel {
     document.body.classList.toggle("has-project", Boolean(path));
     this.closeViewer();
     this.tree = null;
+    this.setFileNotice();
     this.expanded.clear();
     this.changes.clear();
     this.renderChanges();
@@ -140,10 +177,13 @@ export class WorkspacePanel {
 
   private renderNoProject() {
     this.treeRoot.replaceChildren(el("div", { class: "inspector-state" }, ["Open or create a project to inspect its files."]));
+    this.fileCount.textContent = "No project selected";
+    this.clearFilesButton.disabled = true;
   }
 
   private renderTree() {
     if (!this.tree) return this.renderNoProject();
+    this.updateFilesToolbar();
     clear(this.treeRoot);
     const query = this.searchInput.value.trim().toLowerCase();
     const visible = query ? this.tree.nodes.filter((node) => nodeMatches(node, query)) : this.tree.nodes;
@@ -180,6 +220,22 @@ export class WorkspacePanel {
         button.addEventListener("click", () => void this.openFile(node.path));
       }
       row.appendChild(button);
+      if (!node.isDir) {
+        const remove = el("button", {
+          class: "tree-delete",
+          type: "button",
+          "aria-label": `Delete ${node.path}`,
+          title: `Delete ${node.path}`,
+          html: icon("trash", 13),
+        }) as HTMLButtonElement;
+        remove.disabled = this.fileActionInFlight;
+        remove.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          void this.requestDeleteFile(node.path);
+        });
+        row.appendChild(remove);
+      }
       parent.appendChild(row);
       if (node.isDir && (query || this.expanded.has(node.path))) this.appendNodes(node.children, parent, depth + 1, query);
     }
@@ -214,6 +270,135 @@ export class WorkspacePanel {
   private async copyPreview() {
     if (!this.activePreview) return;
     await navigator.clipboard.writeText(this.activePreview.content).catch(() => undefined);
+  }
+
+  private updateFilesToolbar() {
+    if (!this.tree || !this.projectPath) {
+      this.fileCount.textContent = "No project selected";
+      this.clearFilesButton.disabled = true;
+      return;
+    }
+    const { files, folders } = countProjectItems(this.tree.nodes);
+    const parts = [`${files} file${files === 1 ? "" : "s"}`];
+    if (folders) parts.push(`${folders} folder${folders === 1 ? "" : "s"}`);
+    this.fileCount.textContent = parts.join(" · ");
+    this.clearFilesButton.disabled = this.fileActionInFlight || this.tree.nodes.length === 0;
+    this.treeRoot.querySelectorAll<HTMLButtonElement>(".tree-delete").forEach((button) => {
+      button.disabled = this.fileActionInFlight;
+    });
+  }
+
+  private setFileNotice(message = "", kind: "success" | "error" = "success") {
+    this.fileNotice.hidden = !message;
+    this.fileNotice.className = `project-file-notice${message ? ` ${kind}` : ""}`;
+    this.fileNotice.textContent = message;
+  }
+
+  private confirmProjectFileAction(options: {
+    title: string;
+    description: string;
+    confirmLabel: string;
+  }): Promise<boolean> {
+    const root = document.getElementById("modal-root");
+    if (!root || root.childElementCount > 0) {
+      return Promise.resolve(window.confirm(`${options.title}\n\n${options.description}`));
+    }
+
+    return new Promise((resolve) => {
+      const overlay = el("div", { class: "modal-overlay" });
+      const modal = el("div", {
+        class: "modal confirm-modal",
+        role: "alertdialog",
+        "aria-modal": "true",
+        "aria-labelledby": "project-files-confirm-title",
+        "aria-describedby": "project-files-confirm-description",
+        tabindex: "-1",
+      });
+      const head = el("div", { class: "modal-head" });
+      head.appendChild(el("div", { class: "modal-title", id: "project-files-confirm-title" }, [options.title]));
+      const closeButton = el("button", {
+        class: "modal-close", type: "button", "aria-label": "Cancel", html: icon("close", 16),
+      }) as HTMLButtonElement;
+      head.appendChild(closeButton);
+      const body = el("div", { class: "modal-body" });
+      body.appendChild(el("p", { class: "confirm-modal-desc", id: "project-files-confirm-description" }, [options.description]));
+      const foot = el("div", { class: "modal-foot" });
+      const cancelButton = el("button", { class: "btn", type: "button" }, ["Cancel"]) as HTMLButtonElement;
+      const confirmButton = el("button", { class: "btn danger", type: "button" }, [options.confirmLabel]) as HTMLButtonElement;
+      foot.append(cancelButton, confirmButton);
+      modal.append(head, body, foot);
+      overlay.appendChild(modal);
+
+      let settled = false;
+      const finish = (confirmed: boolean) => {
+        if (settled) return;
+        settled = true;
+        clear(root);
+        resolve(confirmed);
+      };
+      closeButton.addEventListener("click", () => finish(false));
+      cancelButton.addEventListener("click", () => finish(false));
+      confirmButton.addEventListener("click", () => finish(true));
+      overlay.addEventListener("click", (event) => {
+        if (event.target === overlay) finish(false);
+      });
+      modal.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") finish(false);
+      });
+      root.appendChild(overlay);
+      cancelButton.focus();
+    });
+  }
+
+  private async requestDeleteFile(relativePath: string) {
+    if (this.fileActionInFlight) return;
+    const confirmed = await this.confirmProjectFileAction({
+      title: "Delete this project file?",
+      description: `“${relativePath}” will be permanently removed from the active project. This cannot be undone.`,
+      confirmLabel: "Delete file",
+    });
+    if (!confirmed) return;
+
+    this.fileActionInFlight = true;
+    this.updateFilesToolbar();
+    try {
+      await api.deleteProjectFile(relativePath);
+      if (this.activePreview?.path === relativePath) this.closeViewer();
+      this.addChange(relativePath, "deleted", "Deleted from project files");
+      this.setFileNotice(`Deleted ${relativePath}.`);
+      await this.refresh();
+    } catch (error) {
+      this.setFileNotice(`Could not delete ${relativePath}: ${String(error)}`, "error");
+    } finally {
+      this.fileActionInFlight = false;
+      this.updateFilesToolbar();
+    }
+  }
+
+  private async requestClearProjectFiles() {
+    if (this.fileActionInFlight || !this.projectPath || !this.tree?.nodes.length) return;
+    const confirmed = await this.confirmProjectFileAction({
+      title: "Clear all project files?",
+      description: "This permanently removes every file and folder in the active project. The project folder and its .git history stay in place. This cannot be undone.",
+      confirmLabel: "Clear files",
+    });
+    if (!confirmed) return;
+
+    this.fileActionInFlight = true;
+    this.updateFilesToolbar();
+    try {
+      const removed = await api.clearProjectFiles();
+      this.closeViewer();
+      this.changes.clear();
+      this.addChange("Project files", "deleted", `Cleared ${removed} project item${removed === 1 ? "" : "s"}`);
+      this.setFileNotice(`Cleared ${removed} project item${removed === 1 ? "" : "s"}.`);
+      await this.refresh();
+    } catch (error) {
+      this.setFileNotice(`Could not clear project files: ${String(error)}`, "error");
+    } finally {
+      this.fileActionInFlight = false;
+      this.updateFilesToolbar();
+    }
   }
 
   private activateTab(tab: InspectorTab) {

@@ -388,6 +388,45 @@ struct StreamAccumulator {
 }
 
 impl StreamAccumulator {
+    /// Some OpenAI-compatible relays stream a series of complete function
+    /// names without an `index` or `id`.  Treat a second *known* name as a
+    /// new call rather than appending it to the prior call.  Name fragments
+    /// (for example `read_` + `file`) remain continuations because their
+    /// partial spelling is not a registered tool name.
+    fn unindexed_name_starts_new_call(&self, current_index: usize, call: &Value) -> bool {
+        let Some(incoming) = call
+            .get("function")
+            .and_then(|function| function.get("name"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        else {
+            return false;
+        };
+        let Some(current) = self.tool_calls.get(current_index) else {
+            return false;
+        };
+        let previous = current.name.trim();
+        crate::tools::is_supported_tool_name(previous)
+            && crate::tools::is_supported_tool_name(incoming)
+            && crate::tools::normalize_tool_name(previous)
+                != crate::tools::normalize_tool_name(incoming)
+    }
+
+    /// Providers vary between sending function-name deltas and repeatedly
+    /// sending the full name.  Keep both wire forms valid without duplicating
+    /// a completed name in the accumulated call.
+    fn append_tool_name(target: &mut StreamToolCall, incoming: &str) {
+        if incoming.is_empty() || target.name == incoming {
+            return;
+        }
+        if !target.name.is_empty() && incoming.starts_with(&target.name) {
+            target.name = incoming.to_string();
+        } else {
+            target.name.push_str(incoming);
+        }
+    }
+
     fn resolve_tool_call_index(
         &mut self,
         position: usize,
@@ -433,8 +472,14 @@ impl StreamAccumulator {
         // continuation of the previous call. A multi-call delta can still be
         // addressed by its array position, matching OpenAI's initial shape.
         let index = if call_count == 1 {
-            self.last_tool_call_index
-                .unwrap_or_else(|| self.tool_calls.len().saturating_sub(1))
+            let current_index = self
+                .last_tool_call_index
+                .unwrap_or_else(|| self.tool_calls.len().saturating_sub(1));
+            if self.unindexed_name_starts_new_call(current_index, call) {
+                self.tool_calls.len()
+            } else {
+                current_index
+            }
         } else {
             position
         };
@@ -519,7 +564,7 @@ impl StreamAccumulator {
                 }
                 let function = call.get("function").unwrap_or(&Value::Null);
                 if let Some(name) = function.get("name").and_then(Value::as_str) {
-                    target.name.push_str(name);
+                    Self::append_tool_name(target, name);
                 }
                 // Providers disagree on the wire shape: OpenAI uses a JSON
                 // *string* of arguments; some DeepSeek / proxy builds emit a
@@ -1468,6 +1513,96 @@ mod tests {
             json!({ "pattern": "**/*" })
         );
         assert_eq!(response.tool_calls[2].arguments, json!({}));
+    }
+
+    #[test]
+    fn keeps_name_only_tool_calls_separate_without_indexes_or_ids() {
+        let mut stream = StreamAccumulator::default();
+        for event in [
+            json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "function": { "name": "list_dir", "arguments": "{\"path\":\".\"}" }
+                        }]
+                    }
+                }]
+            }),
+            json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "function": { "name": "glob", "arguments": "{\"pattern\":\"**/*\"}" }
+                        }]
+                    }
+                }]
+            }),
+            json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "function": { "name": "git_status", "arguments": "{}" }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            }),
+        ] {
+            stream.apply(&event, None, None, None);
+        }
+
+        let response = stream.into_response().expect("stream should assemble");
+        assert_eq!(response.tool_calls.len(), 3);
+        assert_eq!(
+            response
+                .tool_calls
+                .iter()
+                .map(|call| call.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["list_dir", "glob", "git_status"]
+        );
+        assert_eq!(response.tool_calls[0].arguments, json!({ "path": "." }));
+        assert_eq!(
+            response.tool_calls[1].arguments,
+            json!({ "pattern": "**/*" })
+        );
+        assert_eq!(response.tool_calls[2].arguments, json!({}));
+    }
+
+    #[test]
+    fn accepts_repeated_full_name_deltas_without_duplication() {
+        let mut stream = StreamAccumulator::default();
+        for event in [
+            json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "function": { "name": "read_file", "arguments": "{\"path\":" }
+                        }]
+                    }
+                }]
+            }),
+            json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "function": { "name": "read_file", "arguments": "\"src/main.ts\"}" }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            }),
+        ] {
+            stream.apply(&event, None, None, None);
+        }
+
+        let response = stream.into_response().expect("stream should assemble");
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].name, "read_file");
+        assert_eq!(
+            response.tool_calls[0].arguments,
+            json!({ "path": "src/main.ts" })
+        );
     }
 
     #[test]

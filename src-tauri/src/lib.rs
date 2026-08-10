@@ -857,6 +857,32 @@ fn read_project_file(
 }
 
 #[tauri::command]
+fn delete_project_file(
+    relative_path: String,
+    state: tauri::State<'_, state::AppState>,
+) -> Result<(), String> {
+    let root = state
+        .project_root
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| "Open a project to delete one of its files.".to_string())?;
+    workspace::delete_project_file(std::path::Path::new(&root), &relative_path)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn clear_project_files(state: tauri::State<'_, state::AppState>) -> Result<u64, String> {
+    let root = state
+        .project_root
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| "Open a project to clear its files.".to_string())?;
+    workspace::clear_project_files(std::path::Path::new(&root)).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn agent_run(
     prompt: String,
     session_id: String,
@@ -1180,6 +1206,8 @@ pub fn run() {
             list_project_templates,
             list_project_files,
             read_project_file,
+            delete_project_file,
+            clear_project_files,
             export_client_pack,
             get_license_status,
             apply_license_key,

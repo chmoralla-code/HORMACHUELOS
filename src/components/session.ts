@@ -4,6 +4,10 @@ import { normalizeAssistantMarkdown } from "./util";
 
 export type SessionMessage =
   | { type: "user"; text: string; at?: number }
+  /** Restores the visual run mode when a transcript is opened again. */
+  | { type: "run_start"; permissionMode: "plan" | "multi_agent"; at?: number }
+  /** Keeps the visual Multi-Agent activity batch with the session it belongs to. */
+  | { type: "multi_agent_batch"; tools: SessionMultiAgentTool[]; at?: number }
   | { type: "thinking"; iteration: number; text: string; at?: number }
   | { type: "assistant"; text: string; at?: number }
   | { type: "tool_call"; id: string; name: string; arguments: any; at?: number }
@@ -12,6 +16,13 @@ export type SessionMessage =
   | { type: "done"; summary: string; title: string; description: string; files: string[]; tech: string[]; features: string[]; at?: number; workMs?: number }
   | { type: "end"; reason: string; at?: number; workMs?: number }
   | { type: "cancelled"; at?: number; workMs?: number };
+
+/** Safe, replayable description of one tool announced in a Multi-Agent batch. */
+export type SessionMultiAgentTool = {
+  id: string;
+  name: string;
+  arguments: unknown;
+};
 
 /**
  * The preview workspace belongs to a conversation, rather than to the whole
@@ -191,6 +202,49 @@ export function redactToolArguments(name: string, value: unknown): unknown {
   return args;
 }
 
+const MULTI_AGENT_BATCH_MAX_TOOLS = 24;
+const MULTI_AGENT_TOOL_ID_MAX = 160;
+const MULTI_AGENT_TOOL_NAME_MAX = 120;
+
+function safeMultiAgentToolText(value: unknown, max: number): string {
+  if (typeof value !== "string") return "";
+  return value
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .trim()
+    .slice(0, max);
+}
+
+/**
+ * Store only safe, bounded tool descriptors.  This snapshot is UI metadata,
+ * not an additional tool invocation, so it can safely be replayed after a
+ * project or session switch.
+ */
+export function snapshotMultiAgentTools(value: unknown): SessionMultiAgentTool[] {
+  if (!Array.isArray(value)) return [];
+  const tools: SessionMultiAgentTool[] = [];
+  const seenIds = new Set<string>();
+  for (const candidate of value.slice(0, MULTI_AGENT_BATCH_MAX_TOOLS)) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+    const raw = candidate as Record<string, unknown>;
+    const id = safeMultiAgentToolText(raw.id, MULTI_AGENT_TOOL_ID_MAX);
+    const name = safeMultiAgentToolText(raw.name, MULTI_AGENT_TOOL_NAME_MAX);
+    if (!id || !name || seenIds.has(id)) continue;
+    seenIds.add(id);
+    tools.push({
+      id,
+      name,
+      arguments: redactToolArguments(name, raw.arguments),
+    });
+  }
+  return tools;
+}
+
+export function normalizeSessionPermissionMode(value: unknown): "plan" | "multi_agent" {
+  return String(value || "").trim().toLowerCase() === "multi_agent"
+    ? "multi_agent"
+    : "plan";
+}
+
 function redactSessionMessage(message: SessionMessage): SessionMessage {
   switch (message.type) {
     case "user":
@@ -201,6 +255,11 @@ function redactSessionMessage(message: SessionMessage): SessionMessage {
       return {
         ...message,
         arguments: redactToolArguments(message.name, message.arguments),
+      };
+    case "multi_agent_batch":
+      return {
+        ...message,
+        tools: snapshotMultiAgentTools(message.tools),
       };
     case "tool_result":
       return { ...message, content: redactChatCredentials(message.content) };
@@ -795,6 +854,9 @@ export function buildLlmHistory(messages: SessionMessage[], currentPrompt: strin
       case "end":
       case "cancelled":
         break;
+      case "run_start":
+      case "multi_agent_batch":
+        break;
     }
   }
 
@@ -827,6 +889,18 @@ export function recordAgentEvent(
 ): void {
   const at = Date.now();
   switch (e.kind) {
+    case "start":
+      messages.push({
+        type: "run_start",
+        permissionMode: normalizeSessionPermissionMode(e.payload?.permission_mode),
+        at,
+      });
+      break;
+    case "multi_agent_batch": {
+      const tools = snapshotMultiAgentTools(e.payload?.tools);
+      if (tools.length) messages.push({ type: "multi_agent_batch", tools, at });
+      break;
+    }
     case "thinking":
       messages.push({ type: "thinking", iteration: e.payload.iteration ?? 0, text: "", at });
       break;

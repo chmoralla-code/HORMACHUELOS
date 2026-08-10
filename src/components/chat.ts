@@ -1,7 +1,13 @@
 import { api, type AgentEvent, type ComputerUseFxEvent } from "../ipc";
 import { privateTypingStatus } from "./computer-use-hud";
 import { icon } from "./icons";
-import { redactToolArguments, type SessionMessage } from "./session";
+import {
+  normalizeSessionPermissionMode,
+  redactToolArguments,
+  snapshotMultiAgentTools,
+  type SessionMessage,
+  type SessionMultiAgentTool,
+} from "./session";
 import { ToolArgsStreamDecoder, type ToolArgField } from "./tool-args-stream";
 import { clear, div, el, escapeHtml, formatChatTime, normalizeAssistantMarkdown, renderMarkdown, setShimmerText } from "./util";
 
@@ -14,7 +20,7 @@ type ToolStreamState = {
   renderedField: ToolArgField | null;
   renderedContent: string;
 };
-type MultiAgentTool = { id: string; name: string; arguments: any };
+type MultiAgentTool = SessionMultiAgentTool;
 type CompletionSummary = {
   primary: string;
   verification: string[];
@@ -1687,6 +1693,12 @@ export class Chat {
     for (const msg of msgs) {
       switch (msg.type) {
         case "user": this.appendUser(msg.text, msg.at); break;
+        case "run_start":
+          this.setActivePermissionMode(msg.permissionMode);
+          break;
+        case "multi_agent_batch":
+          this.showMultiAgentBatch(msg.tools);
+          break;
         case "thinking":
           this.showThinking(msg.iteration);
           if (msg.text) this.appendThinkingText(msg.text);
@@ -4349,6 +4361,18 @@ export class Chat {
   private recordEvent(e: AgentEvent) {
     const at = this.now();
     switch (e.kind) {
+      case "start":
+        this.messages.push({
+          type: "run_start",
+          permissionMode: normalizeSessionPermissionMode(e.payload?.permission_mode),
+          at,
+        });
+        break;
+      case "multi_agent_batch": {
+        const tools = snapshotMultiAgentTools(e.payload?.tools);
+        if (tools.length) this.messages.push({ type: "multi_agent_batch", tools, at });
+        break;
+      }
       case "thinking": this.messages.push({ type: "thinking", iteration: e.payload.iteration, text: "", at }); break;
       case "reasoning": {
         const last = this.messages[this.messages.length - 1];

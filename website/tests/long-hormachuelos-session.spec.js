@@ -35,7 +35,7 @@ async function installHormachuelosLongRunMock(page) {
       max_iterations: 0,
       command_timeout_secs: 120,
       auto_approve: true,
-      permission_mode: "auto",
+      permission_mode: window.__HORMA_LONG_PERMISSION_MODE__ || "auto",
       capability_mode: "thinking",
       taglish: false,
       computer_use_enabled: false,
@@ -103,7 +103,26 @@ async function installHormachuelosLongRunMock(page) {
       // twelve-recovery ceiling. Each recovery follows concrete tool work;
       // the host must keep the one task alive instead of producing an `end`
       // event or waiting for the client to type Continue.
-      const totalWorkRounds = 15;
+      const defaultToolPlan = Array.from({ length: 15 }, (_, round) => ({
+        name: round < 2 ? "read_file" : round < 12 ? "write_file" : round < 14 ? "run_command" : "grep",
+        arguments: round < 2 ? { path: "src/main.ts" } : round < 12
+          ? { path: `src/feature-${round}.ts`, content: "// simulated" }
+          : round < 14
+            ? { command: "npm run check" }
+            : { pattern: "Error", path: "src" },
+      }));
+      const toolPlan = Array.isArray(window.__HORMA_LONG_TOOL_PLAN__) && window.__HORMA_LONG_TOOL_PLAN__.length
+        ? window.__HORMA_LONG_TOOL_PLAN__
+        : defaultToolPlan;
+      const totalWorkRounds = toolPlan.length;
+      const parallelSafe = new Set(["list_dir", "glob", "grep", "read_file", "git_status", "file_info"]);
+      const initialBatch = toolPlan
+        .slice(0, 6)
+        .filter((tool) => parallelSafe.has(tool.name))
+        .map((tool, index) => ({ ...tool, id: `long-task-${index}` }));
+      if (settings.permission_mode === "multi_agent" && initialBatch.length >= 2) {
+        event("multi_agent_batch", { tools: initialBatch });
+      }
       for (let round = 0; round < totalWorkRounds; round += 1) {
         event("thinking", { iteration: round });
         const step = round < 2 ? 1 : round < totalWorkRounds - 3 ? 2 : round < totalWorkRounds - 1 ? 3 : 4;
@@ -118,19 +137,16 @@ async function installHormachuelosLongRunMock(page) {
               ? "Running a focused validation check..."
               : "Applying the requested changes...",
         });
+        const tool = toolPlan[round];
         const id = `long-task-${round}`;
         event("tool_call", {
           id,
-          name: round < 2 ? "read_file" : round < totalWorkRounds - 3 ? "write_file" : round < totalWorkRounds - 1 ? "run_command" : "grep",
-          arguments: round < 2 ? { path: "src/main.ts" } : round < totalWorkRounds - 3
-            ? { path: `src/feature-${round}.ts`, content: "// simulated" }
-            : round < totalWorkRounds - 1
-              ? { command: "npm run check" }
-              : { pattern: "Error", path: "src" },
+          name: tool.name,
+          arguments: tool.arguments,
         });
         event("tool_result", {
           id,
-          name: round < 2 ? "read_file" : round < totalWorkRounds - 3 ? "write_file" : round < totalWorkRounds - 1 ? "run_command" : "grep",
+          name: tool.name,
           ok: true,
           content: "ok",
         });
@@ -283,4 +299,61 @@ test("long HORMACHUELOS task recovers without a manual Continue message", async 
 
   const fatal = consoleErrors.filter((entry) => !/mock|tauri|invoke|favicon|vite/i.test(entry));
   expect(fatal, fatal.join("\n")).toEqual([]);
+});
+
+test("Minecraft-style Multi-Agent build keeps every core tool event separate", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__HORMA_LONG_PERMISSION_MODE__ = "multi_agent";
+    window.__HORMA_LONG_TOOL_PLAN__ = [
+      { name: "list_dir", arguments: { path: "." } },
+      { name: "glob", arguments: { pattern: "src/**/*" } },
+      { name: "grep", arguments: { pattern: "TODO", path: "src" } },
+      { name: "read_file", arguments: { path: "src/main.ts" } },
+      { name: "git_status", arguments: {} },
+      { name: "file_info", arguments: { path: "package.json" } },
+      { name: "make_dir", arguments: { path: "src/game" } },
+      { name: "write_file", arguments: { path: "src/game/world.ts", content: "// blocks" } },
+      { name: "edit_file", arguments: { path: "src/main.ts", old_string: "old", new_string: "new" } },
+      { name: "run_command", arguments: { command: "npm run check" } },
+      { name: "start_dev_server", arguments: { command: "npm run dev", port: 5173 } },
+      { name: "view_image", arguments: { path: "public/terrain.png" } },
+      { name: "view_video", arguments: { path: "demo.mp4" } },
+      { name: "git_add_all", arguments: {} },
+      { name: "git_commit", arguments: { message: "Build Minecraft demo" } },
+    ];
+  });
+  await installHormachuelosLongRunMock(page);
+  await page.route("https://hormachuelos.vercel.app/api/update?*", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ updateAvailable: false, forceUpdate: false, currentVersion: "0.1.57", latest: null }),
+  }));
+  await page.route("https://hormachuelos.vercel.app/api/auth/me", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ ok: true, user: { email: "minecraft@example.com", plan: "pro" } }),
+  }));
+
+  await page.goto(APP, { waitUntil: "networkidle" });
+  const input = page.locator("#forge-prompt, .composer-input, textarea").first();
+  await input.fill("Create a polished Minecraft-style browser game and keep working until preview and checks are ready.");
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+
+  const chat = page.locator("#chat");
+  await expect(chat).toContainText("Long-session Hormachuelos task complete.", { timeout: 30000 });
+  await expect(chat.locator(".multi-agent-batch")).toContainText("Multi-Agent");
+  await expect(chat.locator(".multi-agent-batch .multi-agent-live")).toHaveText("DONE");
+  for (const tool of [
+    "list_dir", "glob", "grep", "read_file", "git_status", "file_info", "make_dir",
+    "write_file", "edit_file", "run_command", "start_dev_server", "view_image", "view_video",
+    "git_add_all", "git_commit",
+  ]) {
+    await expect(chat.locator(`.tool-name[data-tool="${tool}"]`)).toHaveCount(1);
+  }
+  await expect(chat).not.toContainText(/tool naming error|unknown tool|list_dirglob/i);
+
+  const trace = await page.evaluate(() => window.__HORMA_LONG_EVENTS__);
+  expect(trace.filter((event) => event === "tool_call")).toHaveLength(15);
+  expect(trace).toContain("end:completed");
+  await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeEnabled();
 });

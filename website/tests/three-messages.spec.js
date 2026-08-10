@@ -59,7 +59,7 @@ async function installMock(page) {
       return { ...defaultLicense, ...(window.__HORMA_LICENSE_FIXTURE__ || {}) };
     }
 
-    const tree = {
+    let tree = {
       nodes: [
         {
           name: "src",
@@ -92,6 +92,25 @@ async function installMock(page) {
       ],
       truncated: false,
     };
+
+    function removeTreeFile(nodes, target) {
+      for (let index = 0; index < nodes.length; index += 1) {
+        const node = nodes[index];
+        if (!node.isDir && node.path === target) {
+          nodes.splice(index, 1);
+          return true;
+        }
+        if (node.isDir && removeTreeFile(node.children || [], target)) return true;
+      }
+      return false;
+    }
+
+    function countTreeEntries(nodes) {
+      return nodes.reduce(
+        (count, node) => count + 1 + (node.isDir ? countTreeEntries(node.children || []) : 0),
+        0,
+      );
+    }
 
     function emit(event, payload) {
       const ids = eventHandlers.get(event) || [];
@@ -277,6 +296,20 @@ async function installMock(page) {
               size: 14,
               language: "ts",
             };
+          case "delete_project_file": {
+            const relativePath = String(args.relativePath || "");
+            if (!removeTreeFile(tree.nodes, relativePath)) {
+              throw new Error(`Project file not found: ${relativePath}`);
+            }
+            window.__HORMA_LAST_DELETED_PROJECT_FILE__ = relativePath;
+            return null;
+          }
+          case "clear_project_files": {
+            const removed = countTreeEntries(tree.nodes);
+            tree = { nodes: [], truncated: false };
+            window.__HORMA_CLEARED_PROJECT_FILE_COUNT__ = removed;
+            return removed;
+          }
           case "plugin:dialog|open":
             if (args.options?.title === "Attach images") {
               window.__HORMA_LAST_DIALOG_OPTIONS__ = args.options;
@@ -710,6 +743,54 @@ test("send three messages and get mock agent replies", async ({ page }) => {
   expect(fatal, fatal.join("\n")).toEqual([]);
 });
 
+test("project files can be deleted one at a time or cleared with confirmation", async ({ page }) => {
+  await installMock(page);
+  await page.route("https://hormachuelos.vercel.app/api/update?*", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ updateAvailable: false, forceUpdate: false, currentVersion: "0.1.5", latest: null }),
+    }),
+  );
+  await page.route("https://hormachuelos.vercel.app/api/auth/me", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ ok: true, user: { email: "file-actions@example.com", plan: "pro" } }),
+    }),
+  );
+
+  await page.goto(APP, { waitUntil: "networkidle" });
+  await openProjectViaUI(page);
+
+  const tree = page.locator(".project-tree");
+  await tree.locator('.tree-item.directory[title="src"]').click();
+  await expect(tree).toContainText("main.ts");
+  await expect(tree).toContainText("README.md");
+  await expect(page.locator(".project-file-count")).toContainText("2 files");
+
+  await page.getByRole("button", { name: "Delete src/main.ts" }).click();
+  const deleteDialog = page.getByRole("alertdialog");
+  await expect(deleteDialog).toContainText("Delete this project file?");
+  await expect(deleteDialog).toContainText("src/main.ts");
+  await deleteDialog.getByRole("button", { name: "Delete file" }).click();
+
+  await expect(tree).not.toContainText("main.ts");
+  await expect(page.locator(".project-file-notice")).toContainText("Deleted src/main.ts.");
+  expect(await page.evaluate(() => window.__HORMA_LAST_DELETED_PROJECT_FILE__)).toBe("src/main.ts");
+  await expect(page.locator(".project-file-count")).toContainText("1 file");
+
+  await page.getByRole("button", { name: "Clear all project files" }).click();
+  const clearDialog = page.getByRole("alertdialog");
+  await expect(clearDialog).toContainText("Clear all project files?");
+  await expect(clearDialog).toContainText(".git history stay");
+  await clearDialog.getByRole("button", { name: "Clear files" }).click();
+
+  await expect(tree).toContainText("This project is empty.");
+  await expect(page.locator(".project-file-count")).toContainText("0 files");
+  expect(await page.evaluate(() => window.__HORMA_CLEARED_PROJECT_FILE_COUNT__)).toBe(2);
+});
+
 test("attaches every image selected together or pasted from Explorer", async ({ page }) => {
   await page.addInitScript(() => {
     window.__HORMA_IMAGE_PICKER_FIXTURE__ = [
@@ -909,6 +990,115 @@ test("Multi-Agent mode saves Ship-level access and renders parallel tool roles",
   await expect(swarm).toContainText("Mapping");
   await expect(swarm).toContainText("Searching for scripts");
   await expect(page.locator(".multi-agent-tool.done")).toHaveCount(3);
+  const persisted = await page.evaluate(() => JSON.parse(localStorage.getItem("ai-forge:sessions") || "[]"));
+  const multiAgentSession = persisted.find((session) =>
+    session.messages?.some((message) => message.type === "multi_agent_batch"),
+  );
+  expect(multiAgentSession?.messages.some((message) => message.type === "run_start" && message.permissionMode === "multi_agent")).toBe(true);
+});
+
+test("Multi-Agent activity chrome survives switching projects and returning", async ({ page }) => {
+  const multiProject = String.raw`C:\fixtures\Rainbow Workspace`;
+  const otherProject = String.raw`C:\fixtures\Plain Workspace`;
+  await page.addInitScript(
+    ({ multiProject, otherProject }) => {
+      const multiTools = [
+        { id: "saved-list", name: "list_dir", arguments: { path: "." } },
+        { id: "saved-read", name: "read_file", arguments: { path: "package.json" } },
+        { id: "saved-grep", name: "grep", arguments: { pattern: "scripts", path: "package.json" } },
+      ];
+      window.__HORMA_RECENT_PROJECTS_FIXTURE__ = [multiProject, otherProject];
+      localStorage.setItem("ai-forge:active-project-workspace", multiProject);
+      localStorage.setItem(
+        "ai-forge:project-workspaces",
+        JSON.stringify([
+          { path: multiProject, name: "Rainbow Workspace", addedAt: 1, lastOpenedAt: 2 },
+          { path: otherProject, name: "Plain Workspace", addedAt: 1, lastOpenedAt: 1 },
+        ]),
+      );
+      localStorage.setItem(
+        "ai-forge:sessions",
+        JSON.stringify([
+          {
+            id: "saved-multi-agent-session",
+            title: "Parallel inspection",
+            projectId: multiProject,
+            createdAt: 2,
+            messages: [
+              { type: "user", text: "Inspect this workspace in parallel.", at: 1 },
+              { type: "run_start", permissionMode: "multi_agent", at: 2 },
+              { type: "thinking", iteration: 1, text: "Planning parallel inspection.", at: 3 },
+              { type: "multi_agent_batch", tools: multiTools, at: 4 },
+              ...multiTools.flatMap((tool, index) => [
+                { type: "tool_call", ...tool, at: 5 + index },
+                {
+                  type: "tool_result",
+                  id: tool.id,
+                  name: tool.name,
+                  ok: true,
+                  content: "Saved inspection complete",
+                  at: 8 + index,
+                },
+              ]),
+              {
+                type: "done",
+                summary: "Parallel inspection complete",
+                title: "Inspection complete",
+                description: "",
+                files: [],
+                tech: [],
+                features: [],
+                at: 12,
+              },
+            ],
+          },
+          {
+            id: "other-project-session",
+            title: "Other project",
+            projectId: otherProject,
+            createdAt: 1,
+            messages: [{ type: "assistant", text: "Plain project transcript", at: 1 }],
+          },
+        ]),
+      );
+    },
+    { multiProject, otherProject },
+  );
+  await installMock(page);
+  await page.route("https://hormachuelos.vercel.app/api/update?*", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ updateAvailable: false, forceUpdate: false, currentVersion: "0.1.5", latest: null }),
+    }),
+  );
+  await page.route("https://hormachuelos.vercel.app/api/auth/me", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ ok: true, user: { email: "switch-multi@example.com", plan: "pro" } }),
+    }),
+  );
+
+  await page.goto(APP, { waitUntil: "networkidle" });
+  const swarm = page.locator(".multi-agent-batch");
+  await expect(swarm).toHaveCount(1);
+  await expect(page.locator("#chat")).toHaveClass(/chat-multi-agent/);
+  await expect(swarm.locator(".multi-agent-tool.done")).toHaveCount(3);
+  await expect(swarm.locator(".multi-agent-live")).toHaveText("DONE");
+
+  await page.locator(".sb-project-workspace", { hasText: "Plain Workspace" }).click();
+  await expect(page.locator("#chat")).toContainText("Plain project transcript");
+  await expect(page.locator("#chat")).not.toHaveClass(/chat-multi-agent/);
+  await expect(swarm).toHaveCount(0);
+
+  await page.locator(".sb-project-workspace", { hasText: "Rainbow Workspace" }).click();
+  await expect(swarm).toHaveCount(1);
+  await expect(page.locator("#chat")).toHaveClass(/chat-multi-agent/);
+  await expect(swarm.locator(".multi-agent-tool.done")).toHaveCount(3);
+  await expect(swarm.locator(".multi-agent-live")).toHaveText("DONE");
+  const orbit = await swarm.evaluate((batch) => getComputedStyle(batch, "::before").animationName);
+  expect(orbit).toContain("multiAgentSpectrumOrbit");
 });
 
 test("Multi-Agent mode marks a failed spawned tool as needing attention", async ({ page }) => {

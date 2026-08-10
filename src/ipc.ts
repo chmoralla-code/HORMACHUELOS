@@ -168,6 +168,11 @@ export const api = {
   listProjectTemplates: (): Promise<ProjectTemplate[]> => invoke("list_project_templates"),
   listProjectFiles: (maxDepth = 8): Promise<ProjectTree> => invoke("list_project_files", { maxDepth }),
   readProjectFile: (relativePath: string): Promise<FilePreview> => invoke("read_project_file", { relativePath }),
+  /** Permanently delete one regular file inside the active project. */
+  deleteProjectFile: (relativePath: string): Promise<void> =>
+    invoke("delete_project_file", { relativePath }),
+  /** Clear active-project contents while keeping the project directory and .git history. */
+  clearProjectFiles: (): Promise<number> => invoke("clear_project_files"),
   exportClientPack: (destPath?: string, handoffSummary?: string): Promise<ClientPackResult> =>
     invoke("export_client_pack", {
       destPath: destPath ?? null,

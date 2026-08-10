@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.57";
-const BUILTIN_MSI_SHA256 = "9fcc35573dc22a1f025e2b452acab92cce8f1ca78309870d4e3e7de6a6d390a0";
-const BUILTIN_EXE_SHA256 = "e61716b2841974105fd7398d13123463c2f9a22e223d24c9cc346d7b58573277";
-const BUILTIN_RELEASE_NOTES = "Fixed Multi-Agent tool spawning: separate inspection calls no longer merge into invalid tool names. Improved safe recovery for malformed read-only calls and project-relative file access. Failed spawned tools now show a clear needs-attention state.";
+const BUILTIN_RELEASE_VERSION = "0.1.58";
+const BUILTIN_MSI_SHA256 = "cf0ab76da4c1ce62e087b09379ed3f6fcbf9cd87977931da516734b12cb1e2f1";
+const BUILTIN_EXE_SHA256 = "c505055b03302794d7f6c2c9b67038b8da8ab1197cd9c3a191b4cd455b200177";
+const BUILTIN_RELEASE_NOTES = "Multi-Agent visual effects, colors, and tool activity now stay with their project and session after switching folders. Added safe per-file and clear-all project controls. Fixed streamed tool-call naming so parallel tools remain separate.";
 const GITHUB_RELEASES_BASE = "https://github.com/chmoralla-code/HORMACHUELOS/releases/download";
 
 /**

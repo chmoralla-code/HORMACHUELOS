@@ -331,6 +331,76 @@ pub fn read_project_file(root: &Path, relative: &str) -> Result<FilePreview> {
     })
 }
 
+/// Permanently remove one regular file from the active project.  The caller
+/// can only address a path relative to the project root; `resolve_project_path`
+/// rejects traversal, absolute paths, symlinks, and paths that resolve outside
+/// that root before anything is removed.
+pub fn delete_project_file(root: &Path, relative: &str) -> Result<()> {
+    let path = resolve_project_path(root, relative)?;
+    let metadata = path
+        .metadata()
+        .context("Could not inspect project file for deletion.")?;
+    if !metadata.is_file() {
+        bail!("Only regular project files can be deleted from the file list.");
+    }
+    std::fs::remove_file(&path)
+        .with_context(|| format!("Could not delete project file: {relative}"))?;
+    Ok(())
+}
+
+fn remove_project_entry(path: &Path, file_type: std::fs::FileType) -> Result<()> {
+    if file_type.is_symlink() {
+        // Do not traverse a link when clearing a project. Removing the link
+        // itself is safe even if it points outside the project.
+        std::fs::remove_file(path)
+            .or_else(|_| std::fs::remove_dir(path))
+            .with_context(|| format!("Could not remove project link: {}", path.display()))?;
+    } else if file_type.is_dir() {
+        std::fs::remove_dir_all(path)
+            .with_context(|| format!("Could not remove project folder: {}", path.display()))?;
+    } else if file_type.is_file() {
+        std::fs::remove_file(path)
+            .with_context(|| format!("Could not remove project file: {}", path.display()))?;
+    } else {
+        bail!("Unsupported project entry: {}", path.display());
+    }
+    Ok(())
+}
+
+/// Clear the active project's contents while retaining the project directory
+/// itself and its Git history. This is intentionally rooted in a canonical
+/// project directory and refuses to operate on a filesystem root.
+pub fn clear_project_files(root: &Path) -> Result<u64> {
+    let root = canonical_project_root(root)?;
+    if root.parent().is_none() {
+        bail!("The filesystem root cannot be cleared as a project.");
+    }
+
+    let mut removed = 0_u64;
+    for entry in std::fs::read_dir(&root)
+        .with_context(|| format!("Could not read project folder: {}", root.display()))?
+    {
+        let entry = entry.context("Could not inspect project entry.")?;
+        let name = entry.file_name();
+        // Preserve the repository metadata so a clear can be recovered with
+        // Git and never turns into an accidental repository deletion.
+        if name.to_string_lossy().eq_ignore_ascii_case(".git") {
+            continue;
+        }
+        remove_project_entry(
+            &entry.path(),
+            entry.file_type().with_context(|| {
+                format!(
+                    "Could not inspect project entry: {}",
+                    entry.path().display()
+                )
+            })?,
+        )?;
+        removed += 1;
+    }
+    Ok(removed)
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientPackResult {
@@ -496,8 +566,8 @@ Prepared with Hormachuelos.\n\n\
 #[cfg(test)]
 mod tests {
     use super::{
-        export_client_pack, list_project_files, read_project_file, resolve_open_project_root,
-        ProjectNode,
+        clear_project_files, delete_project_file, export_client_pack, list_project_files,
+        read_project_file, resolve_open_project_root, ProjectNode,
     };
     use std::path::{Path, PathBuf};
 
@@ -595,6 +665,45 @@ mod tests {
 
         assert!(read_project_file(workspace.path(), "binary.bin").is_err());
         assert!(read_project_file(workspace.path(), "large.txt").is_err());
+    }
+
+    #[test]
+    fn deletes_a_regular_project_file_without_escaping_the_project() {
+        let workspace = TestWorkspace::new();
+        std::fs::create_dir_all(workspace.path().join("src")).unwrap();
+        let file = workspace.path().join("src/main.ts");
+        std::fs::write(&file, "export {};").unwrap();
+
+        delete_project_file(workspace.path(), "src/main.ts").expect("delete project file");
+
+        assert!(!file.exists());
+        assert!(delete_project_file(workspace.path(), "../outside.txt").is_err());
+        assert!(delete_project_file(workspace.path(), "src").is_err());
+    }
+
+    #[test]
+    fn clears_project_contents_but_keeps_the_root_and_git_metadata() {
+        let workspace = TestWorkspace::new();
+        std::fs::create_dir_all(workspace.path().join(".git")).unwrap();
+        std::fs::create_dir_all(workspace.path().join("src")).unwrap();
+        std::fs::create_dir_all(workspace.path().join("node_modules/pkg")).unwrap();
+        std::fs::write(workspace.path().join(".git/config"), "[core]").unwrap();
+        std::fs::write(workspace.path().join("src/main.ts"), "export {};").unwrap();
+        std::fs::write(
+            workspace.path().join("node_modules/pkg/index.js"),
+            "module.exports = {};",
+        )
+        .unwrap();
+        std::fs::write(workspace.path().join("README.md"), "Project").unwrap();
+
+        let removed = clear_project_files(workspace.path()).expect("clear project files");
+
+        assert_eq!(removed, 3);
+        assert!(workspace.path().is_dir());
+        assert!(workspace.path().join(".git/config").is_file());
+        assert!(!workspace.path().join("src").exists());
+        assert!(!workspace.path().join("node_modules").exists());
+        assert!(!workspace.path().join("README.md").exists());
     }
 
     #[test]
