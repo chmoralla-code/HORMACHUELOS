@@ -9,11 +9,11 @@ use crate::tools::{self, ToolRunContext};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 type ConsoleLineSink = Arc<dyn Fn(&str, &str) + Send + Sync>;
@@ -210,6 +210,8 @@ enum AutomaticContinuationReason {
     AnnouncedAction,
     /// Hosted/upstream 502 (or similar) after the run already made progress.
     ProviderBlip,
+    /// A streamed search/read call opened but never produced a final call.
+    InspectionToolStall,
 }
 
 impl AutomaticContinuationReason {
@@ -220,6 +222,9 @@ impl AutomaticContinuationReason {
             Self::AnnouncedAction => "Resuming the next required action…",
             Self::ProviderBlip => {
                 "Provider paused briefly — retrying from the last unfinished step…"
+            }
+            Self::InspectionToolStall => {
+                "Search tool stopped responding — retrying with corrected project paths…"
             }
         }
     }
@@ -251,6 +256,12 @@ If you need information from the codebase or the computer, use tools immediately
 The upstream provider returned a temporary error (for example HTTP 502). The workspace and prior tool results are preserved. \n\
 Continue the SAME task now. Do not restart from scratch or ask the user to type \"continue\". \n\
 Inspect the latest files/commands if needed, take the next concrete tool action, and finish the requested work."
+            }
+            Self::InspectionToolStall => {
+                "[System - Automatic tool recovery]\n\
+The previous search/read request stopped streaming before it became an executable tool call. The workspace and conversation are preserved. \n\
+Continue the SAME task now. For project-root list/search calls use path `.`; never use an empty path or `..`. \n\
+Retry with corrected arguments, a narrower query, or a different registered inspection tool. Do not repeat the identical stalled call and do not only narrate the next action."
             }
         }
     }
@@ -295,6 +306,89 @@ fn can_recover_from_provider_blip(
 }
 
 const MAX_PROVIDER_BLIP_RECOVERIES: u8 = 4;
+const STREAMED_INSPECTION_TOOL_TIMEOUT: Duration = Duration::from_secs(45);
+
+#[derive(Debug, PartialEq, Eq)]
+enum InspectionPreviewWatchState {
+    Idle,
+    Wait(Duration),
+    Stalled { index: usize, name: String },
+}
+
+/// Use the first inspection preview's creation time as an absolute deadline.
+/// Reasoning/status/argument deltas deliberately do not refresh it, otherwise
+/// a noisy but wedged provider can keep the visible tool card alive forever.
+fn inspection_preview_watch_state(
+    previews: &HashMap<usize, (String, Instant)>,
+    now: Instant,
+    timeout: Duration,
+) -> InspectionPreviewWatchState {
+    let Some((index, (name, started_at))) = previews.iter().min_by(
+        |(left_index, (_, left_started)), (right_index, (_, right_started))| {
+            left_started
+                .cmp(right_started)
+                .then_with(|| left_index.cmp(right_index))
+        },
+    ) else {
+        return InspectionPreviewWatchState::Idle;
+    };
+    let elapsed = now.checked_duration_since(*started_at).unwrap_or_default();
+    if elapsed >= timeout {
+        InspectionPreviewWatchState::Stalled {
+            index: *index,
+            name: name.clone(),
+        }
+    } else {
+        InspectionPreviewWatchState::Wait(timeout - elapsed)
+    }
+}
+
+async fn wait_for_stalled_inspection_preview(
+    previews: Arc<Mutex<HashMap<usize, (String, Instant)>>>,
+    changed: Arc<tokio::sync::Notify>,
+) -> (usize, String) {
+    loop {
+        let state = previews
+            .lock()
+            .map(|previews| {
+                inspection_preview_watch_state(
+                    &previews,
+                    Instant::now(),
+                    STREAMED_INSPECTION_TOOL_TIMEOUT,
+                )
+            })
+            .unwrap_or(InspectionPreviewWatchState::Idle);
+        match state {
+            InspectionPreviewWatchState::Idle => changed.notified().await,
+            InspectionPreviewWatchState::Wait(remaining) => tokio::time::sleep(remaining).await,
+            InspectionPreviewWatchState::Stalled { index, name } => return (index, name),
+        }
+    }
+}
+
+fn failed_tool_recovery_instruction(
+    failures: &[(String, String)],
+    consecutive_iterations: u8,
+    repeated_signature: bool,
+) -> String {
+    let details = failures
+        .iter()
+        .take(4)
+        .map(|(name, error)| format!("- {name}: {}", truncate_utf8(error, 700).0))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let repeated = if repeated_signature {
+        "The same tool set failed again. Do not repeat the identical call or arguments. "
+    } else {
+        ""
+    };
+    format!(
+        "[System - Tool recovery]\nThe last tool iteration made no successful progress (failure round {consecutive_iterations}).\n\
+{repeated}Correct malformed arguments, use `.` for the project root (never an empty path or `..`), narrow broad searches, or choose a different registered tool.\n\
+Read the returned error and call the corrected/alternate tool now instead of only describing what you would do.\n\
+Recent failures:\n{details}"
+    )
+}
 
 /// True when the assistant's prose promises an imminent tool action but the
 /// turn ended with zero tool calls — the classic "Let me find X." then stop.
@@ -593,6 +687,11 @@ const NATIVE_HISTORY_MAX_TURN_BYTES: usize = 3_000;
 const FAST_DESIGN_HISTORY_MAX_TURNS: usize = 4;
 const FAST_DESIGN_HISTORY_MAX_BYTES: usize = 6_000;
 const FAST_DESIGN_HISTORY_MAX_TURN_BYTES: usize = 1_800;
+const ACTIVE_RUN_CONTEXT_MAX_BYTES: usize = 120_000;
+const ACTIVE_RUN_RECENT_BYTES: usize = 48_000;
+const ACTIVE_RUN_SUMMARY_MAX_BYTES: usize = 32_000;
+const PROVIDER_TOOL_RESULT_MAX_BYTES: usize = 48_000;
+const MAX_PARALLEL_INSPECTION_TIMEOUT_SECS: u64 = 45;
 
 /// Design Mode already supplies the route, selector, DOM excerpt, screenshot,
 /// and source candidates. Keep only a tiny conversational tail so long chats
@@ -738,6 +837,164 @@ fn compact_history_messages(history: &[HistoryTurn]) -> Vec<ChatMessage> {
     newest_first
 }
 
+fn chat_message_size(message: &ChatMessage) -> usize {
+    let content = match &message.content {
+        Value::String(value) => value.len(),
+        Value::Null => 0,
+        value => value.to_string().len(),
+    };
+    let reasoning = message
+        .reasoning_content
+        .as_deref()
+        .map(str::len)
+        .unwrap_or(0);
+    let calls = message
+        .tool_calls
+        .as_ref()
+        .map(|calls| {
+            calls
+                .iter()
+                .map(|call| call.id.len() + call.name.len() + call.arguments.to_string().len())
+                .sum::<usize>()
+        })
+        .unwrap_or(0);
+    content + reasoning + calls + 64
+}
+
+fn compact_active_message_line(message: &ChatMessage) -> Option<String> {
+    let text = message.content.as_str().unwrap_or("").trim();
+    match message.role.as_str() {
+        "assistant" => {
+            let mut parts = Vec::new();
+            if !text.is_empty() {
+                parts.push(format!(
+                    "Assistant progress: {}",
+                    truncate_utf8(text, 700).0
+                ));
+            }
+            if let Some(calls) = message
+                .tool_calls
+                .as_ref()
+                .filter(|calls| !calls.is_empty())
+            {
+                let calls = calls
+                    .iter()
+                    .take(8)
+                    .map(|call| {
+                        let args = call.arguments.to_string();
+                        format!("{}({})", call.name, truncate_utf8(&args, 360).0)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                parts.push(format!("Tool actions: {calls}"));
+            }
+            (!parts.is_empty()).then(|| parts.join("\n"))
+        }
+        "tool" => {
+            let name = message.name.as_deref().unwrap_or("tool");
+            let result = if text.is_empty() {
+                "(empty)".to_string()
+            } else {
+                truncate_utf8(text, 1_400).0.to_string()
+            };
+            Some(format!("Tool result [{name}]: {result}"))
+        }
+        "system" if text.starts_with("Earlier active-run work") => Some(text.to_string()),
+        // The original user request and session memory are pinned. Repeated
+        // automatic-continuation prompts add no durable facts to this summary.
+        _ => None,
+    }
+}
+
+/// Bound the *current* agent run, not only prior session history. Large project
+/// analysis can otherwise accumulate megabytes of read/grep results inside one
+/// loop and eventually hit a provider context limit or spend minutes replaying
+/// old tools. Completed older tool protocol is converted to plain local memory;
+/// the newest complete tool groups remain verbatim.
+fn compact_active_run_messages(messages: &mut Vec<ChatMessage>, pinned_count: usize) -> bool {
+    let total = messages.iter().map(chat_message_size).sum::<usize>();
+    if total <= ACTIVE_RUN_CONTEXT_MAX_BYTES || pinned_count >= messages.len() {
+        return false;
+    }
+
+    let pinned_count = pinned_count.min(messages.len());
+    let mut recent_start = messages.len();
+    let mut recent_bytes = 0usize;
+    while recent_start > pinned_count {
+        let next = chat_message_size(&messages[recent_start - 1]);
+        if recent_bytes > 0 && recent_bytes.saturating_add(next) > ACTIVE_RUN_RECENT_BYTES {
+            break;
+        }
+        recent_start -= 1;
+        recent_bytes = recent_bytes.saturating_add(next);
+    }
+    // Never start the preserved suffix with orphaned tool results. Move back
+    // to the assistant message that declared their tool calls.
+    while recent_start > pinned_count && messages[recent_start].role == "tool" {
+        recent_start -= 1;
+    }
+
+    let mut summary_lines = Vec::new();
+    let mut summary_bytes = 0usize;
+    for message in messages[pinned_count..recent_start].iter().rev() {
+        let Some(line) = compact_active_message_line(message) else {
+            continue;
+        };
+        let next = line.len() + 1;
+        if summary_bytes.saturating_add(next) > ACTIVE_RUN_SUMMARY_MAX_BYTES {
+            break;
+        }
+        summary_bytes += next;
+        summary_lines.push(line);
+    }
+    summary_lines.reverse();
+
+    let mut compact = Vec::with_capacity(
+        pinned_count + usize::from(!summary_lines.is_empty()) + messages.len() - recent_start,
+    );
+    compact.extend(messages[..pinned_count].iter().cloned());
+    if !summary_lines.is_empty() {
+        compact.push(ChatMessage::system(&format!(
+            "Earlier active-run work (locally compacted; workspace state is authoritative):\n{}",
+            summary_lines.join("\n")
+        )));
+    }
+    compact.extend(messages[recent_start..].iter().cloned());
+    *messages = compact;
+    true
+}
+
+fn utf8_tail(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut start = value.len() - max_bytes;
+    while !value.is_char_boundary(start) {
+        start += 1;
+    }
+    &value[start..]
+}
+
+/// Keep provider context bounded while retaining both the start of a result
+/// (usually file/source context) and its tail (usually the error or summary).
+/// The full result still goes to the UI before this model-only reduction.
+fn provider_tool_result_content(content: &str) -> String {
+    if content.len() <= PROVIDER_TOOL_RESULT_MAX_BYTES {
+        return content.to_string();
+    }
+    const NOTICE: &str = "\n…(middle of tool result omitted from model context)…\n";
+    let head_budget = (PROVIDER_TOOL_RESULT_MAX_BYTES * 2 / 3).saturating_sub(NOTICE.len());
+    let tail_budget = PROVIDER_TOOL_RESULT_MAX_BYTES
+        .saturating_sub(head_budget)
+        .saturating_sub(NOTICE.len());
+    format!(
+        "{}{}{}",
+        truncate_utf8(content, head_budget).0,
+        NOTICE,
+        utf8_tail(content, tail_budget)
+    )
+}
+
 /// Execute one model-emitted inspection batch concurrently. The caller only
 /// invokes this for tools approved by `is_parallel_safe_readonly_tool`, so no
 /// action can alter another call's result or bypass a confirmation boundary.
@@ -750,6 +1007,7 @@ async fn execute_parallel_readonly_batch(
     cancel: &AtomicBool,
 ) -> Option<HashMap<String, (bool, String)>> {
     let mut jobs = tokio::task::JoinSet::new();
+    let inspection_timeout = timeout_secs.clamp(1, MAX_PARALLEL_INSPECTION_TIMEOUT_SECS);
     for call in tool_calls {
         let id = call.id.clone();
         let name = call.name.clone();
@@ -757,12 +1015,16 @@ async fn execute_parallel_readonly_batch(
         let root = root.to_path_buf();
         let context = context.clone();
         jobs.spawn_blocking(move || {
-            let result = tools::execute(&name, &args, &root, timeout_secs, &context);
+            let result = tools::execute(&name, &args, &root, inspection_timeout, &context);
             (id, result)
         });
     }
 
     let mut results = HashMap::with_capacity(tool_calls.len());
+    // Give the dispatcher's own timeout a small cleanup window before
+    // abandoning its blocking worker, so a late git process cannot outlive
+    // the batch and race a following tool's process tracking.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(inspection_timeout + 2);
     while !jobs.is_empty() {
         let joined = tokio::select! {
             biased;
@@ -770,7 +1032,21 @@ async fn execute_parallel_readonly_batch(
                 jobs.abort_all();
                 return None;
             }
-            joined = jobs.join_next() => joined,
+            joined = tokio::time::timeout_at(deadline, jobs.join_next()) => {
+                match joined {
+                    Ok(joined) => joined,
+                    Err(_) => {
+                        jobs.abort_all();
+                        for call in tool_calls {
+                            results.entry(call.id.clone()).or_insert_with(|| (
+                                false,
+                                "Error: Parallel workspace inspection timed out. Narrow the path or pattern and retry the individual tool.".into(),
+                            ));
+                        }
+                        break;
+                    }
+                }
+            },
         };
         let Some(joined) = joined else {
             break;
@@ -900,9 +1176,27 @@ fn orphaned_tool_previews(
 /// failed command and ensures aliases for commands receive the real command's
 /// approval policy.
 fn normalize_tool_calls(root: &Path, tool_calls: &mut [ToolCall]) {
-    for tool_call in tool_calls {
+    let mut used_ids = HashSet::new();
+    for (index, tool_call) in tool_calls.iter_mut().enumerate() {
         tool_call.name = tools::normalize_tool_name(&tool_call.name);
+        tools::normalize_tool_arguments(&tool_call.name, &mut tool_call.arguments);
         normalize_in_project_read_path(root, &tool_call.name, &mut tool_call.arguments);
+
+        // Some compatible providers omit every ID (all become `call`) or emit
+        // the same ID for a multi-tool response. IDs are protocol keys and UI
+        // card keys, so make them non-empty and unique before either boundary.
+        let base = if tool_call.id.trim().is_empty() {
+            format!("call_{index}")
+        } else {
+            tool_call.id.trim().to_string()
+        };
+        let mut candidate = base.clone();
+        let mut suffix = index;
+        while !used_ids.insert(candidate.clone()) {
+            candidate = format!("{base}_{suffix}");
+            suffix = suffix.saturating_add(1);
+        }
+        tool_call.id = candidate;
     }
 }
 
@@ -974,7 +1268,7 @@ fn chunk_text_for_stream(value: &str, max_chars: usize) -> Vec<String> {
 }
 
 /// Parse ask_user options from many common model formats.
-fn parse_ask_user_options(args: &Value) -> Vec<String> {
+pub(crate) fn parse_ask_user_options(args: &Value) -> Vec<String> {
     let raw = args.get("options");
     let mut out: Vec<String> = Vec::new();
 
@@ -1043,7 +1337,7 @@ fn parse_ask_user_options(args: &Value) -> Vec<String> {
     out
 }
 
-fn tool_confirm_summary(name: &str, args: &Value) -> String {
+pub(crate) fn tool_confirm_summary(name: &str, args: &Value) -> String {
     match name {
         "run_command" => format!(
             "Run command: {}",
@@ -1145,7 +1439,7 @@ fn tool_confirm_summary(name: &str, args: &Value) -> String {
     }
 }
 
-async fn await_tool_confirm(
+pub(crate) async fn await_tool_confirm(
     app: &AppHandle,
     session_id: &str,
     run: &SessionRun,
@@ -1347,11 +1641,13 @@ Current user request:\n{prompt}",
                     app,
                     &project_root,
                     &wrapped_prompt,
+                    &prompt,
                     &key,
                     &settings.model,
                     &effort,
                     &permission_mode,
                     settings.computer_use_enabled,
+                    settings.command_timeout_secs,
                     &session_id,
                     run,
                     &history,
@@ -1805,6 +2101,10 @@ The tool entries are historical summaries; use fresh tools for the current works
     }
 
     messages.push(ChatMessage::user(&user_content));
+    // System policy, compact prior-session memory, and the original user
+    // request stay pinned. Only completed work produced inside this run is
+    // eligible for local context compaction.
+    let pinned_message_count = messages.len();
 
     let mut total_tokens: u64 = 0;
     // How many times we've forced plan-mode models to call ask_user after text-only replies.
@@ -1813,6 +2113,8 @@ The tool entries are historical summaries; use fresh tools for the current works
     // count resets after every tool turn; it is not an iteration limit.
     let mut consecutive_stalled_recoveries: u8 = 0;
     let mut provider_blip_recoveries: u8 = 0;
+    let mut consecutive_failed_tool_iterations: u8 = 0;
+    let mut previous_failed_tool_signature = String::new();
     let mut smart_agent = crate::smart_agent::SmartAgentRun::new(
         smart_agent_enabled,
         task_profile.is_fast_design_edit(),
@@ -1845,6 +2147,8 @@ The tool entries are historical summaries; use fresh tools for the current works
             emit_cancelled(&app, &session_id, iteration);
             return Ok(None);
         }
+
+        compact_active_run_messages(&mut messages, pinned_message_count);
 
         emit(
             &app,
@@ -1900,6 +2204,11 @@ The tool entries are historical summaries; use fresh tools for the current works
             String,
         >::new()));
         let emitted_tool_preview_names = tool_preview_names.clone();
+        let inspection_preview_starts =
+            Arc::new(Mutex::new(HashMap::<usize, (String, Instant)>::new()));
+        let inspection_preview_starts_for_sink = inspection_preview_starts.clone();
+        let inspection_preview_changed = Arc::new(tokio::sync::Notify::new());
+        let inspection_preview_changed_for_sink = inspection_preview_changed.clone();
         let tool_call_sink: ToolCallSink =
             Arc::new(move |index: usize, name: &str, arguments_delta: &str| {
                 let resolved_name = {
@@ -1911,6 +2220,16 @@ The tool entries are historical summaries; use fresh tools for the current works
                 let Some(resolved_name) = resolved_name else {
                     return;
                 };
+                if tools::is_parallel_safe_readonly_tool(&resolved_name) {
+                    if let Ok(mut starts) = inspection_preview_starts_for_sink.lock() {
+                        if let std::collections::hash_map::Entry::Vacant(entry) =
+                            starts.entry(index)
+                        {
+                            entry.insert((resolved_name.clone(), Instant::now()));
+                            inspection_preview_changed_for_sink.notify_one();
+                        }
+                    }
+                }
                 let public_delta = public_tool_preview_delta(&resolved_name, arguments_delta);
                 let arguments_delta = integration_chat::redact_sensitive_text(
                     &public_delta,
@@ -1948,13 +2267,48 @@ The tool entries are historical summaries; use fresh tools for the current works
             // Stay alive across brief offline blips. Cap retries for stream cuts /
             // proxy timeouts so continuing a session never loops on Reconnecting….
             let mut reconnect_attempt: u32 = 0;
-            let mut recover_after_blip = false;
+            let mut automatic_recovery_reason: Option<AutomaticContinuationReason> = None;
             let response = loop {
                 let result = tokio::select! {
                     biased;
                     _ = wait_until_cancelled(&cancel) => {
                         emit_cancelled(&app, &session_id, iteration);
                         return Ok(None);
+                    }
+                    (stalled_index, stalled_name) = wait_for_stalled_inspection_preview(
+                        inspection_preview_starts.clone(),
+                        inspection_preview_changed.clone(),
+                    ) => {
+                        if provider_blip_recoveries >= MAX_PROVIDER_BLIP_RECOVERIES {
+                            let orphaned = emitted_tool_preview_names
+                                .lock()
+                                .map(|names| orphaned_tool_previews(&names, 0))
+                                .unwrap_or_default();
+                            for (index, name) in orphaned {
+                                emit(
+                                    &app,
+                                    &session_id,
+                                    "tool_preview_end",
+                                    json!({
+                                        "id": format!("tool-preview-{iteration}-{index}"),
+                                        "name": name,
+                                        "reason": "Search/read tool remained unresponsive after repeated automatic recovery attempts.",
+                                    }),
+                                );
+                            }
+                            return Err(anyhow::anyhow!(
+                                "Inspection tool {stalled_name} (preview {stalled_index}) remained unresponsive after repeated automatic recovery attempts."
+                            ));
+                        }
+                        automatic_recovery_reason =
+                            Some(AutomaticContinuationReason::InspectionToolStall);
+                        break LlmResponse {
+                            text: None,
+                            tool_calls: Vec::new(),
+                            reasoning_content: None,
+                            stop_reason: "inspection_tool_stall".into(),
+                            usage_tokens: 0,
+                        };
                     }
                     result = provider.chat(
                         &messages,
@@ -1978,7 +2332,8 @@ The tool entries are historical summaries; use fresh tools for the current works
                             if provider_blip_recoveries < MAX_PROVIDER_BLIP_RECOVERIES
                                 && can_recover_from_provider_blip(&err, iteration, &messages)
                             {
-                                recover_after_blip = true;
+                                automatic_recovery_reason =
+                                    Some(AutomaticContinuationReason::ProviderBlip);
                                 break LlmResponse {
                                     text: None,
                                     tool_calls: Vec::new(),
@@ -2019,7 +2374,7 @@ The tool entries are historical summaries; use fresh tools for the current works
                 }
             };
 
-            if recover_after_blip {
+            if let Some(reason) = automatic_recovery_reason {
                 let orphaned = emitted_tool_preview_names
                     .lock()
                     .map(|names| orphaned_tool_previews(&names, 0))
@@ -2032,12 +2387,15 @@ The tool entries are historical summaries; use fresh tools for the current works
                         json!({
                             "id": format!("tool-preview-{iteration}-{index}"),
                             "name": name,
-                            "reason": "Provider connection ended before this tool request was complete; retrying safely.",
+                            "reason": if reason == AutomaticContinuationReason::InspectionToolStall {
+                                "Search/read tool stopped reporting progress; retrying safely with corrected project paths."
+                            } else {
+                                "Provider connection ended before this tool request was complete; retrying safely."
+                            },
                         }),
                     );
                 }
                 provider_blip_recoveries = provider_blip_recoveries.saturating_add(1);
-                let reason = AutomaticContinuationReason::ProviderBlip;
                 emit(
                     &app,
                     &session_id,
@@ -2278,12 +2636,6 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
             return Ok(None);
         }
 
-        // A provider tool call is concrete forward progress. Reset only the
-        // recovery watchdog, never the task or conversation history.
-        consecutive_stalled_recoveries = next_stalled_recovery_count(
-            consecutive_stalled_recoveries,
-            response_made_concrete_progress(&resp),
-        );
         let assistant_msg = ChatMessage::assistant(
             resp.text.as_deref().unwrap_or(""),
             Some(resp.tool_calls.clone()),
@@ -2343,6 +2695,9 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
             None
         };
 
+        let mut successful_tool_results = 0usize;
+        let mut failed_tool_results: Vec<(String, String)> = Vec::new();
+        let mut final_review_instruction: Option<&'static str> = None;
         for (tool_index, tc) in resp.tool_calls.iter().enumerate() {
             if cancel.load(Ordering::SeqCst) {
                 emit_cancelled(&app, &session_id, iteration);
@@ -2600,6 +2955,23 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
             };
 
             if content.starts_with("__DONE__") {
+                if final_review_instruction.is_some() {
+                    let deferred =
+                        "Completion is deferred until the requested final verification pass finishes.";
+                    messages.push(ChatMessage::tool(&tc.id, &tc.name, deferred));
+                    emit(
+                        &app,
+                        &session_id,
+                        "tool_result",
+                        json!({
+                            "id": tc.id,
+                            "name": tc.name,
+                            "ok": true,
+                            "content": deferred,
+                        }),
+                    );
+                    continue;
+                }
                 if smart_agent.request_final_review(&app, &session_id) {
                     let review_message =
                         crate::smart_agent::SmartAgentRun::final_review_instruction();
@@ -2628,8 +3000,12 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
                             "iteration": iteration,
                         }),
                     );
-                    messages.push(ChatMessage::user(review_message));
-                    iteration = iteration.saturating_add(1);
+                    // Finish every tool result declared by this assistant
+                    // message before appending a new user instruction. Putting
+                    // the review prompt between sibling tool results violates
+                    // OpenAI-compatible tool protocol and can stop the next
+                    // provider turn with an invalid-message error.
+                    final_review_instruction = Some(review_message);
                     continue;
                 }
                 let summary = content.trim_start_matches("__DONE__").to_string();
@@ -2698,6 +3074,12 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
                 return Ok(None);
             }
 
+            if ok {
+                successful_tool_results = successful_tool_results.saturating_add(1);
+            } else {
+                failed_tool_results.push((tc.name.clone(), content.clone()));
+            }
+
             let (content_preview, content_truncated) = truncate_utf8(&content, 8000);
             let preview = if content_truncated {
                 format!("{content_preview}...(truncated)")
@@ -2720,7 +3102,44 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
                 }),
             );
 
-            messages.push(ChatMessage::tool(&tc.id, &tc.name, &content));
+            let provider_content = provider_tool_result_content(&content);
+            messages.push(ChatMessage::tool(&tc.id, &tc.name, &provider_content));
+        }
+
+        if let Some(review_message) = final_review_instruction {
+            messages.push(ChatMessage::user(review_message));
+            iteration = iteration.saturating_add(1);
+            continue;
+        }
+
+        if successful_tool_results > 0 {
+            consecutive_stalled_recoveries = 0;
+            consecutive_failed_tool_iterations = 0;
+            previous_failed_tool_signature.clear();
+        } else if !failed_tool_results.is_empty() {
+            consecutive_failed_tool_iterations =
+                consecutive_failed_tool_iterations.saturating_add(1);
+            let signature = failed_tool_results
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>()
+                .join("|");
+            let repeated_signature = signature == previous_failed_tool_signature;
+            previous_failed_tool_signature = signature;
+            emit(
+                &app,
+                &session_id,
+                "status",
+                json!({
+                    "message": "A tool failed — correcting the call and continuing…",
+                    "iteration": iteration,
+                }),
+            );
+            messages.push(ChatMessage::user(&failed_tool_recovery_instruction(
+                &failed_tool_results,
+                consecutive_failed_tool_iterations,
+                repeated_signature,
+            )));
         }
         iteration = iteration.saturating_add(1);
     }
@@ -2933,26 +3352,28 @@ fn project_context_block(root: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        can_recover_from_provider_blip, compact_fast_design_history, compact_history_messages,
-        cursor_computer_use_instructions, cursor_effort_for_request,
-        cursor_permission_instructions, cursor_resume_id_for_task, display_model_name,
-        display_provider_name, identity_instructions, model_effort_for_task,
-        next_stalled_recovery_count, normalize_tool_calls, normalized_permission_mode,
-        orphaned_tool_previews, parallel_readonly_batch_len, public_tool_arguments,
+        can_recover_from_provider_blip, chat_message_size, compact_active_run_messages,
+        compact_fast_design_history, compact_history_messages, cursor_computer_use_instructions,
+        cursor_effort_for_request, cursor_permission_instructions, cursor_resume_id_for_task,
+        display_model_name, display_provider_name, identity_instructions,
+        inspection_preview_watch_state, model_effort_for_task, next_stalled_recovery_count,
+        normalize_tool_calls, normalized_permission_mode, orphaned_tool_previews,
+        parallel_readonly_batch_len, provider_tool_result_content, public_tool_arguments,
         public_tool_preview_delta, reply_announces_pending_action, reply_was_cut_off,
         resolve_tool_preview_name, response_made_concrete_progress, starts_as_explanatory_request,
         stop_reason_requires_continuation, task_likely_requires_project_completion,
         task_requires_project_completion, tool_confirm_summary, truncate_utf8, uses_cursor_sdk,
-        AgentTaskProfile, HistoryToolCall, HistoryTurn, FAST_DESIGN_HISTORY_MAX_BYTES,
-        FAST_DESIGN_HISTORY_MAX_TURNS, MAX_CONSECUTIVE_STALLED_RECOVERIES,
-        NATIVE_HISTORY_MAX_BYTES, NATIVE_HISTORY_MAX_TURNS,
+        AgentTaskProfile, HistoryToolCall, HistoryTurn, InspectionPreviewWatchState,
+        ACTIVE_RUN_CONTEXT_MAX_BYTES, FAST_DESIGN_HISTORY_MAX_BYTES, FAST_DESIGN_HISTORY_MAX_TURNS,
+        MAX_CONSECUTIVE_STALLED_RECOVERIES, NATIVE_HISTORY_MAX_BYTES, NATIVE_HISTORY_MAX_TURNS,
+        PROVIDER_TOOL_RESULT_MAX_BYTES, STREAMED_INSPECTION_TOOL_TIMEOUT,
     };
     use crate::llm::{ChatMessage, LlmResponse, ToolCall};
     use anyhow::anyhow;
     use serde_json::json;
     use std::collections::HashMap;
     use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     const TYPED_SENTINEL: &str = "typed-secret-SENTINEL-agent-4b83";
 
@@ -3023,6 +3444,64 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Continue from the latest"));
+    }
+
+    #[test]
+    fn active_run_context_is_compacted_without_orphaning_recent_tool_results() {
+        let mut messages = vec![
+            ChatMessage::system("system policy"),
+            ChatMessage::user("Analyze this large project and keep going."),
+        ];
+        let pinned = messages.len();
+        for index in 0..36 {
+            let id = format!("call-{index}");
+            messages.push(ChatMessage::assistant(
+                "Inspecting another project area.",
+                Some(vec![ToolCall {
+                    id: id.clone(),
+                    name: "read_file".into(),
+                    arguments: json!({ "path": format!("src/feature-{index}.ts") }),
+                }]),
+                None,
+            ));
+            let marker = if index == 35 {
+                "NEWEST_RESULT"
+            } else {
+                "older"
+            };
+            messages.push(ChatMessage::tool(
+                &id,
+                "read_file",
+                &format!("{marker}\n{}", "x".repeat(6_000)),
+            ));
+        }
+
+        assert!(compact_active_run_messages(&mut messages, pinned));
+        let total = messages.iter().map(chat_message_size).sum::<usize>();
+        assert!(
+            total < ACTIVE_RUN_CONTEXT_MAX_BYTES,
+            "compacted bytes: {total}"
+        );
+        assert_eq!(messages[0].role, "system");
+        assert_eq!(messages[1].role, "user");
+        assert_ne!(messages[pinned].role, "tool");
+        assert!(messages.iter().any(|message| {
+            message
+                .content
+                .as_str()
+                .unwrap_or_default()
+                .contains("NEWEST_RESULT")
+        }));
+    }
+
+    #[test]
+    fn provider_tool_results_keep_their_head_and_error_tail_within_budget() {
+        let content = format!("HEAD\n{}\nTAIL_ERROR", "😀".repeat(30_000));
+        let compact = provider_tool_result_content(&content);
+        assert!(compact.len() <= PROVIDER_TOOL_RESULT_MAX_BYTES);
+        assert!(compact.starts_with("HEAD"));
+        assert!(compact.ends_with("TAIL_ERROR"));
+        assert!(compact.contains("middle of tool result omitted"));
     }
 
     #[test]
@@ -3164,17 +3643,48 @@ mod tests {
     }
 
     #[test]
+    fn streamed_inspection_preview_has_an_absolute_deadline() {
+        let started_at = Instant::now();
+        let previews = HashMap::from([(0, ("grep".to_string(), started_at))]);
+
+        assert_eq!(
+            inspection_preview_watch_state(
+                &previews,
+                started_at + Duration::from_secs(1),
+                STREAMED_INSPECTION_TOOL_TIMEOUT,
+            ),
+            InspectionPreviewWatchState::Wait(Duration::from_secs(44))
+        );
+        assert_eq!(
+            inspection_preview_watch_state(
+                &previews,
+                started_at + STREAMED_INSPECTION_TOOL_TIMEOUT + Duration::from_millis(1),
+                STREAMED_INSPECTION_TOOL_TIMEOUT,
+            ),
+            InspectionPreviewWatchState::Stalled {
+                index: 0,
+                name: "grep".into(),
+            }
+        );
+    }
+
+    #[test]
     fn agent_normalizes_provider_tool_calls_before_they_reach_the_dispatch_loop() {
         let mut calls = vec![
             ToolCall {
-                id: "read-call".into(),
+                id: "duplicate".into(),
                 name: "read_filelist_processes".into(),
                 arguments: json!({ "path": "package.json" }),
             },
             ToolCall {
-                id: "command-call".into(),
+                id: "duplicate".into(),
                 name: "run_terminal_cmd".into(),
-                arguments: json!({ "command": "npm run dev" }),
+                arguments: json!({ "cmd": "npm run dev" }),
+            },
+            ToolCall {
+                id: "".into(),
+                name: "grep".into(),
+                arguments: json!({ "query": "needle", "path": "" }),
             },
         ];
 
@@ -3182,6 +3692,14 @@ mod tests {
 
         assert_eq!(calls[0].name, "read_file");
         assert_eq!(calls[1].name, "run_command");
+        assert_eq!(calls[1].arguments, json!({ "command": "npm run dev" }));
+        assert_eq!(
+            calls[2].arguments,
+            json!({ "pattern": "needle", "path": "." })
+        );
+        assert_eq!(calls[0].id, "duplicate");
+        assert_ne!(calls[1].id, calls[0].id);
+        assert!(!calls[2].id.is_empty());
     }
 
     #[test]

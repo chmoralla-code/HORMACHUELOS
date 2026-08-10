@@ -7,6 +7,7 @@ use crate::state::SessionRun;
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::Ordering;
@@ -49,11 +50,17 @@ struct BridgeEvent {
 const MAX_CURSOR_CONSECUTIVE_STALLED_RECOVERIES: u8 = 4;
 const CURSOR_FIRST_EVENT_TIMEOUT: Duration = Duration::from_secs(45);
 const CURSOR_IDLE_TIMEOUT: Duration = Duration::from_secs(12 * 60);
-const CURSOR_MAX_ACTIVE_DURATION: Duration = Duration::from_secs(45 * 60);
+const CURSOR_HOST_TOOL_RESULT_MAX_BYTES: usize = 48_000;
 
 const CURSOR_AUTOMATIC_CONTINUATION_PROMPT: &str = "[System - Automatic continuation]\n\
 The previous agent pass ended without the required completion marker. Continue the SAME implementation task from the current workspace and durable agent state.\n\
-Do not repeat completed work and do not ask the client to type \"continue\". Inspect what remains, implement and verify the next steps, then finish with [[HORMACHUELOS_TASK_COMPLETE]] only when the full requested task is genuinely complete.";
+Do not repeat completed work and do not ask the client to type \"continue\". Inspect what remains, implement and verify the next steps.\n\
+For project-root list/search calls use path \".\", never an empty path or \"..\". If a tool failed, correct its name or arguments and retry with a narrower query or a different tool instead of repeating the identical call.\n\
+Finish with [[HORMACHUELOS_TASK_COMPLETE]] only when the full requested task is genuinely complete.";
+
+const CURSOR_INTERRUPTED_REPLY_PROMPT: &str = "[System - Automatic recovery]\n\
+The previous Cursor pass became unresponsive and the desktop restarted it from the SAME durable agent checkpoint. Continue the original request from the current workspace and do not repeat completed work.\n\
+For project-root list/search calls use path \".\", never an empty path or \"..\". If a tool failed, correct its arguments or use a narrower/different tool instead of repeating the identical call. Complete the requested analysis or answer normally; do not mention this recovery unless it materially affects the result.";
 
 #[derive(Debug)]
 struct CursorTurnOutcome {
@@ -61,6 +68,7 @@ struct CursorTurnOutcome {
     completion_marker_seen: bool,
     terminal: bool,
     made_concrete_progress: bool,
+    recoverable_interruption: Option<String>,
 }
 
 impl CursorTurnOutcome {
@@ -70,6 +78,7 @@ impl CursorTurnOutcome {
             completion_marker_seen: false,
             terminal: true,
             made_concrete_progress: false,
+            recoverable_interruption: None,
         }
     }
 }
@@ -84,12 +93,99 @@ fn is_verified_cursor_completion(
 #[derive(Default)]
 struct CursorPassActivity {
     made_concrete_progress: bool,
+    open_tools: HashMap<String, String>,
 }
 
 impl CursorPassActivity {
-    fn record_tool_activity(&mut self) {
-        self.made_concrete_progress = true;
+    fn record_tool_call(&mut self, id: &str, name: &str) {
+        self.open_tools.insert(id.to_string(), name.to_string());
     }
+
+    fn record_tool_result(&mut self, id: &str, result_name: &str, ok: bool) {
+        let name = self
+            .open_tools
+            .remove(id)
+            .unwrap_or_else(|| result_name.to_string());
+        // A started tool or a failed result is not durable progress. Counting
+        // either one allowed an identical broken call to reset the recovery
+        // watchdog forever while the UI remained stuck on a working card.
+        // Updating the cosmetic todo ledger is useful UI feedback, but it is
+        // not evidence that an implementation or investigation advanced.
+        if ok && crate::tools::normalize_tool_name(&name) != "todo_write" {
+            self.made_concrete_progress = true;
+        }
+    }
+}
+
+fn cursor_host_tool_is_available(name: &str, permission_mode: &str) -> bool {
+    let name = crate::tools::normalize_tool_name(name);
+    if matches!(name.as_str(), "done" | "todo_write") || crate::tools::is_computer_tool(&name) {
+        return false;
+    }
+    if !crate::tools::is_supported_tool_name(&name) {
+        return false;
+    }
+    let mode = permission_mode.trim().to_ascii_lowercase();
+    !matches!(mode.as_str(), "ask" | "research") || crate::tools::is_readonly_tool(&name)
+}
+
+/// Convert the desktop's canonical OpenAI function schemas to Cursor custom
+/// tool schemas. Cursor's built-in tool set changes between SDK releases; the
+/// host bridge keeps every advertised AI-Forge tool backed by the same native
+/// dispatcher and permission checks used by non-Cursor providers.
+fn cursor_host_tool_schemas(permission_mode: &str) -> Vec<Value> {
+    crate::tools::schemas(false)
+        .into_iter()
+        .filter_map(|schema| {
+            let function = schema.get("function")?;
+            let name = function.get("name")?.as_str()?;
+            if !cursor_host_tool_is_available(name, permission_mode) {
+                return None;
+            }
+            Some(json!({
+                "name": name,
+                "description": function.get("description").cloned().unwrap_or(Value::String(String::new())),
+                "inputSchema": function.get("parameters").cloned().unwrap_or_else(|| json!({
+                    "type": "object",
+                    "properties": {},
+                })),
+            }))
+        })
+        .collect()
+}
+
+fn truncate_cursor_host_tool_content(content: &str) -> String {
+    if content.len() <= CURSOR_HOST_TOOL_RESULT_MAX_BYTES {
+        return content.to_string();
+    }
+
+    fn prefix(value: &str, max_bytes: usize) -> &str {
+        let mut end = max_bytes.min(value.len());
+        while end > 0 && !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        &value[..end]
+    }
+
+    fn suffix(value: &str, max_bytes: usize) -> &str {
+        let mut start = value.len().saturating_sub(max_bytes);
+        while start < value.len() && !value.is_char_boundary(start) {
+            start += 1;
+        }
+        &value[start..]
+    }
+
+    let tail_budget = CURSOR_HOST_TOOL_RESULT_MAX_BYTES / 4;
+    let marker = "\n\n...[native tool result truncated for model context]...\n\n";
+    let head_budget = CURSOR_HOST_TOOL_RESULT_MAX_BYTES
+        .saturating_sub(tail_budget)
+        .saturating_sub(marker.len());
+    format!(
+        "{}{}{}",
+        prefix(content, head_budget),
+        marker,
+        suffix(content, tail_budget)
+    )
 }
 
 fn next_cursor_stalled_recovery_count(previous: u8, made_concrete_progress: bool) -> u8 {
@@ -128,6 +224,223 @@ async fn await_bridge_approval(
     _summary: &str,
 ) -> bool {
     true
+}
+
+async fn wait_until_cursor_cancelled(cancel: Arc<std::sync::atomic::AtomicBool>) {
+    while !cancel.load(Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn await_cursor_question(
+    app: &AppHandle,
+    session_id: &str,
+    run: &SessionRun,
+    request_id: &str,
+    arguments: &Value,
+) -> (bool, String) {
+    let question = arguments
+        .get("question")
+        .and_then(Value::as_str)
+        .or_else(|| arguments.get("prompt").and_then(Value::as_str))
+        .unwrap_or("Please choose an option:")
+        .to_string();
+    let mut options = crate::agent::parse_ask_user_options(arguments);
+    let mut allow_other = arguments
+        .get("allow_other")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    if options.is_empty() {
+        options = vec![
+            "Continue with your recommended plan".into(),
+            "Simpler / minimal version".into(),
+            "More complete / polished version".into(),
+        ];
+        allow_other = true;
+    } else if options.len() == 1 {
+        allow_other = true;
+    }
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+    *run.question_tx.lock().unwrap() = Some(tx);
+    emit(
+        app,
+        session_id,
+        "question",
+        json!({
+            "id": request_id,
+            "question": question,
+            "options": options,
+            "allow_other": allow_other,
+        }),
+    );
+
+    let response = tokio::select! {
+        biased;
+        _ = wait_until_cursor_cancelled(run.cancel.clone()) => {
+            (false, "User cancelled the question.".to_string())
+        }
+        result = tokio::time::timeout(Duration::from_secs(600), rx) => {
+            match result {
+                Ok(Ok(answer)) => (true, answer),
+                Ok(Err(_)) => (false, "The question was closed without an answer.".to_string()),
+                Err(_) => (false, "Question timed out after 10 minutes.".to_string()),
+            }
+        }
+    };
+    *run.question_tx.lock().unwrap() = None;
+    response
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_cursor_host_tool(
+    app: &AppHandle,
+    session_id: &str,
+    project_root: &Path,
+    original_prompt: &str,
+    permission_mode: &str,
+    command_timeout_secs: u64,
+    run: &SessionRun,
+    request_id: &str,
+    raw_name: &str,
+    raw_arguments: Value,
+    known_secrets: &[String],
+) -> (bool, String) {
+    let mut name = crate::tools::normalize_tool_name(raw_name);
+    if !cursor_host_tool_is_available(&name, permission_mode) {
+        return (
+            false,
+            format!(
+                "Native tool {raw_name:?} is unavailable in {permission_mode} mode or is not registered."
+            ),
+        );
+    }
+
+    let mut arguments = if raw_arguments.is_object() {
+        raw_arguments
+    } else {
+        json!({})
+    };
+    crate::tools::normalize_tool_arguments(&name, &mut arguments);
+
+    // A model can confuse an account-status question with an authentication
+    // request. Preserve the native agent's safety behavior and never pop open
+    // a Connect flow just to answer "am I connected?".
+    if name == "connect_account"
+        && crate::integration_chat::prompt_is_status_inquiry(original_prompt)
+    {
+        let service = arguments
+            .get("service")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        name = "integration_status".into();
+        arguments = json!({ "verify": false });
+        if let Some(service) = service {
+            arguments["service"] = Value::String(service);
+        }
+    }
+
+    if name == "ask_user" {
+        return await_cursor_question(app, session_id, run, request_id, &arguments).await;
+    }
+
+    if name == "connect_account" {
+        if let Some(service) = arguments.get("service").and_then(Value::as_str) {
+            if crate::integrations::INTEGRATIONS
+                .iter()
+                .any(|integration| integration.id == service)
+            {
+                emit(
+                    app,
+                    session_id,
+                    "integration_auth",
+                    json!({
+                        "service": service,
+                        "secure_entry": service != "github",
+                    }),
+                );
+            }
+        }
+    }
+
+    if crate::tools::needs_tool_confirm(&name, &arguments, project_root, permission_mode) {
+        let approved =
+            crate::agent::await_tool_confirm(app, session_id, run, request_id, &name, &arguments)
+                .await;
+        if !approved {
+            return (
+                false,
+                if run.cancel.load(Ordering::SeqCst) {
+                    "Tool execution was cancelled.".into()
+                } else {
+                    "User denied tool execution.".into()
+                },
+            );
+        }
+    }
+
+    if run.cancel.load(Ordering::SeqCst) {
+        return (false, "Tool execution was cancelled.".into());
+    }
+
+    let app_for_console = app.clone();
+    let session_for_console = session_id.to_string();
+    let secrets_for_console = Arc::new(known_secrets.to_vec());
+    let on_console_line: Arc<crate::tools::ConsoleLineCallback> = Arc::new(move |stream, line| {
+        let line =
+            crate::integration_chat::redact_sensitive_text(line, secrets_for_console.as_ref());
+        emit(
+            &app_for_console,
+            &session_for_console,
+            "console_chunk",
+            json!({ "stream": stream, "text": line }),
+        );
+    });
+    let context = crate::tools::ToolRunContext {
+        cancel: run.cancel.clone(),
+        active_pid: run.active_pid.clone(),
+        on_console_line: Some(on_console_line),
+    };
+    let tool_name = name.clone();
+    let tool_arguments = arguments.clone();
+    let tool_root = project_root.to_path_buf();
+    let cancel = run.cancel.clone();
+    let active_pid = run.active_pid.clone();
+    let execution = tokio::select! {
+        biased;
+        _ = wait_until_cursor_cancelled(cancel) => {
+            if let Some(pid) = active_pid.lock().unwrap().take() {
+                crate::tools::kill_process_tree(pid);
+            }
+            Err(anyhow!("Tool execution was cancelled."))
+        }
+        joined = tokio::task::spawn_blocking(move || {
+            crate::tools::execute(
+                &tool_name,
+                &tool_arguments,
+                &tool_root,
+                command_timeout_secs,
+                &context,
+            )
+        }) => match joined {
+            Ok(result) => result,
+            Err(error) => Err(anyhow!("Native tool task failed: {error}")),
+        }
+    };
+
+    match execution {
+        Ok(content) => {
+            let content = crate::integration_chat::redact_sensitive_text(&content, known_secrets);
+            (true, truncate_cursor_host_tool_content(&content))
+        }
+        Err(error) => {
+            let content = crate::integration_chat::redact_sensitive_text(
+                &format!("Error: {error}"),
+                known_secrets,
+            );
+            (false, truncate_cursor_host_tool_content(&content))
+        }
+    }
 }
 
 fn strip_windows_verbatim(path: PathBuf) -> PathBuf {
@@ -453,7 +766,7 @@ fn handle_event(
             let id = event.id.unwrap_or_else(|| name.clone());
             let arguments = event.arguments.unwrap_or_else(|| json!({}));
             smart_agent.on_tool_call(app, session_id, &id, &name, &arguments);
-            activity.record_tool_activity();
+            activity.record_tool_call(&id, &name);
             emit(
                 app,
                 session_id,
@@ -470,7 +783,7 @@ fn handle_event(
             let id = event.id.unwrap_or_else(|| name.clone());
             let ok = event.ok.unwrap_or(true);
             smart_agent.on_tool_result(app, session_id, &id, &name, ok);
-            activity.record_tool_activity();
+            activity.record_tool_result(&id, &name, ok);
             emit(
                 app,
                 session_id,
@@ -484,11 +797,11 @@ fn handle_event(
                 }),
             );
         }
-        "done" => {
+        "checkpoint" | "done" => {
             if let Some(id) = event.agent_id.filter(|s| !s.is_empty()) {
                 *agent_id_out = Some(id);
             }
-            if event.completed.unwrap_or(false) {
+            if event.kind == "done" && event.completed.unwrap_or(false) {
                 *completion_marker_seen = true;
             }
         }
@@ -543,11 +856,13 @@ pub async fn run_cursor_turn(
     app: Arc<AppHandle>,
     project_root: &str,
     prompt: &str,
+    user_request: &str,
     api_key: &str,
     model: &str,
     effort: &str,
     permission_mode: &str,
     computer_use_enabled: bool,
+    command_timeout_secs: u64,
     session_id: &str,
     run: Arc<SessionRun>,
     history: &[HistoryTurn],
@@ -587,11 +902,13 @@ pub async fn run_cursor_turn(
             app.clone(),
             project_root,
             &current_prompt,
+            user_request,
             api_key,
             model,
             effort,
             permission_mode,
             computer_use_enabled,
+            command_timeout_secs,
             session_id,
             run.clone(),
             history,
@@ -604,6 +921,7 @@ pub async fn run_cursor_turn(
         if let Some(id) = outcome.agent_id.filter(|id| !id.is_empty()) {
             current_agent_id = Some(id);
         }
+        let recoverable_interruption = outcome.recoverable_interruption.clone();
 
         if outcome.terminal {
             return Ok(current_agent_id);
@@ -637,7 +955,7 @@ pub async fn run_cursor_turn(
             return Ok(current_agent_id);
         }
 
-        if !requires_project_completion {
+        if !requires_project_completion && recoverable_interruption.is_none() {
             // A regular Cursor reply is not an explicit task-completion
             // handshake. Keep its terminal reason distinct so the frontend
             // never announces it as "done working".
@@ -682,14 +1000,14 @@ pub async fn run_cursor_turn(
             smart_agent.pause(
                 &app,
                 session_id,
-                "Automatic recovery paused after repeated Cursor passes without tool activity.",
+                "Automatic recovery paused after repeated Cursor passes without a successful tool result.",
             );
             emit(
                 &app,
                 session_id,
                 "text",
                 json!({
-                    "text": "\n\n— Automatic recovery paused after repeated Cursor passes without a concrete tool action. Your workspace and agent checkpoint are preserved."
+                    "text": "\n\n— Automatic recovery paused after repeated Cursor passes without a successful tool result. Your workspace and agent checkpoint are preserved."
                 }),
             );
             emit(
@@ -707,11 +1025,19 @@ pub async fn run_cursor_turn(
             session_id,
             "reasoning",
             json!({
-                "text": "Continuing automatically from the unfinished Cursor task...",
+                "text": if recoverable_interruption.is_some() {
+                    "The Cursor pass stopped responding; resuming automatically from its saved checkpoint..."
+                } else {
+                    "Continuing automatically from the unfinished Cursor task..."
+                },
                 "iteration": continuation_pass,
             }),
         );
-        current_prompt = CURSOR_AUTOMATIC_CONTINUATION_PROMPT.to_string();
+        current_prompt = if requires_project_completion {
+            CURSOR_AUTOMATIC_CONTINUATION_PROMPT.to_string()
+        } else {
+            CURSOR_INTERRUPTED_REPLY_PROMPT.to_string()
+        };
     }
 }
 
@@ -722,11 +1048,13 @@ async fn run_cursor_attempt(
     app: Arc<AppHandle>,
     project_root: &str,
     prompt: &str,
+    user_request: &str,
     api_key: &str,
     model: &str,
     effort: &str,
     permission_mode: &str,
     computer_use_enabled: bool,
+    command_timeout_secs: u64,
     session_id: &str,
     run: Arc<SessionRun>,
     history: &[HistoryTurn],
@@ -753,6 +1081,7 @@ async fn run_cursor_attempt(
         None
     };
     let computer_session_secret = computer_use_active.then(|| uuid::Uuid::new_v4().to_string());
+    let host_tool_schemas = cursor_host_tool_schemas(permission_mode);
 
     emit(&app, session_id, "thinking", json!({ "iteration": 0 }));
 
@@ -771,6 +1100,7 @@ async fn run_cursor_attempt(
         "computerUseEnabled": computer_use_active,
         "computerHelperPath": computer_helper_path,
         "computerSessionSecret": computer_session_secret,
+        "hostToolSchemas": host_tool_schemas,
     });
 
     // Prefer a bundled runtime. PATH is a development fallback only.
@@ -809,7 +1139,8 @@ async fn run_cursor_attempt(
         )
     })?;
 
-    if let Some(pid) = child.id() {
+    let bridge_pid = child.id();
+    if let Some(pid) = bridge_pid {
         *run.active_pid.lock().unwrap() = Some(pid);
     }
 
@@ -849,7 +1180,9 @@ async fn run_cursor_attempt(
     // leaving its distinct no_tool_calls branch unreachable.
     let mut completion_marker_seen = false;
     let mut saw_error: Option<String> = None;
+    let mut recoverable_interruption: Option<String> = None;
     let mut activity = CursorPassActivity::default();
+    let known_integration_secrets = crate::integrations::loaded_tokens();
     let mut saw_bridge_event = false;
     let started = std::time::Instant::now();
     let mut last_bridge_event = started;
@@ -885,42 +1218,10 @@ async fn run_cursor_attempt(
 
         if last_bridge_event.elapsed() > CURSOR_IDLE_TIMEOUT {
             let _ = child.start_kill();
-            let msg = "Cursor SDK stopped reporting progress for 12 minutes.";
-            emit(
-                &app,
-                session_id,
-                "text",
-                json!({ "text": format!("Error: {msg}") }),
-            );
-            emit(
-                &app,
-                session_id,
-                "end",
-                json!({ "reason": "timeout", "iteration": 0 }),
-            );
-            *run.active_pid.lock().unwrap() = None;
-            let _ = stderr_task.await;
-            return Err(anyhow!(msg));
-        }
-
-        if started.elapsed() > CURSOR_MAX_ACTIVE_DURATION {
-            let _ = child.start_kill();
-            let msg = "Cursor SDK reached the 45-minute active-run safety window.";
-            emit(
-                &app,
-                session_id,
-                "text",
-                json!({ "text": format!("Error: {msg}") }),
-            );
-            emit(
-                &app,
-                session_id,
-                "end",
-                json!({ "reason": "timeout", "iteration": 0 }),
-            );
-            *run.active_pid.lock().unwrap() = None;
-            let _ = stderr_task.await;
-            return Err(anyhow!(msg));
+            let msg = "Cursor SDK stopped reporting progress for 12 minutes; resuming from its saved checkpoint.";
+            emit(&app, session_id, "status", json!({ "message": msg }));
+            recoverable_interruption = Some(msg.into());
+            break;
         }
 
         match tokio::time::timeout(Duration::from_secs(2), stdout_lines.next_line()).await {
@@ -932,6 +1233,71 @@ async fn run_cursor_attempt(
                 saw_bridge_event = true;
                 last_bridge_event = std::time::Instant::now();
                 if let Ok(event) = serde_json::from_str::<BridgeEvent>(line) {
+                    if event.kind == "recoverable_interruption" {
+                        let message = event
+                            .message
+                            .or(event.text)
+                            .unwrap_or_else(|| {
+                                "A Cursor inspection tool stopped reporting progress; resuming from its saved checkpoint."
+                                    .into()
+                            });
+                        recoverable_interruption =
+                            Some(crate::integration_chat::redact_sensitive_text(
+                                &message,
+                                &known_integration_secrets,
+                            ));
+                        continue;
+                    }
+                    if event.kind == "host_tool_request" {
+                        let Some(request_id) =
+                            event.request_id.filter(|value| !value.trim().is_empty())
+                        else {
+                            saw_error = Some(
+                                "Cursor bridge sent a native tool request without an id.".into(),
+                            );
+                            break;
+                        };
+                        let raw_name = event.name.unwrap_or_default();
+                        let raw_arguments = event.arguments.unwrap_or_else(|| json!({}));
+                        let (ok, content) = execute_cursor_host_tool(
+                            &app,
+                            session_id,
+                            Path::new(project_root),
+                            user_request,
+                            permission_mode,
+                            command_timeout_secs,
+                            &run,
+                            &request_id,
+                            &raw_name,
+                            raw_arguments,
+                            &known_integration_secrets,
+                        )
+                        .await;
+                        let response = json!({
+                            "type": "host_tool_response",
+                            "requestId": request_id,
+                            "ok": ok,
+                            "content": content,
+                        });
+                        let response_line = format!("{response}\n");
+                        if let Err(error) = child_stdin.write_all(response_line.as_bytes()).await {
+                            saw_error =
+                                Some(format!("Failed writing native Cursor tool result: {error}"));
+                            break;
+                        }
+                        if let Err(error) = child_stdin.flush().await {
+                            saw_error = Some(format!(
+                                "Failed flushing native Cursor tool result: {error}"
+                            ));
+                            break;
+                        }
+                        if !run.cancel.load(Ordering::SeqCst) {
+                            if let Some(pid) = bridge_pid {
+                                *run.active_pid.lock().unwrap() = Some(pid);
+                            }
+                        }
+                        continue;
+                    }
                     if event.kind == "approval_request" {
                         let Some(request_id) = event.request_id.filter(|value| !value.is_empty())
                         else {
@@ -973,6 +1339,7 @@ async fn run_cursor_attempt(
                         }
                         continue;
                     }
+                    let event_kind = event.kind.clone();
                     let usage_blocked = handle_event(
                         &app,
                         session_id,
@@ -984,6 +1351,14 @@ async fn run_cursor_attempt(
                         &mut activity,
                         model,
                     );
+                    if event_kind == "done" && recoverable_interruption.is_some() {
+                        // The bridge has sealed every visible tool card and
+                        // persisted the durable agent id. Stop any wedged SDK
+                        // handles now; the outer loop will resume in a fresh
+                        // bridge process with the recovery instruction.
+                        let _ = child.start_kill();
+                        break;
+                    }
                     if usage_blocked {
                         cancel.store(true, Ordering::SeqCst);
                         let _ = child.start_kill();
@@ -1022,7 +1397,7 @@ async fn run_cursor_attempt(
     let stderr_tail = stderr_task.await.unwrap_or_default();
     *run.active_pid.lock().unwrap() = None;
 
-    if !status.success() && saw_error.is_none() {
+    if !status.success() && saw_error.is_none() && recoverable_interruption.is_none() {
         saw_error = Some(if stderr_tail.trim().is_empty() {
             format!("Cursor SDK exited with status {status}")
         } else {
@@ -1046,12 +1421,14 @@ async fn run_cursor_attempt(
         completion_marker_seen,
         terminal: false,
         made_concrete_progress: activity.made_concrete_progress,
+        recoverable_interruption,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     fn turn(role: &str, content: impl Into<String>) -> HistoryTurn {
         HistoryTurn {
@@ -1141,7 +1518,7 @@ mod tests {
     }
 
     #[test]
-    fn cursor_recovery_watchdog_resets_after_tool_activity() {
+    fn cursor_recovery_watchdog_resets_after_successful_tool_result() {
         let mut stalls = 0;
         for _ in 0..(MAX_CURSOR_CONSECUTIVE_STALLED_RECOVERIES - 1) {
             stalls = next_cursor_stalled_recovery_count(stalls, false);
@@ -1150,5 +1527,71 @@ mod tests {
 
         stalls = next_cursor_stalled_recovery_count(stalls, true);
         assert_eq!(stalls, 0);
+    }
+
+    #[test]
+    fn failed_or_unresolved_cursor_tools_do_not_count_as_progress() {
+        let mut activity = CursorPassActivity::default();
+        activity.record_tool_call("call-1", "grep");
+        assert!(!activity.made_concrete_progress);
+        assert_eq!(
+            activity.open_tools.get("call-1").map(String::as_str),
+            Some("grep")
+        );
+
+        activity.record_tool_result("call-1", "grep", false);
+        assert!(!activity.made_concrete_progress);
+        assert!(activity.open_tools.is_empty());
+
+        activity.record_tool_call("todo-1", "TodoWrite");
+        activity.record_tool_result("todo-1", "TodoWrite", true);
+        assert!(!activity.made_concrete_progress);
+
+        activity.record_tool_call("call-2", "read_file");
+        activity.record_tool_result("call-2", "read_file", true);
+        assert!(activity.made_concrete_progress);
+    }
+
+    #[test]
+    fn cursor_registers_every_eligible_native_tool_with_permission_filtering() {
+        let full = cursor_host_tool_schemas("full");
+        let actual = full
+            .iter()
+            .map(|schema| schema["name"].as_str().expect("host tool name").to_string())
+            .collect::<BTreeSet<_>>();
+        let expected = crate::tools::schemas(false)
+            .into_iter()
+            .filter_map(|schema| {
+                let name = schema["function"]["name"].as_str()?.to_string();
+                (!matches!(name.as_str(), "done" | "todo_write")).then_some(name)
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual, expected);
+        assert!(actual.contains("read_file"));
+        assert!(actual.contains("write_file"));
+        assert!(actual.contains("ask_user"));
+        assert!(actual.contains("open_path"));
+        assert!(!actual.contains("done"));
+        assert!(!actual.contains("todo_write"));
+        assert!(full.iter().all(|schema| {
+            schema["description"].is_string() && schema["inputSchema"]["type"] == "object"
+        }));
+
+        let ask = cursor_host_tool_schemas("ask");
+        assert!(ask.iter().all(|schema| {
+            crate::tools::is_readonly_tool(schema["name"].as_str().expect("ask tool name"))
+        }));
+        assert!(ask.iter().any(|schema| schema["name"] == "grep"));
+        assert!(!ask.iter().any(|schema| schema["name"] == "write_file"));
+    }
+
+    #[test]
+    fn cursor_native_tool_results_preserve_error_tail_within_context_budget() {
+        let content = format!("HEAD\n{}\nTAIL_ERROR", "😀".repeat(30_000));
+        let compact = truncate_cursor_host_tool_content(&content);
+        assert!(compact.len() <= CURSOR_HOST_TOOL_RESULT_MAX_BYTES);
+        assert!(compact.starts_with("HEAD"));
+        assert!(compact.ends_with("TAIL_ERROR"));
+        assert!(compact.contains("native tool result truncated"));
     }
 }
