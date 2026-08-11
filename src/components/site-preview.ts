@@ -804,6 +804,9 @@ export class SitePreview {
   private sourceLensBtn: HTMLButtonElement;
   private androidBtn: HTMLButtonElement;
   private softwareBtn: HTMLButtonElement;
+  private previewActionsToggle: HTMLButtonElement;
+  private previewActionsMenu: HTMLElement;
+  private previewActionsMenuCleanup: (() => void) | null = null;
   private buildMenuToggle: HTMLButtonElement;
   private buildMenu: HTMLElement;
   private buildMenuCleanup: (() => void) | null = null;
@@ -969,7 +972,10 @@ export class SitePreview {
       title: "Design Mode (Ctrl+Shift+D)",
       "aria-pressed": "false",
     }, ["Design"]) as HTMLButtonElement;
-    this.designBtn.addEventListener("click", () => this.setDesignMode(!this.designMode));
+    this.designBtn.addEventListener("click", () => {
+      this.setDesignMode(!this.designMode);
+      this.closePreviewActionsMenu();
+    });
 
     this.sourceLensBtn = el("button", {
       class: "site-preview-design-btn site-preview-source-lens-btn",
@@ -978,7 +984,10 @@ export class SitePreview {
       "aria-label": "Toggle Source Lens",
       "aria-pressed": "false",
     }, ["Source Lens"]) as HTMLButtonElement;
-    this.sourceLensBtn.addEventListener("click", () => this.setSourceLensMode(!this.sourceLensMode));
+    this.sourceLensBtn.addEventListener("click", () => {
+      this.setSourceLensMode(!this.sourceLensMode);
+      this.closePreviewActionsMenu();
+    });
 
     this.androidBtn = el("button", {
       class: "site-preview-design-btn site-preview-android-btn",
@@ -987,7 +996,10 @@ export class SitePreview {
       "aria-label": "Toggle Android device preview",
       "aria-pressed": "false",
     }, ["Android"]) as HTMLButtonElement;
-    this.androidBtn.addEventListener("click", () => this.setAndroidMode(!this.androidMode));
+    this.androidBtn.addEventListener("click", () => {
+      this.setAndroidMode(!this.androidMode);
+      this.closePreviewActionsMenu();
+    });
 
     this.softwareBtn = el("button", {
       class: "site-preview-design-btn site-preview-software-btn",
@@ -996,7 +1008,10 @@ export class SitePreview {
       "aria-label": "Toggle software window preview",
       "aria-pressed": "false",
     }, ["Software"]) as HTMLButtonElement;
-    this.softwareBtn.addEventListener("click", () => this.setSoftwareMode(!this.softwareMode));
+    this.softwareBtn.addEventListener("click", () => {
+      this.setSoftwareMode(!this.softwareMode);
+      this.closePreviewActionsMenu();
+    });
 
     const buildLauncher = el("div", { class: "site-preview-build-launcher" });
     this.buildMenuToggle = el("button", {
@@ -1039,7 +1054,10 @@ export class SitePreview {
       title: "Publish this website using GitHub, Vercel, and Supabase",
       "aria-label": "Make the website public",
     }, ["Make site public"]) as HTMLButtonElement;
-    this.makePublicBtn.addEventListener("click", () => this.makeWebsitePublic());
+    this.makePublicBtn.addEventListener("click", () => {
+      this.closePreviewActionsMenu();
+      this.makeWebsitePublic();
+    });
 
     const close = el("button", {
       class: "site-preview-icon-btn",
@@ -1051,15 +1069,34 @@ export class SitePreview {
     close.addEventListener("click", () => this.close());
 
     const actions = el("div", { class: "site-preview-actions" });
-    actions.append(
+    const actionsLauncher = el("div", { class: "site-preview-actions-launcher" });
+    this.previewActionsToggle = el("button", {
+      class: "site-preview-actions-toggle site-preview-icon-btn",
+      type: "button",
+      title: "Show preview actions",
+      "aria-label": "Preview actions",
+      "aria-controls": "site-preview-actions-menu",
+      "aria-expanded": "false",
+      html: icon("menu", 15),
+    }) as HTMLButtonElement;
+    this.previewActionsToggle.addEventListener("click", () => this.togglePreviewActionsMenu());
+    this.previewActionsMenu = el("div", {
+      class: "site-preview-actions-menu",
+      id: "site-preview-actions-menu",
+      role: "group",
+      "aria-label": "Preview actions",
+      hidden: "true",
+    });
+    this.previewActionsMenu.append(
       buildLauncher,
       this.makePublicBtn,
       this.androidBtn,
       this.softwareBtn,
       this.designBtn,
       this.sourceLensBtn,
-      close,
     );
+    actionsLauncher.append(this.previewActionsToggle, this.previewActionsMenu);
+    actions.append(actionsLauncher, close);
     toolbar.append(
       this.backBtn,
       this.forwardBtn,
@@ -1322,6 +1359,7 @@ export class SitePreview {
   }
 
   private openNewTabMenu() {
+    this.closePreviewActionsMenu();
     this.closeBuildMenu();
     const rootRect = this.root.getBoundingClientRect();
     const buttonRect = this.newTabBtn.getBoundingClientRect();
@@ -1361,6 +1399,69 @@ export class SitePreview {
     this.newTabMenu.hidden = true;
     this.newTabBtn.classList.remove("is-active");
     this.newTabBtn.setAttribute("aria-expanded", "false");
+    this.scheduleBrowserBoundsSync();
+  }
+
+  private togglePreviewActionsMenu() {
+    if (this.previewActionsMenu.hidden) this.openPreviewActionsMenu();
+    else this.closePreviewActionsMenu(true);
+  }
+
+  /**
+   * Keep infrequent preview tools together so widening the preview never
+   * turns the address field into an oversized, unstable target.  This is a
+   * regular grouped panel rather than a menu role because it contains
+   * persistent toggle buttons (Android, Software, Design, and Source Lens).
+   */
+  private openPreviewActionsMenu() {
+    this.closeNewTabMenu();
+    this.closeBuildMenu();
+    this.previewActionsMenuCleanup?.();
+    this.previewActionsMenuCleanup = null;
+    this.previewActionsMenu.hidden = false;
+    this.previewActionsToggle.classList.add("is-active");
+    this.previewActionsToggle.setAttribute("aria-expanded", "true");
+    // Native child browser views appear above DOM chrome. Hide them while the
+    // panel is open so the full action list remains immediately clickable.
+    this.syncBrowserSurfaces(false);
+
+    const launcher = this.previewActionsToggle.parentElement;
+    const onPointerDown = (event: PointerEvent) => {
+      if (launcher?.contains(event.target as Node)) return;
+      this.closePreviewActionsMenu();
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      // Escape closes an open Build sub-panel first, leaving the action panel
+      // available for another quick choice.
+      if (!this.buildMenu.hidden) {
+        this.closeBuildMenu(true);
+        return;
+      }
+      this.closePreviewActionsMenu(true);
+    };
+    document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("keydown", onKeyDown, true);
+    this.previewActionsMenuCleanup = () => {
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("keydown", onKeyDown, true);
+    };
+    requestAnimationFrame(() => {
+      if (!this.previewActionsMenu.hidden) this.buildMenuToggle.focus({ preventScroll: true });
+    });
+  }
+
+  private closePreviewActionsMenu(restoreFocus = false) {
+    const wasOpen = !this.previewActionsMenu.hidden;
+    this.previewActionsMenuCleanup?.();
+    this.previewActionsMenuCleanup = null;
+    this.closeBuildMenu();
+    if (!wasOpen) return;
+    this.previewActionsMenu.hidden = true;
+    this.previewActionsToggle.classList.remove("is-active");
+    this.previewActionsToggle.setAttribute("aria-expanded", "false");
+    if (restoreFocus) this.previewActionsToggle.focus({ preventScroll: true });
     this.scheduleBrowserBoundsSync();
   }
 
@@ -1562,6 +1663,7 @@ export class SitePreview {
 
   private syncModeUi() {
     const browserTab = this.activeTab?.kind === "browser";
+    if (browserTab) this.closePreviewActionsMenu();
     this.root.classList.toggle("is-browser-tab", browserTab);
     this.root.classList.toggle("is-browser-loading", browserTab && this.activeTab?.browserLoading === true);
     this.root.classList.toggle("is-android", this.androidMode);
@@ -1578,6 +1680,7 @@ export class SitePreview {
     this.softwareBtn.setAttribute("aria-pressed", String(this.softwareMode));
     this.editBar.hidden = browserTab || !this.selectionModeActive();
     this.browserHomeBtn.hidden = !browserTab;
+    this.previewActionsToggle.hidden = browserTab;
     this.urlInput.placeholder = browserTab
       ? "Search Google or enter a web address"
       : "Project file path or localhost URL";
@@ -1618,6 +1721,7 @@ export class SitePreview {
   private teardownSessionView() {
     this.cancelCloseTeardown();
     this.closeNewTabMenu();
+    this.closePreviewActionsMenu();
     this.closeBuildMenu();
     this.clearDesignMode();
     this.designMode = false;
@@ -1759,6 +1863,7 @@ export class SitePreview {
     this.viewGeneration += 1;
     this.closing = true;
     this.closeNewTabMenu();
+    this.closePreviewActionsMenu();
     this.syncBrowserSurfaces(false);
     const generation = ++this.closeGeneration;
     this.closeBuildMenu();
@@ -3408,7 +3513,7 @@ export class SitePreview {
   }
 
   private requestBuild(target: "apk" | "software") {
-    this.closeBuildMenu();
+    this.closePreviewActionsMenu();
     const label = target === "apk" ? "Android APK build" : "Desktop software build";
     this.dispatchGeneratedPrompt(this.buildPrompt(target), label);
   }

@@ -7,6 +7,16 @@ from playwright.sync_api import sync_playwright
 SCREENSHOT = Path(__file__).resolve().parent / "preview-modes-test.png"
 
 
+def open_preview_actions(page):
+    """Open the compact preview-tools panel and return its visible group."""
+    toggle = page.get_by_role("button", name="Preview actions")
+    toggle.click()
+    actions = page.get_by_role("group", name="Preview actions")
+    actions.wait_for(state="visible")
+    assert toggle.get_attribute("aria-expanded") == "true"
+    return actions
+
+
 def main() -> None:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
@@ -88,9 +98,48 @@ def main() -> None:
         assert reduced_body.get_attribute("data-live-thinking-color") == "rgb(85, 185, 255)"
         reduced_page.close()
 
-        android = page.get_by_role("button", name="Toggle Android device preview")
-        software = page.get_by_role("button", name="Toggle software window preview")
-        android.click()
+        # Widening the preview must not turn the address field into an
+        # unbounded bar. The compact action panel leaves useful space while
+        # the field deliberately caps at a browser-like working width.
+        page.locator(".workbench").evaluate(
+            "element => element.style.setProperty('--preview-w', '980px')"
+        )
+        page.wait_for_timeout(80)
+        wide_preview_box = preview.bounding_box()
+        wide_omnibox_box = page.locator(".site-preview-omnibox").bounding_box()
+        assert wide_preview_box is not None and wide_preview_box["width"] >= 900, wide_preview_box
+        assert wide_omnibox_box is not None
+        assert 300 <= wide_omnibox_box["width"] <= 562, wide_omnibox_box
+        assert page.locator(".site-preview-omnibox").evaluate(
+            "element => getComputedStyle(element).maxWidth"
+        ) == "560px"
+
+        # The overflow control keeps the six infrequent preview actions in a
+        # single accessible panel. Escape first closes Build's nested target
+        # picker, then closes the main panel and restores focus to its button.
+        actions = open_preview_actions(page)
+        assert actions.get_by_role("button", name="Choose build target").is_visible()
+        assert actions.get_by_role("button", name="Make the website public").is_visible()
+        assert actions.get_by_role("button", name="Toggle Android device preview").is_visible()
+        assert actions.get_by_role("button", name="Toggle software window preview").is_visible()
+        assert actions.get_by_role("button", name="Design").is_visible()
+        assert actions.get_by_role("button", name="Toggle Source Lens").is_visible()
+        assert page.get_by_role("button", name="Close preview").is_visible()
+        actions.get_by_role("button", name="Choose build target").click()
+        build_menu = actions.get_by_role("menu", name="Build target")
+        assert build_menu.is_visible()
+        page.keyboard.press("Escape")
+        assert build_menu.is_hidden()
+        assert actions.is_visible()
+        page.keyboard.press("Escape")
+        assert actions.is_hidden()
+        assert page.get_by_role("button", name="Preview actions").get_attribute("aria-expanded") == "false"
+
+        android = page.locator(".site-preview-android-btn")
+        software = page.locator(".site-preview-software-btn")
+        open_preview_actions(page).get_by_role(
+            "button", name="Toggle Android device preview"
+        ).click()
         assert android.get_attribute("aria-pressed") == "true"
         assert "is-android" in (preview.get_attribute("class") or "")
         frame_box = page.locator("iframe").bounding_box()
@@ -119,7 +168,14 @@ def main() -> None:
         assert "./assets/literal.png" in literal_content, literal_content
         assert "asset.localhost" not in literal_content, literal_content
 
-        page.get_by_role("button", name="Design").click()
+        source_lens = page.locator(".site-preview-source-lens-btn")
+        open_preview_actions(page).get_by_role(
+            "button", name="Toggle Source Lens"
+        ).click()
+        assert source_lens.get_attribute("aria-pressed") == "true"
+
+        open_preview_actions(page).get_by_role("button", name="Design").click()
+        assert source_lens.get_attribute("aria-pressed") == "false"
         frame.locator("#target").click()
         assert page.locator("#site-preview-edit-tag").inner_text() == "button"
         assert page.locator(".site-preview-editbar").is_visible()
@@ -141,7 +197,9 @@ def main() -> None:
         assert len(dispatch["prompt"]) < 5000, len(dispatch["prompt"])
         assert "Fast Design edit" in page.locator(".site-preview-status").inner_text()
 
-        software.click()
+        open_preview_actions(page).get_by_role(
+            "button", name="Toggle software window preview"
+        ).click()
         assert software.get_attribute("aria-pressed") == "true"
         assert android.get_attribute("aria-pressed") == "false"
         classes = preview.get_attribute("class") or ""

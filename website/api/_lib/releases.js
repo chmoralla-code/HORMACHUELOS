@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.73";
-const BUILTIN_MSI_SHA256 = "907f72a1bd6aee84e04c9e5b4bac2852ff1b8eb6756984f6e0b2d595a0427c47";
-const BUILTIN_EXE_SHA256 = "ab553dbf39f59f75199c63d42fc1dc6685c27a0897dceaa4d27c672d96912ba1";
-const BUILTIN_RELEASE_NOTES = "Choose a persistent Light, Dark, or Gray appearance from the header. Improved long-session reliability, preview editing, project navigation, blue live-work effects, single-instance behavior, and the Windows installer experience.";
+const BUILTIN_RELEASE_VERSION = "0.1.74";
+const BUILTIN_MSI_SHA256 = "afa092fa3adfa5fce7acf1b6094a145c9664b7b20d82219a81f50fe597724e10";
+const BUILTIN_EXE_SHA256 = "ba897315b4eb85becbafd35c1de8c760937ed2059574d95b0b615e5331d5d734";
+const BUILTIN_RELEASE_NOTES = "Preview toolbar cleanup: the project path and localhost search field now keeps a stable width when the preview is resized. Build, publishing, Android, Software, Design Mode, and Source Lens now live in a compact Preview actions menu with keyboard support. Browser-tab navigation remains uncluttered.";
 
 // A visual-preference update must never interrupt an active desktop task.
 // The release is discoverable through the update flow, but stays optional.
