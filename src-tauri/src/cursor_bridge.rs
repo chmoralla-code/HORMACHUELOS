@@ -2,6 +2,7 @@
 //! `api.cursor.com` has no OpenAI-compatible `/chat/completions` endpoint.
 
 use crate::agent::HistoryTurn;
+use crate::flavour::FlavourRun;
 use crate::smart_agent::SmartAgentRun;
 use crate::state::SessionRun;
 use anyhow::{anyhow, Context, Result};
@@ -400,6 +401,8 @@ async fn execute_cursor_host_tool(
         cancel: run.cancel.clone(),
         active_pid: run.active_pid.clone(),
         on_console_line: Some(on_console_line),
+        checkpoint: run.checkpoint(),
+        protect_command_changes: run.protect_command_changes(),
     };
     let tool_name = name.clone();
     let tool_arguments = arguments.clone();
@@ -740,6 +743,7 @@ fn handle_event(
     saw_error: &mut Option<String>,
     smart_agent: &mut SmartAgentRun,
     activity: &mut CursorPassActivity,
+    flavour: &mut FlavourRun,
     model: &str,
 ) -> bool {
     match event.kind.as_str() {
@@ -765,6 +769,14 @@ fn handle_event(
             let name = event.name.unwrap_or_else(|| "tool".into());
             let id = event.id.unwrap_or_else(|| name.clone());
             let arguments = event.arguments.unwrap_or_else(|| json!({}));
+            if flavour.record_tool_call(&id, &name, &arguments) {
+                emit(
+                    app,
+                    session_id,
+                    "status",
+                    json!({ "message": "Flavour · updating working memory…" }),
+                );
+            }
             smart_agent.on_tool_call(app, session_id, &id, &name, &arguments);
             activity.record_tool_call(&id, &name);
             emit(
@@ -782,8 +794,10 @@ fn handle_event(
             let name = event.name.unwrap_or_else(|| "tool".into());
             let id = event.id.unwrap_or_else(|| name.clone());
             let ok = event.ok.unwrap_or(true);
+            let content = event.content.unwrap_or_default();
             smart_agent.on_tool_result(app, session_id, &id, &name, ok);
             activity.record_tool_result(&id, &name, ok);
+            flavour.record_tool_result(&id, &name, &json!({}), ok, &content);
             emit(
                 app,
                 session_id,
@@ -792,7 +806,7 @@ fn handle_event(
                     "id": id,
                     "name": name,
                     "ok": ok,
-                    "content": event.content.unwrap_or_default(),
+                    "content": content,
                     "streamed": false,
                 }),
             );
@@ -870,14 +884,17 @@ pub async fn run_cursor_turn(
     requires_project_completion: bool,
     smart_agent_enabled: bool,
     task_profile: &str,
+    execution_profile: &str,
+    flavour: &mut FlavourRun,
 ) -> Result<Option<String>> {
     let mut continuation_pass: u32 = 0;
     let mut consecutive_stalled_recoveries: u8 = 0;
     let mut current_prompt = prompt.to_string();
     let mut current_agent_id = resume_agent_id;
     let smart_agent_active = smart_agent_enabled && requires_project_completion;
-    let fast_design_edit = task_profile.eq_ignore_ascii_case("design_edit_fast");
-    let mut smart_agent = SmartAgentRun::new(smart_agent_active, fast_design_edit);
+    let fast_execution = task_profile.eq_ignore_ascii_case("design_edit_fast")
+        || execution_profile.eq_ignore_ascii_case("fast");
+    let mut smart_agent = SmartAgentRun::new(smart_agent_active, fast_execution);
     let computer_use_active = computer_use_enabled && !crate::computer_use::is_paused();
     emit(
         &app,
@@ -892,9 +909,20 @@ pub async fn run_cursor_turn(
             "host_approval_callbacks": computer_use_active,
             "computer_use": computer_use_active,
             "smart_agent_enabled": smart_agent_active,
+            "flavour_enabled": flavour.is_enabled(),
             "task_profile": task_profile,
+            "execution_profile": execution_profile,
+            "checkpoint_id": run.checkpoint().map(|checkpoint| checkpoint.id()),
         }),
     );
+    if flavour.is_enabled() {
+        emit(
+            &app,
+            session_id,
+            "status",
+            json!({ "message": "Flavour · recalling project and session memory…" }),
+        );
+    }
     smart_agent.emit_plan(&app, session_id);
 
     loop {
@@ -915,6 +943,7 @@ pub async fn run_cursor_turn(
             current_agent_id.clone(),
             requires_project_completion,
             &mut smart_agent,
+            flavour,
         )
         .await?;
 
@@ -1033,11 +1062,15 @@ pub async fn run_cursor_turn(
                 "iteration": continuation_pass,
             }),
         );
-        current_prompt = if requires_project_completion {
-            CURSOR_AUTOMATIC_CONTINUATION_PROMPT.to_string()
+        let continuation = if requires_project_completion {
+            CURSOR_AUTOMATIC_CONTINUATION_PROMPT
         } else {
-            CURSOR_INTERRUPTED_REPLY_PROMPT.to_string()
+            CURSOR_INTERRUPTED_REPLY_PROMPT
         };
+        current_prompt = format!(
+            "{}\n\n{continuation}",
+            flavour.context_block(if fast_execution { 3_000 } else { 8_000 })
+        );
     }
 }
 
@@ -1061,6 +1094,7 @@ async fn run_cursor_attempt(
     resume_agent_id: Option<String>,
     requires_project_completion: bool,
     smart_agent: &mut SmartAgentRun,
+    flavour: &mut FlavourRun,
 ) -> Result<CursorTurnOutcome> {
     let bridge = bridge_script_path()?;
     let node_runtime = node_runtime_path(&bridge);
@@ -1259,6 +1293,14 @@ async fn run_cursor_attempt(
                         };
                         let raw_name = event.name.unwrap_or_default();
                         let raw_arguments = event.arguments.unwrap_or_else(|| json!({}));
+                        if flavour.record_tool_call(&request_id, &raw_name, &raw_arguments) {
+                            emit(
+                                &app,
+                                session_id,
+                                "status",
+                                json!({ "message": "Flavour · updating working memory…" }),
+                            );
+                        }
                         let (ok, content) = execute_cursor_host_tool(
                             &app,
                             session_id,
@@ -1269,10 +1311,17 @@ async fn run_cursor_attempt(
                             &run,
                             &request_id,
                             &raw_name,
-                            raw_arguments,
+                            raw_arguments.clone(),
                             &known_integration_secrets,
                         )
                         .await;
+                        flavour.record_tool_result(
+                            &request_id,
+                            &raw_name,
+                            &raw_arguments,
+                            ok,
+                            &content,
+                        );
                         let response = json!({
                             "type": "host_tool_response",
                             "requestId": request_id,
@@ -1349,6 +1398,7 @@ async fn run_cursor_attempt(
                         &mut saw_error,
                         smart_agent,
                         &mut activity,
+                        flavour,
                         model,
                     );
                     if event_kind == "done" && recoverable_interruption.is_some() {

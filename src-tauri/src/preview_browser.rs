@@ -1,0 +1,1090 @@
+use crate::design_source::{DesignDomContext, DesignRect};
+use serde::{Deserialize, Serialize};
+use tauri::{
+    webview::{NewWindowResponse, PageLoadEvent, WebviewBuilder},
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Webview, WebviewUrl,
+};
+
+const BROWSER_LABEL_PREFIX: &str = "preview-browser-";
+const BROWSER_EVENT: &str = "preview-browser-event";
+const BROWSER_INSPECTION_SCHEME: &str = "horma-preview-inspect";
+const MAX_BROWSER_URL_LEN: usize = 8_192;
+const MAX_INSPECTION_URL_LEN: usize = 24_000;
+const MAX_BROWSER_CAPTURE_PIXELS: f64 = 8_000_000.0;
+const MAX_BROWSER_CAPTURE_SIDE: f64 = 4_096.0;
+
+/// Runs in the isolated Browser-tab webview. It never receives Tauri command
+/// access: the only outbound channel is a bounded custom navigation that the
+/// Rust navigation handler cancels and converts into an inspection event.
+const BROWSER_INSPECTION_SCRIPT: &str = r#"
+(() => {
+  if (window.top !== window || window.__hormaPreviewInspection) return;
+
+  const PREFIX = 'horma-preview-inspect://target/';
+  const INTERACTIVE = "a,button,input,select,textarea,summary,label,[role='button'],[role='link'],[role='tab'],[tabindex]";
+  const state = {
+    mode: 'off',
+    chromeVisible: true,
+    hoverNode: null,
+    selectedNode: null,
+    hoverTimer: 0,
+    lastHoverSignature: '',
+    feedback: null,
+    raf: 0,
+  };
+
+  const clip = (value, max = 180) => String(value || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .slice(0, max);
+
+  const cssPath = (element) => {
+    if (!element || element.nodeType !== 1) return '';
+    if (element.id) return '#' + CSS.escape(element.id);
+    const parts = [];
+    for (let current = element; current && current !== document.body && parts.length < 6; current = current.parentElement) {
+      let part = current.tagName.toLowerCase();
+      const classes = Array.from(current.classList || [])
+        .filter((name) => name && !name.startsWith('horma-browser-inspect'))
+        .slice(0, 2);
+      if (classes.length) part += classes.map((name) => '.' + CSS.escape(name)).join('');
+      const parent = current.parentElement;
+      if (parent) {
+        const siblings = Array.from(parent.children).filter((item) => item.tagName === current.tagName);
+        if (siblings.length > 1 && !classes.length) part += `:nth-of-type(${siblings.indexOf(current) + 1})`;
+      }
+      parts.unshift(part);
+    }
+    return parts.join(' > ');
+  };
+
+  const featureFromTarget = (raw) => {
+    if (!raw || raw.nodeType !== 1 || raw === document.documentElement || raw === document.body) return null;
+    for (let current = raw; current && current !== document.body; current = current.parentElement) {
+      if (current.matches && current.matches(INTERACTIVE)) return current;
+      const rect = current.getBoundingClientRect();
+      const text = clip(current.innerText || current.textContent, 120);
+      const display = getComputedStyle(current).display || '';
+      if (!display.startsWith('inline') && rect.width >= 24 && rect.height >= 18 && text) return current;
+    }
+    return raw;
+  };
+
+  const sourceHints = (node) => {
+    let sourceFile = '';
+    let sourceLine = null;
+    let sourceColumn = null;
+    try {
+      const vue = node.__vueParentComponent;
+      sourceFile = clip(vue && vue.type && vue.type.__file, 500);
+    } catch {}
+    try {
+      const key = Object.keys(node).find((name) => name.startsWith('__reactFiber$') || name.startsWith('__reactInternalInstance$'));
+      let fiber = key ? node[key] : null;
+      for (let depth = 0; fiber && depth < 12; depth += 1, fiber = fiber.return) {
+        const source = fiber._debugSource;
+        if (source && source.fileName) {
+          sourceFile = clip(source.fileName, 500);
+          sourceLine = Number(source.lineNumber) || null;
+          sourceColumn = Number(source.columnNumber) || null;
+          break;
+        }
+      }
+    } catch {}
+    return { sourceFile, sourceLine, sourceColumn };
+  };
+
+  const describe = (node, includeRuntimeHints = true) => {
+    const rect = node.getBoundingClientRect();
+    const clone = node.cloneNode(true);
+    clone.querySelectorAll?.('[id^="horma-browser-inspect-"]').forEach((item) => item.remove());
+    const styleSelectors = [];
+    let visited = 0;
+    if (includeRuntimeHints) {
+      for (const sheet of Array.from(document.styleSheets || [])) {
+        let rules;
+        try { rules = Array.from(sheet.cssRules || []); } catch { continue; }
+        for (const rule of rules) {
+          if (++visited > 2500 || styleSelectors.length >= 16) break;
+          const selector = rule.selectorText;
+          if (!selector) continue;
+          try { if (node.matches(selector)) styleSelectors.push(clip(selector, 240)); } catch {}
+        }
+        if (visited > 2500 || styleSelectors.length >= 16) break;
+      }
+    }
+    return {
+      tag: clip(node.tagName, 40).toLowerCase(),
+      text: clip(node.innerText || node.textContent, 180),
+      selector: cssPath(node),
+      domContext: {
+        id: clip(node.id, 100),
+        classes: Array.from(node.classList || []).map((value) => clip(value, 100)).filter(Boolean).slice(0, 16),
+        role: clip(node.getAttribute('role'), 80),
+        ariaLabel: clip(node.getAttribute('aria-label'), 180),
+        testId: clip(node.getAttribute('data-testid'), 120),
+        name: clip(node.getAttribute('name'), 120),
+        href: clip(node.getAttribute('href') || node.getAttribute('action'), 240),
+        html: clip(clone.outerHTML, 1200),
+      },
+      rect: { x: rect.left, y: rect.top, width: rect.width, height: rect.height },
+      styleSelectors: Array.from(new Set(styleSelectors)),
+      ...(includeRuntimeHints ? sourceHints(node) : { sourceFile: '', sourceLine: null, sourceColumn: null }),
+    };
+  };
+
+  const report = (phase, target) => {
+    try {
+      const payload = target ? `?payload=${encodeURIComponent(JSON.stringify(target))}` : '';
+      window.location.assign(`${PREFIX}${phase}${payload}`);
+    } catch {}
+  };
+
+  const ensureUi = () => {
+    if (!document.documentElement) return null;
+    let root = document.getElementById('horma-browser-inspect-root');
+    if (root) return root;
+    const cssText = `
+      #horma-browser-inspect-root { all: initial !important; position: fixed !important; inset: 0 !important; z-index: 2147483647 !important; pointer-events: none !important; font-family: Inter, ui-sans-serif, system-ui, sans-serif !important; color-scheme: dark !important; }
+      #horma-browser-inspect-box { all: initial !important; position: fixed !important; display: none !important; box-sizing: border-box !important; border: 2px solid #72b1ff !important; border-radius: 5px !important; background: rgba(84,156,255,.08) !important; box-shadow: 0 0 0 1px rgba(255,255,255,.92),0 0 0 5px rgba(90,160,255,.18),0 10px 28px rgba(18,92,186,.3) !important; pointer-events: none !important; }
+      #horma-browser-inspect-box[data-source="true"] { border-color: #66dfb8 !important; background: rgba(54,190,149,.08) !important; box-shadow: 0 0 0 1px rgba(241,255,249,.94),0 0 0 5px rgba(65,206,162,.18),0 10px 28px rgba(24,125,96,.28) !important; }
+      #horma-browser-inspect-box[data-selected="true"] { background: rgba(84,156,255,.14) !important; }
+      #horma-browser-inspect-badge { all: initial !important; position: fixed !important; top: 12px !important; right: 12px !important; display: flex !important; align-items: center !important; gap: 7px !important; max-width: calc(100vw - 24px) !important; padding: 7px 10px !important; border: 1px solid rgba(119,181,255,.58) !important; border-radius: 8px !important; color: #eef7ff !important; background: rgba(8,18,34,.94) !important; box-shadow: 0 10px 30px rgba(0,0,0,.4) !important; font: 600 11px/1.25 ui-monospace,SFMono-Regular,Consolas,monospace !important; }
+      #horma-browser-inspect-badge strong { all: initial !important; color: #91c7ff !important; font: 800 10px/1 ui-monospace,SFMono-Regular,Consolas,monospace !important; letter-spacing: .06em !important; text-transform: uppercase !important; }
+      #horma-browser-inspect-root[data-mode="source"] #horma-browser-inspect-badge { border-color: rgba(102,223,184,.62) !important; background: rgba(6,27,22,.95) !important; }
+      #horma-browser-inspect-root[data-mode="source"] #horma-browser-inspect-badge strong { color: #79edc9 !important; }
+      #horma-browser-inspect-hud { all: initial !important; position: fixed !important; display: none !important; width: max-content !important; max-width: min(360px,calc(100vw - 16px)) !important; padding: 7px 9px !important; border: 1px solid rgba(91,211,176,.68) !important; border-radius: 8px !important; color: #eafff7 !important; background: rgba(6,24,20,.97) !important; box-shadow: 0 12px 30px rgba(0,0,0,.46) !important; font: 600 10px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace !important; white-space: nowrap !important; overflow: hidden !important; text-overflow: ellipsis !important; }
+      #horma-browser-inspect-hud span { all: initial !important; display: block !important; overflow: hidden !important; color: #d7fff2 !important; font: inherit !important; text-overflow: ellipsis !important; white-space: nowrap !important; }
+      #horma-browser-inspect-hud span[data-kind="style"] { color: #b9d7ff !important; }
+      #horma-browser-inspect-hud span[data-kind="backend"] { color: #ffd8a8 !important; }
+      #horma-browser-inspect-hud span[data-kind="likely"], #horma-browser-inspect-hud span[data-kind="target"] { opacity: .82 !important; }
+    `;
+    const style = document.createElement('style');
+    style.id = 'horma-browser-inspect-style';
+    style.textContent = cssText;
+    try {
+      const sheet = new CSSStyleSheet();
+      sheet.replaceSync(cssText);
+      document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+    } catch {}
+    root = document.createElement('div');
+    root.id = 'horma-browser-inspect-root';
+    const box = document.createElement('div');
+    box.id = 'horma-browser-inspect-box';
+    const badge = document.createElement('div');
+    badge.id = 'horma-browser-inspect-badge';
+    badge.append(document.createElement('strong'), document.createElement('span'));
+    const hud = document.createElement('div');
+    hud.id = 'horma-browser-inspect-hud';
+    root.append(box, badge, hud);
+    document.documentElement.append(style, root);
+    return root;
+  };
+
+  const draw = () => {
+    state.raf = 0;
+    const root = ensureUi();
+    if (!root) return;
+    const visible = state.mode !== 'off' && state.chromeVisible;
+    root.style.setProperty('display', visible ? 'block' : 'none', 'important');
+    if (!visible) return;
+    root.dataset.mode = state.mode;
+    const badge = root.querySelector('#horma-browser-inspect-badge');
+    badge.querySelector('strong').textContent = state.mode === 'source' ? 'Source Lens' : 'Design';
+    badge.querySelector('span').textContent = state.mode === 'source'
+      ? 'Hover to map code · click to select · Esc to exit'
+      : 'Click an element to edit · Esc to exit';
+    const node = state.selectedNode || state.hoverNode;
+    const box = root.querySelector('#horma-browser-inspect-box');
+    const hud = root.querySelector('#horma-browser-inspect-hud');
+    if (!node || !node.isConnected) {
+      box.style.setProperty('display', 'none', 'important');
+      hud.style.setProperty('display', 'none', 'important');
+      return;
+    }
+    const rect = node.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1) {
+      box.style.setProperty('display', 'none', 'important');
+      hud.style.setProperty('display', 'none', 'important');
+      return;
+    }
+    box.style.setProperty('display', 'block', 'important');
+    box.style.setProperty('left', `${Math.max(0, rect.left)}px`, 'important');
+    box.style.setProperty('top', `${Math.max(0, rect.top)}px`, 'important');
+    box.style.setProperty('width', `${Math.max(1, Math.min(innerWidth - Math.max(0, rect.left), rect.width))}px`, 'important');
+    box.style.setProperty('height', `${Math.max(1, Math.min(innerHeight - Math.max(0, rect.top), rect.height))}px`, 'important');
+    box.dataset.source = String(state.mode === 'source');
+    box.dataset.selected = String(Boolean(state.selectedNode));
+
+    const target = describe(node, false);
+    let lines = state.feedback && state.feedback.selector === target.selector
+      ? state.feedback.lines
+      : [{ kind: 'target', text: `<${target.tag}>${target.text ? ` · ${target.text.slice(0, 62)}` : ''}` }];
+    if (state.mode === 'source' && (!state.feedback || state.feedback.selector !== target.selector)) {
+      lines = [{ kind: 'target', text: 'Locating source…' }, ...lines];
+    }
+    hud.replaceChildren(...lines.slice(0, 4).map((line) => {
+      const item = document.createElement('span');
+      item.dataset.kind = line.kind || 'target';
+      item.textContent = clip(line.text, 260);
+      return item;
+    }));
+    hud.style.setProperty('display', 'block', 'important');
+    const left = Math.max(8, Math.min(rect.left, innerWidth - Math.min(360, hud.offsetWidth || 320) - 8));
+    const below = rect.bottom + 9;
+    const top = below + 80 < innerHeight ? below : Math.max(8, rect.top - Math.max(48, hud.offsetHeight || 54) - 9);
+    hud.style.setProperty('left', `${left}px`, 'important');
+    hud.style.setProperty('top', `${top}px`, 'important');
+  };
+
+  const scheduleDraw = () => {
+    if (!state.raf) state.raf = requestAnimationFrame(draw);
+  };
+
+  const onPointerMove = (event) => {
+    if (state.mode === 'off') return;
+    const node = featureFromTarget(event.target);
+    if (!node) return;
+    state.hoverNode = node;
+    if (state.selectedNode && state.selectedNode !== node) state.selectedNode = null;
+    scheduleDraw();
+    if (state.mode !== 'source') return;
+    const rect = node.getBoundingClientRect();
+    const signature = `${cssPath(node)}|${Math.round(rect.x / 3)}|${Math.round(rect.y / 3)}`;
+    if (signature === state.lastHoverSignature) return;
+    state.lastHoverSignature = signature;
+    window.clearTimeout(state.hoverTimer);
+    state.hoverTimer = window.setTimeout(() => {
+      if (state.mode === 'source' && node.isConnected && state.lastHoverSignature === signature) report('hover', describe(node));
+    }, 110);
+  };
+
+  const onClick = (event) => {
+    if (state.mode === 'off' || event.button !== 0) return;
+    const node = featureFromTarget(event.target);
+    if (!node) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    state.selectedNode = node;
+    state.hoverNode = node;
+    state.feedback = null;
+    scheduleDraw();
+    report('select', describe(node));
+  };
+
+  const onKeyDown = (event) => {
+    if (state.mode === 'off' || event.key !== 'Escape') return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    report('cancel', null);
+  };
+
+  window.addEventListener('pointermove', onPointerMove, true);
+  window.addEventListener('click', onClick, true);
+  window.addEventListener('keydown', onKeyDown, true);
+  window.addEventListener('scroll', scheduleDraw, true);
+  window.addEventListener('resize', scheduleDraw, true);
+
+  window.__hormaPreviewInspection = {
+    setMode(mode) {
+      const nextMode = mode === 'source' || mode === 'design' ? mode : 'off';
+      if (state.mode === nextMode) {
+        scheduleDraw();
+        return;
+      }
+      state.mode = nextMode;
+      state.hoverNode = null;
+      state.selectedNode = null;
+      state.lastHoverSignature = '';
+      state.feedback = null;
+      window.clearTimeout(state.hoverTimer);
+      scheduleDraw();
+    },
+    setFeedback(feedback) {
+      state.feedback = feedback && Array.isArray(feedback.lines) ? feedback : null;
+      scheduleDraw();
+    },
+    setChromeVisible(visible) {
+      state.chromeVisible = Boolean(visible);
+      scheduleDraw();
+    },
+  };
+})();
+"#;
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewBrowserBounds {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreviewBrowserEvent {
+    label: String,
+    kind: &'static str,
+    url: Option<String>,
+    title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target: Option<PreviewBrowserTarget>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreviewBrowserTarget {
+    tag: String,
+    text: String,
+    selector: String,
+    #[serde(default)]
+    dom_context: DesignDomContext,
+    rect: DesignRect,
+    #[serde(default)]
+    style_selectors: Vec<String>,
+    #[serde(default)]
+    source_file: String,
+    source_line: Option<u32>,
+    source_column: Option<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewBrowserFeedbackLine {
+    kind: String,
+    text: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewBrowserFeedback {
+    selector: String,
+    lines: Vec<PreviewBrowserFeedbackLine>,
+}
+
+fn ensure_main_caller(caller: &Webview) -> Result<(), String> {
+    if caller.label() == "main" {
+        Ok(())
+    } else {
+        Err("Browser controls are available only to the Hormachuelos app shell.".into())
+    }
+}
+
+fn validate_label(label: &str) -> Result<(), String> {
+    let suffix = label
+        .strip_prefix(BROWSER_LABEL_PREFIX)
+        .ok_or_else(|| "Invalid preview browser label.".to_string())?;
+    if suffix.is_empty()
+        || label.len() > 96
+        || !suffix
+            .bytes()
+            .all(|value| value.is_ascii_alphanumeric() || matches!(value, b'-' | b'_'))
+    {
+        return Err("Invalid preview browser label.".into());
+    }
+    Ok(())
+}
+
+fn parse_browser_url(raw: &str) -> Result<tauri::Url, String> {
+    let value = raw.trim();
+    if value.is_empty() || value.len() > MAX_BROWSER_URL_LEN || value.contains('\0') {
+        return Err("Enter a valid web address.".into());
+    }
+    let url = tauri::Url::parse(value).map_err(|_| "Enter a valid web address.".to_string())?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err("Only safe http:// and https:// web addresses are supported.".into());
+    }
+    Ok(url)
+}
+
+fn validate_bounds(bounds: PreviewBrowserBounds) -> Result<PreviewBrowserBounds, String> {
+    let values = [bounds.x, bounds.y, bounds.width, bounds.height];
+    if values.iter().any(|value| !value.is_finite())
+        || bounds.x < 0.0
+        || bounds.y < 0.0
+        || bounds.width < 2.0
+        || bounds.height < 2.0
+        || bounds.x > 32_768.0
+        || bounds.y > 32_768.0
+        || bounds.width > 32_768.0
+        || bounds.height > 32_768.0
+    {
+        return Err("Invalid preview browser bounds.".into());
+    }
+    Ok(bounds)
+}
+
+fn compact(value: &str, max: usize) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(max)
+        .collect()
+}
+
+fn sanitize_target(mut target: PreviewBrowserTarget) -> Option<PreviewBrowserTarget> {
+    let rect_values = [
+        target.rect.x,
+        target.rect.y,
+        target.rect.width,
+        target.rect.height,
+    ];
+    if rect_values.iter().any(|value| !value.is_finite())
+        || target.rect.width < 1.0
+        || target.rect.height < 1.0
+    {
+        return None;
+    }
+    target.rect.x = target.rect.x.clamp(-32_768.0, 32_768.0);
+    target.rect.y = target.rect.y.clamp(-32_768.0, 32_768.0);
+    target.rect.width = target.rect.width.clamp(1.0, 32_768.0);
+    target.rect.height = target.rect.height.clamp(1.0, 32_768.0);
+    target.tag = compact(&target.tag.to_ascii_lowercase(), 40);
+    target.text = compact(&target.text, 180);
+    target.selector = compact(&target.selector, 600);
+    if target.tag.is_empty() || target.selector.is_empty() {
+        return None;
+    }
+    target.dom_context.id = compact(&target.dom_context.id, 100);
+    target.dom_context.classes = target
+        .dom_context
+        .classes
+        .iter()
+        .map(|value| compact(value, 100))
+        .filter(|value| !value.is_empty())
+        .take(16)
+        .collect();
+    target.dom_context.role = compact(&target.dom_context.role, 80);
+    target.dom_context.aria_label = compact(&target.dom_context.aria_label, 180);
+    target.dom_context.test_id = compact(&target.dom_context.test_id, 120);
+    target.dom_context.name = compact(&target.dom_context.name, 120);
+    target.dom_context.href = compact(&target.dom_context.href, 240);
+    target.dom_context.html = compact(&target.dom_context.html, 1_200);
+    target.style_selectors = target
+        .style_selectors
+        .iter()
+        .map(|value| compact(value, 240))
+        .filter(|value| !value.is_empty())
+        .take(16)
+        .collect();
+    target.source_file = compact(&target.source_file, 500);
+    target.source_line = target.source_line.filter(|value| *value <= 10_000_000);
+    target.source_column = target.source_column.filter(|value| *value <= 1_000_000);
+    Some(target)
+}
+
+fn inspection_navigation(
+    url: &tauri::Url,
+) -> Option<Result<(&'static str, Option<PreviewBrowserTarget>), String>> {
+    if url.scheme() != BROWSER_INSPECTION_SCHEME {
+        return None;
+    }
+    if url.as_str().len() > MAX_INSPECTION_URL_LEN || url.host_str() != Some("target") {
+        return Some(Err("Invalid Browser inspection event.".into()));
+    }
+    let kind = match url.path().trim_matches('/') {
+        "hover" => "inspect-hover",
+        "select" => "inspect-select",
+        "cancel" => return Some(Ok(("inspect-cancel", None))),
+        _ => return Some(Err("Invalid Browser inspection event.".into())),
+    };
+    let payload = url
+        .query_pairs()
+        .find(|(key, _)| key == "payload")
+        .map(|(_, value)| value.into_owned())
+        .ok_or_else(|| "Browser inspection target is missing.".to_string());
+    Some(payload.and_then(|payload| {
+        serde_json::from_str::<PreviewBrowserTarget>(&payload)
+            .map_err(|_| "Browser inspection target is invalid.".to_string())
+            .and_then(|target| {
+                sanitize_target(target)
+                    .map(|target| (kind, Some(target)))
+                    .ok_or_else(|| "Browser inspection target is invalid.".to_string())
+            })
+    }))
+}
+
+fn sanitize_feedback(mut feedback: PreviewBrowserFeedback) -> PreviewBrowserFeedback {
+    feedback.selector = compact(&feedback.selector, 600);
+    feedback.lines = feedback
+        .lines
+        .into_iter()
+        .map(|line| PreviewBrowserFeedbackLine {
+            kind: match line.kind.as_str() {
+                "frontend" | "style" | "backend" | "likely" => line.kind,
+                _ => "target".into(),
+            },
+            text: compact(&line.text, 260),
+        })
+        .filter(|line| !line.text.is_empty())
+        .take(4)
+        .collect();
+    feedback
+}
+
+fn emit_browser_event(
+    app: &AppHandle,
+    label: impl Into<String>,
+    kind: &'static str,
+    url: Option<String>,
+    title: Option<String>,
+    target: Option<PreviewBrowserTarget>,
+) {
+    let _ = app.emit_to(
+        "main",
+        BROWSER_EVENT,
+        PreviewBrowserEvent {
+            label: label.into(),
+            kind,
+            url,
+            title,
+            target,
+        },
+    );
+}
+
+fn get_browser(app: &AppHandle, label: &str) -> Result<Webview, String> {
+    validate_label(label)?;
+    app.get_webview(label)
+        .ok_or_else(|| "That browser tab is no longer available.".to_string())
+}
+
+fn validate_capture_rect(rect: DesignRect) -> Result<DesignRect, String> {
+    let values = [rect.x, rect.y, rect.width, rect.height];
+    if values.iter().any(|value| !value.is_finite())
+        || rect.x < 0.0
+        || rect.y < 0.0
+        || rect.width < 1.0
+        || rect.height < 1.0
+        || rect.width > MAX_BROWSER_CAPTURE_SIDE
+        || rect.height > MAX_BROWSER_CAPTURE_SIDE
+        || rect.width * rect.height > MAX_BROWSER_CAPTURE_PIXELS
+    {
+        return Err("The selected Browser feature is outside the capture limit.".into());
+    }
+    Ok(rect)
+}
+
+fn capture_page_offset(metrics: &serde_json::Value) -> Result<(f64, f64), String> {
+    let viewport = metrics
+        .get("cssVisualViewport")
+        .or_else(|| metrics.get("visualViewport"))
+        .ok_or_else(|| "Browser viewport metrics are missing.".to_string())?;
+    let page_x = viewport
+        .get("pageX")
+        .and_then(serde_json::Value::as_f64)
+        .ok_or_else(|| "Browser horizontal viewport offset is missing.".to_string())?;
+    let page_y = viewport
+        .get("pageY")
+        .and_then(serde_json::Value::as_f64)
+        .ok_or_else(|| "Browser vertical viewport offset is missing.".to_string())?;
+    if !page_x.is_finite()
+        || !page_y.is_finite()
+        || !(0.0..=10_000_000.0).contains(&page_x)
+        || !(0.0..=10_000_000.0).contains(&page_y)
+    {
+        return Err("Browser viewport offsets are invalid.".into());
+    }
+    Ok((page_x, page_y))
+}
+
+#[cfg(windows)]
+async fn call_browser_devtools(
+    webview: &Webview,
+    method: &str,
+    parameters: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use tokio::sync::oneshot;
+    use webview2_com::{CallDevToolsProtocolMethodCompletedHandler, CoTaskMemPWSTR};
+
+    let (sender, receiver) = oneshot::channel::<Result<serde_json::Value, String>>();
+    let sender = Arc::new(Mutex::new(Some(sender)));
+    let callback_sender = sender.clone();
+    let method = method.to_string();
+    let parameters = parameters.to_string();
+    webview
+        .with_webview(move |platform| {
+            let result = (|| -> Result<(), String> {
+                let core = unsafe { platform.controller().CoreWebView2() }
+                    .map_err(|error| format!("Could not access the Browser webview: {error}"))?;
+                let handler = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(
+                    move |status, result_json| {
+                        let result = status
+                            .map_err(|error| format!("Browser capture failed: {error}"))
+                            .and_then(|_| {
+                                serde_json::from_str::<serde_json::Value>(&result_json)
+                                    .map_err(|error| format!("Invalid Browser capture: {error}"))
+                            });
+                        if let Ok(mut guard) = callback_sender.lock() {
+                            if let Some(sender) = guard.take() {
+                                let _ = sender.send(result);
+                            }
+                        }
+                        Ok(())
+                    },
+                ));
+                let method = CoTaskMemPWSTR::from(method.as_str());
+                let parameters = CoTaskMemPWSTR::from(parameters.as_str());
+                unsafe {
+                    core.CallDevToolsProtocolMethod(
+                        *method.as_ref().as_pcwstr(),
+                        *parameters.as_ref().as_pcwstr(),
+                        &handler,
+                    )
+                }
+                .map_err(|error| format!("Could not start Browser capture: {error}"))?;
+                Ok(())
+            })();
+            if let Err(error) = result {
+                if let Ok(mut guard) = sender.lock() {
+                    if let Some(sender) = guard.take() {
+                        let _ = sender.send(Err(error));
+                    }
+                }
+            }
+        })
+        .map_err(|error| format!("Could not schedule Browser capture: {error}"))?;
+
+    tokio::time::timeout(Duration::from_secs(3), receiver)
+        .await
+        .map_err(|_| "Browser screenshot timed out.".to_string())?
+        .map_err(|_| "Browser screenshot was cancelled.".to_string())?
+}
+
+#[cfg(windows)]
+fn browser_history_action(webview: &Webview, forward: bool) -> Result<(), String> {
+    use std::{sync::mpsc, time::Duration};
+
+    let (sender, receiver) = mpsc::channel();
+    webview
+        .with_webview(move |platform| {
+            let result = unsafe {
+                platform.controller().CoreWebView2().and_then(|core| {
+                    if forward {
+                        core.GoForward()
+                    } else {
+                        core.GoBack()
+                    }
+                })
+            }
+            .map_err(|error| error.to_string());
+            let _ = sender.send(result);
+        })
+        .map_err(|error| error.to_string())?;
+    receiver
+        .recv_timeout(Duration::from_secs(2))
+        .map_err(|_| "The browser did not respond to the history request.".to_string())?
+}
+
+#[cfg(not(windows))]
+fn browser_history_action(webview: &Webview, forward: bool) -> Result<(), String> {
+    let script = if forward {
+        "window.history.forward()"
+    } else {
+        "window.history.back()"
+    };
+    webview.eval(script).map_err(|error| error.to_string())
+}
+
+/// Create an embedded native browser surface over the preview viewport.
+///
+/// The caller check and URL allow-list are intentionally repeated for every
+/// command. Remote pages receive no capability granting them these commands;
+/// this guard is a second boundary if a future Tauri configuration changes.
+#[tauri::command]
+pub async fn create_preview_browser(
+    caller: Webview,
+    app: AppHandle,
+    label: String,
+    url: String,
+    bounds: PreviewBrowserBounds,
+    visible: bool,
+) -> Result<(), String> {
+    ensure_main_caller(&caller)?;
+    validate_label(&label)?;
+    let url = parse_browser_url(&url)?;
+    let bounds = validate_bounds(bounds)?;
+
+    if let Some(stale) = app.get_webview(&label) {
+        stale.close().map_err(|error| error.to_string())?;
+    }
+
+    let window = app
+        .get_window("main")
+        .ok_or_else(|| "The main application window is unavailable.".to_string())?;
+
+    let navigation_app = app.clone();
+    let navigation_label = label.clone();
+    let popup_app = app.clone();
+    let popup_label = label.clone();
+    let load_app = app.clone();
+    let title_app = app.clone();
+
+    let builder = WebviewBuilder::new(label.clone(), WebviewUrl::External(url))
+        .focused(false)
+        .zoom_hotkeys_enabled(true)
+        .devtools(cfg!(debug_assertions))
+        .initialization_script(BROWSER_INSPECTION_SCRIPT)
+        .on_navigation(move |next| {
+            if let Some(event) = inspection_navigation(next) {
+                if let Ok((kind, target)) = event {
+                    emit_browser_event(
+                        &navigation_app,
+                        navigation_label.clone(),
+                        kind,
+                        None,
+                        None,
+                        target,
+                    );
+                }
+                return false;
+            }
+            if parse_browser_url(next.as_str()).is_ok() {
+                true
+            } else {
+                emit_browser_event(
+                    &navigation_app,
+                    navigation_label.clone(),
+                    "blocked",
+                    Some(next.to_string()),
+                    None,
+                    None,
+                );
+                false
+            }
+        })
+        .on_new_window(move |next, _features| {
+            if parse_browser_url(next.as_str()).is_ok() {
+                emit_browser_event(
+                    &popup_app,
+                    popup_label.clone(),
+                    "popup",
+                    Some(next.to_string()),
+                    None,
+                    None,
+                );
+            }
+            NewWindowResponse::Deny
+        })
+        .on_page_load(move |webview, payload| {
+            let kind = match payload.event() {
+                PageLoadEvent::Started => "loading",
+                PageLoadEvent::Finished => "ready",
+            };
+            emit_browser_event(
+                &load_app,
+                webview.label().to_string(),
+                kind,
+                Some(payload.url().to_string()),
+                None,
+                None,
+            );
+        })
+        .on_document_title_changed(move |webview, title| {
+            emit_browser_event(
+                &title_app,
+                webview.label().to_string(),
+                "title",
+                webview.url().ok().map(|value| value.to_string()),
+                Some(title),
+                None,
+            );
+        });
+
+    let webview = window
+        .add_child(
+            builder,
+            LogicalPosition::new(bounds.x, bounds.y),
+            LogicalSize::new(bounds.width, bounds.height),
+        )
+        .map_err(|error| error.to_string())?;
+    if !visible {
+        webview.hide().map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_preview_browser_bounds(
+    caller: Webview,
+    app: AppHandle,
+    label: String,
+    bounds: PreviewBrowserBounds,
+    visible: bool,
+) -> Result<(), String> {
+    ensure_main_caller(&caller)?;
+    let bounds = validate_bounds(bounds)?;
+    let webview = get_browser(&app, &label)?;
+    webview
+        .set_position(LogicalPosition::new(bounds.x, bounds.y))
+        .map_err(|error| error.to_string())?;
+    webview
+        .set_size(LogicalSize::new(bounds.width, bounds.height))
+        .map_err(|error| error.to_string())?;
+    if visible {
+        webview.show().map_err(|error| error.to_string())?;
+    } else {
+        webview.hide().map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_preview_browser_inspection(
+    caller: Webview,
+    app: AppHandle,
+    label: String,
+    mode: String,
+    feedback: Option<PreviewBrowserFeedback>,
+) -> Result<(), String> {
+    ensure_main_caller(&caller)?;
+    let mode = match mode.as_str() {
+        "design" | "source" => mode,
+        "off" => "off".to_string(),
+        _ => return Err("Unsupported Browser inspection mode.".into()),
+    };
+    let feedback = feedback.map(sanitize_feedback);
+    let mode_json = serde_json::to_string(&mode).map_err(|error| error.to_string())?;
+    let feedback_json = serde_json::to_string(&feedback).map_err(|error| error.to_string())?;
+    let script = format!(
+        r#"(() => {{
+  const bridge = window.__hormaPreviewInspection;
+  if (!bridge) return;
+  bridge.setMode({mode_json});
+  bridge.setFeedback({feedback_json});
+}})()"#
+    );
+    get_browser(&app, &label)?
+        .eval(script)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn set_preview_browser_inspection_chrome(
+    caller: Webview,
+    app: AppHandle,
+    label: String,
+    visible: bool,
+) -> Result<(), String> {
+    ensure_main_caller(&caller)?;
+    let script = format!(
+        "window.__hormaPreviewInspection?.setChromeVisible({})",
+        if visible { "true" } else { "false" }
+    );
+    get_browser(&app, &label)?
+        .eval(script)
+        .map_err(|error| error.to_string())
+}
+
+/// Capture only the user-selected rectangle from an isolated Browser tab.
+/// The caller cannot choose another window, expand beyond the visible page,
+/// or invoke arbitrary DevTools methods.
+#[tauri::command]
+pub async fn capture_preview_browser_selection(
+    caller: Webview,
+    app: AppHandle,
+    label: String,
+    region: DesignRect,
+) -> Result<String, String> {
+    ensure_main_caller(&caller)?;
+    let region = validate_capture_rect(region)?;
+    let webview = get_browser(&app, &label)?;
+
+    #[cfg(windows)]
+    {
+        // DOM inspection reports getBoundingClientRect() coordinates relative
+        // to the visible viewport. CDP screenshot clips use document offsets,
+        // so add the live visual-viewport scroll immediately before capture.
+        let metrics =
+            call_browser_devtools(&webview, "Page.getLayoutMetrics", serde_json::json!({})).await?;
+        let (page_x, page_y) = capture_page_offset(&metrics)?;
+        let response = call_browser_devtools(
+            &webview,
+            "Page.captureScreenshot",
+            serde_json::json!({
+                "format": "png",
+                "fromSurface": true,
+                "captureBeyondViewport": false,
+                "clip": {
+                    "x": page_x + region.x,
+                    "y": page_y + region.y,
+                    "width": region.width,
+                    "height": region.height,
+                    "scale": 1
+                }
+            }),
+        )
+        .await?;
+        response
+            .get("data")
+            .and_then(serde_json::Value::as_str)
+            .filter(|data| !data.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| "Browser screenshot data is missing.".to_string())
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = (webview, region);
+        Err("Browser feature screenshots are currently available on Windows only.".into())
+    }
+}
+
+#[tauri::command]
+pub async fn navigate_preview_browser(
+    caller: Webview,
+    app: AppHandle,
+    label: String,
+    url: String,
+) -> Result<(), String> {
+    ensure_main_caller(&caller)?;
+    let url = parse_browser_url(&url)?;
+    get_browser(&app, &label)?
+        .navigate(url)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn preview_browser_action(
+    caller: Webview,
+    app: AppHandle,
+    label: String,
+    action: String,
+) -> Result<(), String> {
+    ensure_main_caller(&caller)?;
+    let webview = get_browser(&app, &label)?;
+    match action.as_str() {
+        "back" => browser_history_action(&webview, false),
+        "forward" => browser_history_action(&webview, true),
+        "reload" => webview.reload().map_err(|error| error.to_string()),
+        "focus" => webview.set_focus().map_err(|error| error.to_string()),
+        _ => Err("Unsupported browser action.".into()),
+    }
+}
+
+#[tauri::command]
+pub async fn close_preview_browser(
+    caller: Webview,
+    app: AppHandle,
+    label: String,
+) -> Result<(), String> {
+    ensure_main_caller(&caller)?;
+    match get_browser(&app, &label) {
+        Ok(webview) => webview.close().map_err(|error| error.to_string()),
+        Err(error) if error.contains("no longer available") => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browser_urls_allow_only_credential_free_http_and_https() {
+        assert!(parse_browser_url("https://www.google.com/search?q=hormachuelos").is_ok());
+        assert!(parse_browser_url("http://localhost:3000").is_ok());
+        assert!(parse_browser_url("javascript:alert(1)").is_err());
+        assert!(parse_browser_url("file:///C:/Windows/System32/calc.exe").is_err());
+        assert!(parse_browser_url("data:text/html,unsafe").is_err());
+        assert!(parse_browser_url("https://user:secret@example.com").is_err());
+    }
+
+    #[test]
+    fn browser_labels_and_bounds_are_bounded() {
+        assert!(validate_label("preview-browser-42").is_ok());
+        assert!(validate_label("main").is_err());
+        assert!(validate_label("preview-browser-../main").is_err());
+        assert!(validate_bounds(PreviewBrowserBounds {
+            x: 200.0,
+            y: 100.0,
+            width: 900.0,
+            height: 600.0,
+        })
+        .is_ok());
+        assert!(validate_bounds(PreviewBrowserBounds {
+            x: -1.0,
+            y: 0.0,
+            width: 900.0,
+            height: 600.0,
+        })
+        .is_err());
+        assert!(validate_capture_rect(DesignRect {
+            x: 84.0,
+            y: 92.0,
+            width: 128.0,
+            height: 52.0,
+        })
+        .is_ok());
+        assert!(validate_capture_rect(DesignRect {
+            x: 0.0,
+            y: 0.0,
+            width: 5_000.0,
+            height: 52.0,
+        })
+        .is_err());
+        assert_eq!(
+            capture_page_offset(&serde_json::json!({
+                "cssVisualViewport": { "pageX": 12.5, "pageY": 845.0 }
+            }))
+            .unwrap(),
+            (12.5, 845.0)
+        );
+        assert!(capture_page_offset(&serde_json::json!({
+            "cssVisualViewport": { "pageX": -1.0, "pageY": 0.0 }
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn browser_inspection_navigation_is_bounded_and_typed() {
+        let payload = serde_json::json!({
+            "tag": "BUTTON",
+            "text": "  Publish   now  ",
+            "selector": "main > button.publish",
+            "domContext": {
+                "id": "publish",
+                "classes": ["publish", "primary"],
+                "role": "button",
+                "ariaLabel": "Publish",
+                "testId": "publish-action",
+                "name": "",
+                "href": "/api/publish",
+                "html": "<button class=\"publish primary\">Publish now</button>"
+            },
+            "rect": { "x": 84.0, "y": 92.0, "width": 128.0, "height": 52.0 },
+            "styleSelectors": ["button.publish", ".primary"],
+            "sourceFile": "src/components/PublishButton.tsx",
+            "sourceLine": 42,
+            "sourceColumn": 7
+        })
+        .to_string();
+        let mut url = tauri::Url::parse("horma-preview-inspect://target/select").unwrap();
+        url.query_pairs_mut().append_pair("payload", &payload);
+
+        let (kind, target) = inspection_navigation(&url).unwrap().unwrap();
+        let target = target.unwrap();
+        assert_eq!(kind, "inspect-select");
+        assert_eq!(target.tag, "button");
+        assert_eq!(target.text, "Publish now");
+        assert_eq!(target.dom_context.test_id, "publish-action");
+        assert_eq!(target.source_line, Some(42));
+
+        let regular = tauri::Url::parse("https://example.com").unwrap();
+        assert!(inspection_navigation(&regular).is_none());
+        let cancel = tauri::Url::parse("horma-preview-inspect://target/cancel").unwrap();
+        assert_eq!(
+            inspection_navigation(&cancel).unwrap().unwrap().0,
+            "inspect-cancel"
+        );
+    }
+}

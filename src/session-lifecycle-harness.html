@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Session lifecycle and FPS harness</title>
+    <link rel="stylesheet" href="/theme/tokens.css" />
+    <link rel="stylesheet" href="/theme/globals.css" />
+    <link rel="stylesheet" href="/app.css" />
+    <link rel="stylesheet" href="/theme/workspace.css" />
+    <style>
+      #app {
+        display: grid;
+        grid-template-rows: minmax(0, 1fr) auto;
+        height: 100vh;
+      }
+      #chat { min-height: 0; }
+    </style>
+  </head>
+  <body>
+    <main id="app" aria-label="Session lifecycle harness">
+      <section id="chat" class="chat" aria-live="polite"></section>
+      <section id="forge-dock" class="forge-dock" aria-label="Composer"></section>
+      <div id="toast" hidden></div>
+    </main>
+    <script type="module">
+      import { Chat } from "./components/chat.ts";
+      import { reconcileRunIds } from "./components/run-lifecycle.ts";
+
+      const noop = () => {};
+      const chat = new Chat({
+        onSend: noop,
+        onStop: noop,
+        onNeedProject: noop,
+        onOpenProject: noop,
+        onNewProject: noop,
+        onRevealProject: noop,
+        onOpenSettings: noop,
+        getSessionId: () => "session-lifecycle-harness",
+      });
+      chat.setProjectReady(true);
+
+      const batch = (id) => ({
+        type: "multi_agent_batch",
+        tools: [{ id, name: "read_file", arguments: { path: `src/${id}.ts` } }],
+      });
+
+      const stats = () => {
+        const root = document.getElementById("chat");
+        const text = root.innerText;
+        return {
+          busy: root.getAttribute("aria-busy"),
+          liveBadges: Array.from(root.querySelectorAll(".multi-agent-live")).map((node) => node.textContent),
+          workingRows: root.querySelectorAll(".multi-agent-tool.working").length,
+          runningBatches: root.querySelectorAll(".tool-batch-wrap.is-running").length,
+          workingLabels: (text.match(/\bagents? working\b/gi) || []).length,
+          shimmerLabels: root.querySelectorAll(".activity-shimmer").length,
+          perLetterNodes: root.querySelectorAll(".shine-ch").length,
+          stopVisible: Array.from(document.querySelectorAll("button")).some((button) =>
+            /stop|cancel this run/i.test(button.getAttribute("aria-label") || "") && !button.hidden,
+          ),
+          runningAnimations: document.getAnimations().filter((animation) => animation.playState === "running").length,
+          historyVisibility: getComputedStyle(root.querySelector(".multi-agent-batch") || root).contentVisibility,
+        };
+      };
+
+      const loadCompleted = (count = 1) => {
+        const messages = [{ type: "user", text: "Finish the requested project work." }];
+        for (let index = 0; index < count; index += 1) {
+          messages.push({ type: "run_start", permissionMode: "multi_agent" });
+          messages.push(batch(`completed-${index}`));
+          // Intentionally omit tool_call/result: this reproduces the recording's
+          // orphaned batch announcement and verifies terminal sealing.
+          messages.push({ type: "end", reason: "completed", workMs: 1200 });
+        }
+        chat.loadSession(messages);
+        chat.setRunning(false, { processQueue: false });
+        return stats();
+      };
+
+      const loadInterrupted = () => {
+        chat.loadSession([
+          { type: "user", text: "Inspect the project." },
+          { type: "run_start", permissionMode: "multi_agent" },
+          batch("interrupted"),
+          { type: "end", reason: "no_tool_calls", workMs: 500 },
+        ]);
+        chat.setRunning(false, { processQueue: false });
+        return stats();
+      };
+
+      const loadActive = () => {
+        chat.loadSession([
+          { type: "user", text: "Keep this run active." },
+          { type: "run_start", permissionMode: "multi_agent" },
+          batch("active"),
+          { type: "tool_call", id: "active", name: "read_file", arguments: { path: "src/active.ts" } },
+        ]);
+        chat.setRunning(true, { processQueue: false });
+        return stats();
+      };
+
+      const sampleFrames = (frames = 90) => new Promise((resolve) => {
+        const deltas = [];
+        let previous = performance.now();
+        const tick = (now) => {
+          deltas.push(now - previous);
+          previous = now;
+          if (deltas.length >= frames) {
+            const sorted = deltas.slice(5).sort((a, b) => a - b);
+            const percentile = (ratio) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * ratio))];
+            resolve({
+              averageMs: sorted.reduce((sum, value) => sum + value, 0) / sorted.length,
+              p95Ms: percentile(0.95),
+              maxMs: sorted[sorted.length - 1],
+            });
+            return;
+          }
+          requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      });
+
+      const compareAnimationModels = (labels = 40, characters = 60) => {
+        const makeHost = () => {
+          const host = document.createElement("div");
+          host.style.cssText = "position:fixed;left:-10000px;top:0;opacity:.01";
+          document.body.appendChild(host);
+          return host;
+        };
+
+        const legacy = makeHost();
+        for (let label = 0; label < labels; label += 1) {
+          const row = document.createElement("span");
+          for (let character = 0; character < characters; character += 1) {
+            const glyph = document.createElement("span");
+            glyph.textContent = "W";
+            glyph.style.animation = "lightningFadeInOutBlue 1.25s ease-in-out infinite";
+            row.appendChild(glyph);
+          }
+          legacy.appendChild(row);
+        }
+        const legacyAnimations = legacy.getAnimations({ subtree: true }).length;
+        const legacyNodes = legacy.querySelectorAll("span span").length;
+        legacy.remove();
+
+        const current = makeHost();
+        for (let label = 0; label < labels; label += 1) {
+          const row = document.createElement("span");
+          row.className = "activity-shimmer shine-blue";
+          row.textContent = "W".repeat(characters);
+          current.appendChild(row);
+        }
+        const currentAnimations = current.getAnimations({ subtree: true }).length;
+        const currentNodes = current.querySelectorAll("span").length;
+        current.remove();
+
+        return {
+          legacyAnimations,
+          currentAnimations,
+          legacyNodes,
+          currentNodes,
+          animationReduction: 1 - currentAnimations / legacyAnimations,
+        };
+      };
+
+      window.__sessionLifecycleHarness = {
+        loadCompleted,
+        loadInterrupted,
+        loadActive,
+        stats,
+        sampleFrames,
+        compareAnimationModels,
+        reconcileRunIds: () => {
+          const result = reconcileRunIds(
+            ["native-active", "still-starting", "stale-finished"],
+            ["native-active", "native-restored"],
+            ["still-starting"],
+          );
+          return {
+            activeIds: [...result.activeIds].sort(),
+            releasedIds: result.releasedIds.sort(),
+          };
+        },
+      };
+    </script>
+  </body>
+</html>

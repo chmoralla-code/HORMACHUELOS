@@ -20,9 +20,9 @@ pre, code, textarea, input, .msg-body, .console-body, .viewer-content { user-sel
 
 ::-webkit-scrollbar { width: 9px; height: 9px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #30352d; border: 2px solid transparent; background-clip: padding-box; border-radius: 9px; }
-::-webkit-scrollbar-thumb:hover { background: #444a40; border: 2px solid transparent; background-clip: padding-box; }
-::selection { background: rgba(255, 180, 84, 0.28); color: var(--text); }
+::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border: 2px solid transparent; background-clip: padding-box; border-radius: 9px; }
+::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); border: 2px solid transparent; background-clip: padding-box; }
+::selection { background: var(--selection); color: var(--text); }
 
 button, input, textarea, select {
   font: inherit;
@@ -86,7 +86,7 @@ select:focus-visible,
   transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease), color var(--dur) var(--ease);
 }
 .btn:hover { background: var(--elevated); color: var(--text); border-color: var(--border-strong); }
-.btn.primary { background: var(--ember); color: #211506; border-color: var(--ember); }
+.btn.primary { background: var(--ember); color: var(--on-accent); border-color: var(--ember); }
 .btn.primary:hover { background: var(--ember-strong); border-color: var(--ember-strong); }
 .btn.danger { color: var(--danger); }
 .btn.danger:hover { background: rgba(255, 120, 108, 0.09); border-color: rgba(255, 120, 108, 0.3); }
@@ -141,18 +141,18 @@ select, select option { background: var(--raised); color: var(--text); }
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
-  /* Keep working three-dots wave looping even when reduced motion is on */
+  /* A static state remains clear and avoids background compositor work. */
   .thinking-simple .dots span,
   .thinking-running .dots span,
   .thinking-dots-btn .dots span,
   .thinking-wrap.thinking-wave-live .dots span,
   .tool-wave-dots span,
   .thinking-simple .dots span::before {
-    animation-name: thinkingDotWave !important;
-    animation-duration: 0.9s !important;
-    animation-iteration-count: infinite !important;
+    animation: none !important;
+    opacity: 0.72 !important;
+    transform: none !important;
   }
-  /* Letter-by-letter shine — keep looping under reduced motion */
+  /* Live labels are one DOM node; reduced motion keeps the color, not motion. */
   .thinking-wrap:not(.thinking-done) .thinking-toggle-row .thinking-simple-label,
   .thinking-wrap:not(.thinking-done) .thinking-simple-label,
   .tool-batch-wrap.is-running .tool-batch-label,
@@ -167,20 +167,6 @@ select, select option { background: var(--raised); color: var(--text); }
     background-clip: unset !important;
     -webkit-text-fill-color: unset !important;
     color: rgba(175, 175, 175, 0.88) !important;
-  }
-  .activity-shimmer .shine-ch,
-  .thinking-wrap:not(.thinking-done) .shine-ch,
-  .tool-batch-wrap.is-running .shine-ch,
-  .tool-card.pending .shine-ch,
-  .thinking-running .shine-ch,
-  .shine-ch.shine-red,
-  .activity-shimmer.shine-red .shine-ch {
-    animation-name: letterShineRed !important;
-    animation-duration: 1.25s !important;
-    animation-timing-function: ease-in-out !important;
-    animation-iteration-count: infinite !important;
-    color: #c44a44 !important;
-    -webkit-text-fill-color: currentColor !important;
   }
   .activity-shimmer.shine-red,
   .thinking-wrap:not(.thinking-done) .thinking-simple-label.shine-red,

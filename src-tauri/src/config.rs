@@ -66,6 +66,10 @@ pub struct Settings {
     /// user can turn it off from Settings for a lighter direct-response flow.
     #[serde(default = "default_smart_agent_enabled")]
     pub smart_agent_enabled: bool,
+    /// Provider-neutral, local-first project and session memory.
+    /// Defaults on after upgrades and can be disabled independently of Smart Agent.
+    #[serde(default = "default_flavour_enabled")]
+    pub flavour_enabled: bool,
 }
 
 fn default_permission_mode() -> String {
@@ -81,6 +85,10 @@ fn default_model_effort() -> String {
 }
 
 fn default_smart_agent_enabled() -> bool {
+    true
+}
+
+fn default_flavour_enabled() -> bool {
     true
 }
 
@@ -137,6 +145,7 @@ impl Default for Settings {
             model_effort: default_model_effort(),
             computer_use_enabled: false,
             smart_agent_enabled: default_smart_agent_enabled(),
+            flavour_enabled: default_flavour_enabled(),
         }
     }
 }
@@ -681,6 +690,11 @@ mod tests {
     #[test]
     fn computer_use_is_opt_in() {
         assert!(!Settings::default().computer_use_enabled);
+    }
+
+    #[test]
+    fn flavour_memory_is_enabled_by_default() {
+        assert!(Settings::default().flavour_enabled);
     }
 
     #[test]

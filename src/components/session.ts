@@ -3,9 +3,21 @@
 import { normalizeAssistantMarkdown } from "./util";
 
 export type SessionMessage =
-  | { type: "user"; text: string; at?: number }
+  | {
+      type: "user";
+      /** Text rendered in the transcript. */
+      text: string;
+      /** Optional private model context, never rendered or copied from the chat bubble. */
+      agentText?: string;
+      at?: number;
+    }
   /** Restores the visual run mode when a transcript is opened again. */
-  | { type: "run_start"; permissionMode: "plan" | "multi_agent"; at?: number }
+  | {
+      type: "run_start";
+      permissionMode: "plan" | "multi_agent";
+      executionProfile?: "fast" | "balanced" | "thorough" | "safe";
+      at?: number;
+    }
   /** Keeps the visual Multi-Agent activity batch with the session it belongs to. */
   | { type: "multi_agent_batch"; tools: SessionMultiAgentTool[]; at?: number }
   | { type: "thinking"; iteration: number; text: string; at?: number }
@@ -25,11 +37,62 @@ export type SessionMultiAgentTool = {
 };
 
 /**
+ * Store one streamed assistant chunk while preserving intentional transcript
+ * boundaries. Provider recovery can insert thinking/status events between a
+ * cut-off prefix and its resumed suffix; `resumePrevious` reconnects only that
+ * explicitly marked suffix to the latest assistant message in the same run.
+ */
+export function appendAssistantTranscriptChunk(
+  messages: SessionMessage[],
+  text: string,
+  at?: number,
+  resumePrevious = false,
+): void {
+  if (!text) return;
+
+  let assistantIndex = -1;
+  const lastIndex = messages.length - 1;
+  if (lastIndex >= 0 && messages[lastIndex].type === "assistant") {
+    assistantIndex = lastIndex;
+  } else if (resumePrevious) {
+    for (let index = lastIndex; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (message.type === "assistant") {
+        assistantIndex = index;
+        break;
+      }
+      // Never let a recovery marker reach into a prior run or user turn.
+      if (
+        message.type === "user" ||
+        message.type === "run_start" ||
+        message.type === "question" ||
+        message.type === "done" ||
+        message.type === "end" ||
+        message.type === "cancelled"
+      ) {
+        break;
+      }
+    }
+  }
+
+  if (assistantIndex >= 0) {
+    const message = messages[assistantIndex] as Extract<SessionMessage, { type: "assistant" }>;
+    message.text += text;
+    message.at = at;
+    return;
+  }
+
+  messages.push({ type: "assistant", text, at });
+}
+
+/**
  * The preview workspace belongs to a conversation, rather than to the whole
  * project.  Only file-relative paths are kept here; live iframe DOM is always
  * recreated when that session becomes visible again.
  */
 export interface SessionPreviewTab {
+  /** Missing on older sessions, where every tab was a project preview. */
+  kind?: "preview" | "browser";
   entryPath: string;
   title: string;
   history: string[];
@@ -42,6 +105,8 @@ export interface SessionPreviewState {
   tabs: SessionPreviewTab[];
   activeTabIndex: number;
   designMode: boolean;
+  /** Separate source-aware selection mode; absent in sessions from older releases. */
+  sourceLensMode?: boolean;
   androidMode: boolean;
   softwareMode: boolean;
 }
@@ -135,6 +200,7 @@ const CONTEXTUAL_CREDENTIAL =
 const SESSION_PREVIEW_MAX_TABS = 12;
 const SESSION_PREVIEW_MAX_HISTORY = 32;
 const SESSION_PREVIEW_PATH_MAX = 768;
+const SESSION_PREVIEW_URL_MAX = 4_096;
 const SESSION_PREVIEW_ROOT_MAX = 2_048;
 
 function projectPathKey(value: unknown): string {
@@ -248,6 +314,13 @@ export function normalizeSessionPermissionMode(value: unknown): "plan" | "multi_
 function redactSessionMessage(message: SessionMessage): SessionMessage {
   switch (message.type) {
     case "user":
+      return {
+        ...message,
+        text: redactChatCredentials(message.text),
+        agentText: message.agentText
+          ? redactChatCredentials(message.agentText)
+          : undefined,
+      };
     case "assistant":
     case "thinking":
       return { ...message, text: redactChatCredentials(message.text) };
@@ -307,6 +380,20 @@ function sanitizePreviewPath(value: unknown): string | null {
   return parts.length ? parts.join("/") : null;
 }
 
+/** Persist only ordinary credential-free web URLs for native Browser tabs. */
+function sanitizeBrowserUrl(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const raw = value.trim();
+  if (!raw || raw.length > SESSION_PREVIEW_URL_MAX || raw.includes("\0")) return null;
+  try {
+    const url = new URL(raw);
+    if (!/^https?:$/.test(url.protocol) || !url.hostname || url.username || url.password) return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
 function sanitizeSessionPreview(value: unknown): SessionPreviewState | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const raw = value as Record<string, unknown>;
@@ -321,15 +408,18 @@ function sanitizeSessionPreview(value: unknown): SessionPreviewState | undefined
   for (const candidate of rawTabs) {
     if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
     const tab = candidate as Record<string, unknown>;
+    const kind = tab.kind === "browser" ? "browser" : "preview";
+    const sanitizeEntry = kind === "browser" ? sanitizeBrowserUrl : sanitizePreviewPath;
     const rawHistory = Array.isArray(tab.history)
       ? tab.history.slice(0, SESSION_PREVIEW_MAX_HISTORY)
       : [];
     const history = rawHistory
-      .map(sanitizePreviewPath)
+      .map(sanitizeEntry)
       .filter((path): path is string => Boolean(path));
-    const entryPath = sanitizePreviewPath(tab.entryPath) || history[0];
-    if (!entryPath || seenEntries.has(entryPath)) continue;
-    seenEntries.add(entryPath);
+    const entryPath = sanitizeEntry(tab.entryPath) || history[0];
+    const entryKey = `${kind}:${entryPath || ""}`;
+    if (!entryPath || seenEntries.has(entryKey)) continue;
+    seenEntries.add(entryKey);
     if (!history.length) history.push(entryPath);
     const requestedIndex = Math.floor(Number(tab.historyIndex) || 0);
     const historyIndex = Math.max(0, Math.min(history.length - 1, requestedIndex));
@@ -337,6 +427,7 @@ function sanitizeSessionPreview(value: unknown): SessionPreviewState | undefined
       ? redactChatCredentials(tab.title.trim()).slice(0, 160)
       : entryPath.split("/").pop() || entryPath;
     tabs.push({
+      kind,
       entryPath: history[historyIndex] || entryPath,
       title,
       history,
@@ -353,6 +444,7 @@ function sanitizeSessionPreview(value: unknown): SessionPreviewState | undefined
       ? Math.max(0, Math.min(tabs.length - 1, requestedActive))
       : 0,
     designMode: raw.designMode === true,
+    sourceLensMode: raw.sourceLensMode === true,
     androidMode: raw.androidMode === true,
     softwareMode: raw.softwareMode === true,
   };
@@ -579,6 +671,49 @@ function safeSessionForStorage(session: Session): Session {
   };
 }
 
+/**
+ * Build the session portion of the native pre-update backup without requiring
+ * another localStorage write. A full or temporarily unavailable WebView store
+ * must not prevent the already in-memory transcript from being handed to the
+ * host-owned recovery file.
+ */
+export function snapshotSessionsForUpdate(currentSessions: Iterable<Session>): Record<string, string> {
+  const merged = new Map<string, Session>();
+  const add = (candidate: unknown) => {
+    if (!candidate || typeof candidate !== "object") return;
+    const session = candidate as Partial<Session>;
+    if (
+      typeof session.id !== "string" || !session.id.trim() ||
+      typeof session.title !== "string" ||
+      typeof session.projectId !== "string" || !session.projectId.trim() ||
+      !Array.isArray(session.messages) ||
+      !Number.isFinite(session.createdAt)
+    ) {
+      return;
+    }
+    try {
+      const safe = safeSessionForStorage(session as Session);
+      merged.set(safe.id, safe);
+    } catch {
+      // One corrupt legacy session must not prevent the remaining sessions
+      // from reaching the native update backup.
+    }
+  };
+
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    const stored: unknown = raw ? JSON.parse(raw) : [];
+    if (Array.isArray(stored)) stored.forEach(add);
+  } catch {
+    // Reads can also be denied by a damaged WebView profile. The in-memory
+    // registry and pending-save queue below remain enough to protect live work.
+  }
+  for (const session of pendingSessionSaves.values()) add(session);
+  for (const session of currentSessions) add(session);
+
+  return { [STORAGE_KEY]: JSON.stringify([...merged.values()]) };
+}
+
 function sanitizeSessionModelId(value: unknown, max: number): string | undefined {
   if (typeof value !== "string") return undefined;
   const text = value.trim();
@@ -617,15 +752,6 @@ export function saveSession(session: Session): void {
   if (!writeSessions([session])) pendingSessionSaves.set(session.id, session);
 }
 
-/** Persist synchronously or block an update rather than claiming data is safe. */
-export function saveSessionForUpdate(session: Session): void {
-  pendingSessionSaves.delete(session.id);
-  clearSessionSaveTimerIfIdle();
-  if (writeSessions([session])) return;
-  pendingSessionSaves.set(session.id, session);
-  throw new Error("Session storage is unavailable or full. Free some disk space, then try updating again.");
-}
-
 /** Debounced persistence for high-frequency streamed text/reasoning events. */
 export function scheduleSessionSave(session: Session): void {
   pendingSessionSaves.set(session.id, session);
@@ -644,20 +770,6 @@ export function flushSessionSaves(): void {
   if (pendingSessionSaves.size === 0) return;
   const queued = [...pendingSessionSaves.values()];
   if (!writeSessions(queued)) return;
-  for (const session of queued) pendingSessionSaves.delete(session.id);
-}
-
-/** Flush every queued session or abort the update with a visible error. */
-export function flushSessionSavesForUpdate(): void {
-  if (sessionSaveTimer !== null) {
-    clearTimeout(sessionSaveTimer);
-    sessionSaveTimer = null;
-  }
-  if (pendingSessionSaves.size === 0) return;
-  const queued = [...pendingSessionSaves.values()];
-  if (!writeSessions(queued)) {
-    throw new Error("Queued session data could not be saved. Free some disk space, then try updating again.");
-  }
   for (const session of queued) pendingSessionSaves.delete(session.id);
 }
 
@@ -760,7 +872,10 @@ export function buildLlmHistory(messages: SessionMessage[], currentPrompt: strin
   let list = messages.slice();
   if (list.length > 0) {
     const last = list[list.length - 1];
-    if (last.type === "user" && last.text.trim() === currentPrompt.trim()) {
+    if (
+      last.type === "user" &&
+      (last.agentText || last.text).trim() === currentPrompt.trim()
+    ) {
       list = list.slice(0, -1);
     }
   }
@@ -803,7 +918,7 @@ export function buildLlmHistory(messages: SessionMessage[], currentPrompt: strin
     switch (msg.type) {
       case "user":
         pendingTool = null;
-        pushUser(msg.text);
+        pushUser(msg.agentText || msg.text);
         break;
       case "assistant":
         pendingTool = null;
@@ -893,6 +1008,7 @@ export function recordAgentEvent(
       messages.push({
         type: "run_start",
         permissionMode: normalizeSessionPermissionMode(e.payload?.permission_mode),
+        executionProfile: e.payload?.execution_profile,
         at,
       });
       break;
@@ -921,13 +1037,12 @@ export function recordAgentEvent(
     }
     case "text": {
       const safeText = redactChatCredentials(e.payload.text || "");
-      const last = messages[messages.length - 1];
-      if (last && last.type === "assistant") {
-        last.text = redactChatCredentials(last.text + safeText);
-        last.at = at;
-      } else {
-        messages.push({ type: "assistant", text: safeText, at });
-      }
+      appendAssistantTranscriptChunk(
+        messages,
+        safeText,
+        at,
+        e.payload.continuation === true,
+      );
       break;
     }
     case "tool_call":

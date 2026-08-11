@@ -1,4 +1,12 @@
-import { api, type AgentEvent, type FilePreview, type ProjectNode, type ProjectTree } from "../ipc";
+import {
+  api,
+  type AgentEvent,
+  type AgentExecutionProfile,
+  type CheckpointSummary,
+  type FilePreview,
+  type ProjectNode,
+  type ProjectTree,
+} from "../ipc";
 import { clear, el } from "./util";
 import { icon } from "./icons";
 
@@ -11,6 +19,29 @@ const MUTATING_TOOLS = new Set([
   "write_file", "edit_file", "move_file", "copy_file", "delete_file",
   "make_dir", "download_file", "git_commit", "git_add_all",
 ]);
+
+const EXECUTION_PROFILE_STORAGE_KEY = "hormachuelos.execution-profile.v1";
+const EXECUTION_PROFILES: {
+  id: AgentExecutionProfile;
+  label: string;
+  description: string;
+}[] = [
+  { id: "auto", label: "Auto", description: "Routes small edits to Fast and risky work to Safe." },
+  { id: "fast", label: "Fast", description: "Smallest context, cheapest check, one focused repair." },
+  { id: "balanced", label: "Balanced", description: "Focused implementation with relevant validation." },
+  { id: "thorough", label: "Thorough", description: "Deeper inspection and stronger verification." },
+  { id: "safe", label: "Safe", description: "Also snapshots relevant project files around commands." },
+];
+
+function loadExecutionProfile(): AgentExecutionProfile {
+  try {
+    const value = localStorage.getItem(EXECUTION_PROFILE_STORAGE_KEY) as AgentExecutionProfile | null;
+    if (EXECUTION_PROFILES.some((profile) => profile.id === value)) return value!;
+  } catch {
+    // WebView storage can be unavailable in isolated test harnesses.
+  }
+  return "auto";
+}
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -55,6 +86,9 @@ export class WorkspacePanel {
   private chat = document.getElementById("chat")!;
   private treeRoot!: HTMLElement;
   private changesRoot!: HTMLElement;
+  private checkpointRoot!: HTMLElement;
+  private checkpointNotice!: HTMLElement;
+  private executionProfileRoot!: HTMLElement;
   private searchInput!: HTMLInputElement;
   private fileCount!: HTMLElement;
   private fileNotice!: HTMLElement;
@@ -68,7 +102,11 @@ export class WorkspacePanel {
   private refreshTimer: number | null = null;
   private finishing = false;
   private fileActionInFlight = false;
+  private checkpointActionInFlight = false;
   private activePreview: FilePreview | null = null;
+  private executionProfile: AgentExecutionProfile = loadExecutionProfile();
+  private checkpoints: CheckpointSummary[] = [];
+  private activeRunSessionId: string | null = null;
 
   constructor() {
     this.buildFilesPanel();
@@ -127,9 +165,37 @@ export class WorkspacePanel {
 
   private buildChangesPanel() {
     clear(this.changesPanel);
+    const profile = el("section", { class: "execution-profile-card", "aria-label": "Agent execution profile" });
+    const profileHead = el("div", { class: "execution-profile-head" });
+    profileHead.append(
+      el("div", { class: "execution-profile-title" }, ["Execution profile"]),
+      el("div", { class: "execution-profile-current", "aria-live": "polite" }),
+    );
+    this.executionProfileRoot = el("div", { class: "execution-profile-options", role: "group", "aria-label": "Execution profile" });
+    for (const option of EXECUTION_PROFILES) {
+      const button = el("button", {
+        class: "execution-profile-option",
+        type: "button",
+        title: option.description,
+        "data-execution-profile": option.id,
+        "aria-pressed": String(option.id === this.executionProfile),
+      }, [option.label]) as HTMLButtonElement;
+      button.addEventListener("click", () => this.setExecutionProfile(option.id));
+      this.executionProfileRoot.appendChild(button);
+    }
+    profile.append(profileHead, this.executionProfileRoot, el("p", { class: "execution-profile-description" }));
+
+    const checkpointSection = el("section", { class: "checkpoint-section", "aria-label": "Rollback checkpoint" });
+    checkpointSection.appendChild(el("div", { class: "checkpoint-section-title" }, ["Run checkpoint"]));
+    this.checkpointNotice = el("div", { class: "checkpoint-notice", role: "status", hidden: "" });
+    this.checkpointRoot = el("div", { class: "checkpoint-root", "aria-live": "polite" });
+    checkpointSection.append(this.checkpointNotice, this.checkpointRoot);
+
     const intro = el("div", { class: "changes-intro" }, ["Files touched during the current or most recent run."]);
     this.changesRoot = el("div", { class: "changes-list", "aria-live": "polite" });
-    this.changesPanel.append(intro, this.changesRoot);
+    this.changesPanel.append(profile, checkpointSection, intro, this.changesRoot);
+    this.renderExecutionProfile();
+    this.renderCheckpoint();
     this.renderChanges();
   }
 
@@ -148,6 +214,34 @@ export class WorkspacePanel {
     this.viewer.append(head, content);
   }
 
+  getExecutionProfile(): AgentExecutionProfile {
+    return this.executionProfile;
+  }
+
+  private setExecutionProfile(profile: AgentExecutionProfile) {
+    this.executionProfile = profile;
+    try {
+      localStorage.setItem(EXECUTION_PROFILE_STORAGE_KEY, profile);
+    } catch {
+      // Keep the in-memory selection when persistence is unavailable.
+    }
+    this.renderExecutionProfile();
+  }
+
+  private renderExecutionProfile() {
+    if (!this.executionProfileRoot) return;
+    const selected = EXECUTION_PROFILES.find((profile) => profile.id === this.executionProfile) || EXECUTION_PROFILES[0];
+    this.executionProfileRoot.querySelectorAll<HTMLButtonElement>("[data-execution-profile]").forEach((button) => {
+      const active = button.dataset.executionProfile === selected.id;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", String(active));
+    });
+    const current = this.changesPanel.querySelector<HTMLElement>(".execution-profile-current");
+    const description = this.changesPanel.querySelector<HTMLElement>(".execution-profile-description");
+    if (current) current.textContent = selected.label;
+    if (description) description.textContent = selected.description;
+  }
+
   async setProject(path: string | null) {
     this.projectPath = path;
     document.body.classList.toggle("has-project", Boolean(path));
@@ -156,8 +250,14 @@ export class WorkspacePanel {
     this.setFileNotice();
     this.expanded.clear();
     this.changes.clear();
+    this.checkpoints = [];
+    this.activeRunSessionId = null;
+    this.setCheckpointNotice();
+    this.renderCheckpoint();
     this.renderChanges();
-    if (path) await this.refresh();
+    if (path) {
+      await Promise.all([this.refresh(), this.refreshCheckpoints()]);
+    }
     else this.renderNoProject();
   }
 
@@ -401,6 +501,118 @@ export class WorkspacePanel {
     }
   }
 
+  private setCheckpointNotice(message = "", kind: "success" | "error" = "success") {
+    if (!this.checkpointNotice) return;
+    this.checkpointNotice.hidden = !message;
+    this.checkpointNotice.className = `checkpoint-notice${message ? ` ${kind}` : ""}`;
+    this.checkpointNotice.textContent = message;
+  }
+
+  private async refreshCheckpoints() {
+    if (!this.projectPath) {
+      this.checkpoints = [];
+      this.renderCheckpoint();
+      return;
+    }
+    try {
+      this.checkpoints = await api.listRunCheckpoints(this.projectPath);
+    } catch (error) {
+      this.checkpoints = [];
+      this.setCheckpointNotice(`Could not load rollback checkpoints: ${String(error)}`, "error");
+    }
+    this.renderCheckpoint();
+  }
+
+  private renderCheckpoint() {
+    if (!this.checkpointRoot) return;
+    clear(this.checkpointRoot);
+    const checkpoint = (this.activeRunSessionId
+      ? this.checkpoints.find((item) => item.sessionId === this.activeRunSessionId && (item.actionCount > 0 || item.status === "active"))
+      : undefined)
+      || this.checkpoints.find((item) => item.actionCount > 0 || item.status === "active")
+      || this.checkpoints[0];
+    if (!checkpoint) {
+      this.checkpointRoot.appendChild(el("div", { class: "inspector-state compact" }, [
+        this.projectPath ? "The next agent run will create a rollback checkpoint." : "Open a project to use rollback.",
+      ]));
+      return;
+    }
+
+    const card = el("div", { class: `checkpoint-card status-${checkpoint.status.replaceAll("_", "-")}` });
+    const head = el("div", { class: "checkpoint-card-head" });
+    const identity = el("div", { class: "checkpoint-card-identity" });
+    identity.append(
+      el("strong", {}, [`${checkpoint.profile.slice(0, 1).toUpperCase()}${checkpoint.profile.slice(1)} run`]),
+      el("span", {}, [checkpoint.status.replaceAll("_", " ")]),
+    );
+    const count = checkpoint.actionCount === 1 ? "1 protected action" : `${checkpoint.actionCount} protected actions`;
+    head.append(identity, el("span", { class: "checkpoint-count" }, [count]));
+    card.appendChild(head);
+
+    const detailParts = [`${checkpoint.protectedPaths} path${checkpoint.protectedPaths === 1 ? "" : "s"}`];
+    if (checkpoint.conflictCount) detailParts.push(`${checkpoint.conflictCount} conflict${checkpoint.conflictCount === 1 ? "" : "s"}`);
+    card.appendChild(el("div", { class: "checkpoint-detail" }, [detailParts.join(" · ")]));
+    if (checkpoint.commandSideEffectsUnprotected || checkpoint.unprotectedActions > 0) {
+      const caveat = checkpoint.unprotectedActions > 0
+        ? `${checkpoint.unprotectedActions} action${checkpoint.unprotectedActions === 1 ? "" : "s"} targeted paths outside this project and cannot be restored here.`
+        : "Direct file changes are protected. Shell-command side effects need Safe profile coverage.";
+      card.appendChild(el("div", { class: "checkpoint-caveat" }, [
+        caveat,
+      ]));
+    }
+
+    const actions = el("div", { class: "checkpoint-actions" });
+    const unavailable = this.checkpointActionInFlight
+      || checkpoint.status === "active"
+      || checkpoint.actionCount === 0
+      || checkpoint.status === "rolled_back";
+    const undoLast = el("button", { class: "btn sm", type: "button" }, ["Undo last"]) as HTMLButtonElement;
+    const rollback = el("button", { class: "btn sm danger", type: "button" }, ["Roll back run"]) as HTMLButtonElement;
+    undoLast.disabled = unavailable;
+    rollback.disabled = unavailable;
+    undoLast.addEventListener("click", () => void this.requestCheckpointRollback(checkpoint, "last_action"));
+    rollback.addEventListener("click", () => void this.requestCheckpointRollback(checkpoint, "run"));
+    actions.append(undoLast, rollback);
+    card.appendChild(actions);
+    this.checkpointRoot.appendChild(card);
+  }
+
+  private async requestCheckpointRollback(
+    checkpoint: CheckpointSummary,
+    scope: "last_action" | "run",
+  ) {
+    if (this.checkpointActionInFlight) return;
+    const entireRun = scope === "run";
+    const confirmed = await this.confirmProjectFileAction({
+      title: entireRun ? "Roll back this agent run?" : "Undo the latest agent action?",
+      description: entireRun
+        ? "Agent-owned file changes will be restored from the checkpoint. Files edited afterward are preserved as conflicts. Shell commands and external services may have effects outside this checkpoint."
+        : "Only the most recent recorded file action will be restored. Newer user edits are preserved as conflicts.",
+      confirmLabel: entireRun ? "Roll back run" : "Undo last action",
+    });
+    if (!confirmed) return;
+
+    this.checkpointActionInFlight = true;
+    this.renderCheckpoint();
+    this.setCheckpointNotice(entireRun ? "Rolling back protected changes…" : "Undoing the latest protected action…");
+    try {
+      const result = await api.rollbackRunCheckpoint(checkpoint.id, scope);
+      const conflictDetail = result.conflicts.length ? ` ${result.conflicts.slice(0, 3).join("; ")}` : "";
+      this.setCheckpointNotice(
+        `${result.message}${conflictDetail}`,
+        result.conflicts.length ? "error" : "success",
+      );
+      this.changes.clear();
+      this.addChange("Rollback", "command", result.message);
+      await Promise.all([this.refresh(), this.refreshCheckpoints()]);
+    } catch (error) {
+      this.setCheckpointNotice(`Rollback could not be completed: ${String(error)}`, "error");
+    } finally {
+      this.checkpointActionInFlight = false;
+      this.renderCheckpoint();
+    }
+  }
+
   private activateTab(tab: InspectorTab) {
     this.inspector.querySelectorAll<HTMLButtonElement>("[data-inspector-tab]").forEach((button) => {
       const active = button.dataset.inspectorTab === tab;
@@ -413,7 +625,8 @@ export class WorkspacePanel {
     document.getElementById("console-panel")!.hidden = tab !== "console";
   }
 
-  async beginRun() {
+  async beginRun(sessionId?: string) {
+    this.activeRunSessionId = sessionId || null;
     if (!this.tree && this.projectPath) await this.refresh();
     this.baseline = flattenTree(this.tree?.nodes || []);
     this.changes.clear();
@@ -422,7 +635,10 @@ export class WorkspacePanel {
   }
 
   handleAgentEvent(event: AgentEvent) {
-    if (event.kind === "tool_call") {
+    if (event.kind === "start") {
+      this.activeRunSessionId = event.session_id || this.activeRunSessionId;
+      void this.refreshCheckpoints();
+    } else if (event.kind === "tool_call") {
       this.pendingCalls.set(event.payload.id, { name: event.payload.name, args: event.payload.arguments || {} });
     } else if (event.kind === "tool_result") {
       const call = this.pendingCalls.get(event.payload.id);
@@ -463,18 +679,22 @@ export class WorkspacePanel {
   }
 
   async finishRun() {
-    if (!this.baseline || this.finishing) return;
+    if (this.finishing) return;
     this.finishing = true;
     try {
-      await this.refresh();
-      const current = flattenTree(this.tree?.nodes || []);
-      for (const [path, signature] of current) {
-        if (!this.baseline.has(path)) this.addChange(path, "added", "Created during run");
-        else if (this.baseline.get(path) !== signature) this.addChange(path, "modified", "Changed during run");
+      if (this.baseline) {
+        await this.refresh();
+        const current = flattenTree(this.tree?.nodes || []);
+        for (const [path, signature] of current) {
+          if (!this.baseline.has(path)) this.addChange(path, "added", "Created during run");
+          else if (this.baseline.get(path) !== signature) this.addChange(path, "modified", "Changed during run");
+        }
+        for (const path of this.baseline.keys()) if (!current.has(path)) this.addChange(path, "deleted", "Deleted during run");
+        this.baseline = null;
+        this.renderChanges();
       }
-      for (const path of this.baseline.keys()) if (!current.has(path)) this.addChange(path, "deleted", "Deleted during run");
-      this.baseline = null;
-      this.renderChanges();
+      await this.refreshCheckpoints();
+      this.activeRunSessionId = null;
     } finally {
       this.finishing = false;
     }

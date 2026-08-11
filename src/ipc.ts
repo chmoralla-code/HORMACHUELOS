@@ -21,6 +21,8 @@ export type Settings = {
   computer_use_enabled: boolean;
   /** Keep long build tasks on a durable plan and request a final verification pass. */
   smart_agent_enabled: boolean;
+  /** Recall bounded project preferences and private per-session working memory. */
+  flavour_enabled: boolean;
   /** Cursor SDK effort: light | medium | high | xhigh | ultra */
   model_effort?: string;
 };
@@ -30,6 +32,33 @@ export type AgentTaskProfile =
   | "default"
   | "design_edit"
   | "design_edit_fast";
+
+/** Speed, verification, and rollback policy; Auto is resolved by the host. */
+export type AgentExecutionProfile = "auto" | "fast" | "balanced" | "thorough" | "safe";
+
+export type CheckpointSummary = {
+  id: string;
+  sessionId: string;
+  projectRoot: string;
+  profile: Exclude<AgentExecutionProfile, "auto">;
+  status: string;
+  actionCount: number;
+  protectedPaths: number;
+  conflictCount: number;
+  commandSideEffectsUnprotected: boolean;
+  unprotectedActions: number;
+  createdAtMs: number;
+  finishedAtMs: number | null;
+};
+
+export type RollbackResult = {
+  checkpointId: string;
+  rolledBackActions: number;
+  restoredPaths: number;
+  conflicts: string[];
+  status: string;
+  message: string;
+};
 
 export type Provider = "deepseek" | "openrouter" | "glm" | "openai" | "cursor" | "hormachuelos_free" | "anthropic" | "gemini" | "ollama" | "pollinations";
 
@@ -101,10 +130,104 @@ export type FilePreview = {
   language: string;
 };
 
+export type DesignDomContext = {
+  id: string;
+  classes: string[];
+  role: string;
+  ariaLabel: string;
+  testId: string;
+  name: string;
+  href: string;
+  html: string;
+};
+
+export type DesignTargetProbe = {
+  previewUrl: string;
+  point?: { x: number; y: number } | null;
+  tag?: string;
+  text?: string;
+  selector?: string;
+  domContext?: DesignDomContext | null;
+  styleSelectors?: string[];
+  sourceFile?: string;
+  sourceLine?: number | null;
+  sourceColumn?: number | null;
+};
+
+export type DesignSourceLocation = {
+  path: string;
+  line: number;
+  column?: number | null;
+  kind: "frontend" | "style" | "backend";
+  confidence: "exact" | "strong" | "likely";
+  symbol?: string | null;
+};
+
+export type DesignTargetResolution = {
+  tag: string;
+  text: string;
+  selector: string;
+  domContext: DesignDomContext;
+  rect?: { x: number; y: number; width: number; height: number } | null;
+  sources: DesignSourceLocation[];
+  inspectedBy: "webview" | "dom" | "visual";
+  indexPartial: boolean;
+};
+
+export type PreviewBrowserBounds = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+export type PreviewBrowserTarget = {
+  tag: string;
+  text: string;
+  selector: string;
+  domContext: DesignDomContext;
+  rect: { x: number; y: number; width: number; height: number };
+  styleSelectors: string[];
+  sourceFile: string;
+  sourceLine?: number | null;
+  sourceColumn?: number | null;
+};
+
+export type PreviewBrowserFeedback = {
+  selector: string;
+  lines: Array<{
+    kind: "frontend" | "style" | "backend" | "likely" | "target";
+    text: string;
+  }>;
+};
+
+export type PreviewBrowserEvent = {
+  label: string;
+  kind:
+    | "loading"
+    | "ready"
+    | "title"
+    | "popup"
+    | "blocked"
+    | "inspect-hover"
+    | "inspect-select"
+    | "inspect-cancel";
+  url?: string | null;
+  title?: string | null;
+  target?: PreviewBrowserTarget | null;
+};
+
 export type ClientPackResult = {
   zipPath: string;
   filesCount: number;
   handoffPath: string;
+};
+
+export type ClipboardVideoImportResult = {
+  /** Private attachment paths already copied out of Explorer/Snipping Tool storage. */
+  paths: string[];
+  /** Per-file validation/import failures safe to surface in the composer. */
+  errors: string[];
 };
 
 export type ProjectTemplate = {
@@ -184,6 +307,15 @@ export const api = {
     invoke("delete_project_file", { relativePath }),
   /** Clear active-project contents while keeping the project directory and .git history. */
   clearProjectFiles: (): Promise<number> => invoke("clear_project_files"),
+  /** Durable agent-owned workspace checkpoints, newest first. */
+  listRunCheckpoints: (projectRoot?: string | null): Promise<CheckpointSummary[]> =>
+    invoke("list_run_checkpoints", { projectRoot: projectRoot ?? null }),
+  /** Conflict-aware undo; newer user edits are preserved instead of overwritten. */
+  rollbackRunCheckpoint: (
+    checkpointId: string,
+    scope: "last_action" | "run" = "run",
+  ): Promise<RollbackResult> =>
+    invoke("rollback_run_checkpoint", { checkpointId, scope }),
   exportClientPack: (destPath?: string, handoffSummary?: string): Promise<ClientPackResult> =>
     invoke("export_client_pack", {
       destPath: destPath ?? null,
@@ -197,6 +329,11 @@ export const api = {
   /** Save a clipboard/drag-drop image to a temp file; returns absolute path. */
   savePastedImage: (dataBase64: string, mime?: string | null): Promise<string> =>
     invoke("save_pasted_image", { dataBase64, mime: mime ?? null }),
+  /** Save a WebView-provided video Blob without base64/JSON expansion. */
+  savePastedVideo: (data: Uint8Array, extension: string): Promise<string> =>
+    invoke("save_pasted_video", data, {
+      headers: { "x-ai-forge-video-extension": extension },
+    }),
   /**
    * Capture only a user-selected rectangle inside the current preview. The
    * native command is deliberately scoped to the calling app window; it cannot
@@ -209,14 +346,67 @@ export const api = {
     height: number;
     devicePixelRatio: number;
   }): Promise<string> => invoke("capture_preview_selection", { region }),
+  /** Mount an isolated native webview over one Browser tab in the preview panel. */
+  createPreviewBrowser: (
+    label: string,
+    url: string,
+    bounds: PreviewBrowserBounds,
+    visible: boolean,
+  ): Promise<void> => invoke("create_preview_browser", { label, url, bounds, visible }),
+  /** Keep a native Browser tab aligned with its responsive DOM placeholder. */
+  setPreviewBrowserBounds: (
+    label: string,
+    bounds: PreviewBrowserBounds,
+    visible: boolean,
+  ): Promise<void> => invoke("set_preview_browser_bounds", { label, bounds, visible }),
+  /** Enable the narrow in-page selector used by Design Mode and Source Lens. */
+  setPreviewBrowserInspection: (
+    label: string,
+    mode: "off" | "design" | "source",
+    feedback?: PreviewBrowserFeedback | null,
+  ): Promise<void> => invoke("set_preview_browser_inspection", {
+    label,
+    mode,
+    feedback: feedback ?? null,
+  }),
+  /** Hide only temporary inspection chrome while making a bounded screenshot. */
+  setPreviewBrowserInspectionChrome: (label: string, visible: boolean): Promise<void> =>
+    invoke("set_preview_browser_inspection_chrome", { label, visible }),
+  /** Capture a bounded target directly from the isolated native Browser webview. */
+  capturePreviewBrowserSelection: (
+    label: string,
+    region: { x: number; y: number; width: number; height: number },
+  ): Promise<string> => invoke("capture_preview_browser_selection", { label, region }),
+  navigatePreviewBrowser: (label: string, url: string): Promise<void> =>
+    invoke("navigate_preview_browser", { label, url }),
+  previewBrowserAction: (
+    label: string,
+    action: "back" | "forward" | "reload" | "focus",
+  ): Promise<void> => invoke("preview_browser_action", { label, action }),
+  closePreviewBrowser: (label: string): Promise<void> =>
+    invoke("close_preview_browser", { label }),
+  onPreviewBrowserEvent: (
+    cb: (payload: PreviewBrowserEvent) => void,
+  ): Promise<UnlistenFn> => listen<PreviewBrowserEvent>("preview-browser-event", (event) => cb(event.payload)),
+  /** Warm the bounded project index used by Source Lens hover inspection. */
+  warmDesignSourceIndex: (): Promise<number> => invoke("warm_design_source_index"),
+  /** Drop cached source data after a preview reload or project write. */
+  invalidateDesignSourceIndex: (): Promise<void> => invoke("invalidate_design_source_index"),
+  /** Resolve a visible preview target to ranked frontend/style/backend file locations. */
+  resolveDesignTarget: (probe: DesignTargetProbe): Promise<DesignTargetResolution> =>
+    invoke("resolve_design_target", { probe }),
   /** Copy an on-disk image into the paste dir (Explorer paste / file picker). */
   importImagePath: (path: string): Promise<string> =>
     invoke("import_image_path", { path }),
   /** Copy a user-selected video into the private attachment directory. */
   importVideoPath: (path: string): Promise<string> =>
     invoke("import_video_path", { path }),
+  /** Import videos held in the native Windows file-drop clipboard. */
+  importClipboardVideos: (): Promise<ClipboardVideoImportResult> =>
+    invoke("import_clipboard_videos"),
   agentRun: (
     prompt: string,
+    userRequest: string,
     sessionId: string,
     history: Array<{
       role: string;
@@ -228,16 +418,23 @@ export const api = {
     projectRoot?: string,
     cursorAgentId?: string | null,
     taskProfile: AgentTaskProfile = "default",
+    executionProfile: AgentExecutionProfile = "auto",
+    runSettings?: Settings,
   ): Promise<string | null> =>
     invoke("agent_run", {
       prompt,
+      userRequest,
       sessionId,
       history,
       projectRoot,
       cursorAgentId: cursorAgentId ?? null,
       taskProfile,
+      executionProfile,
+      runSettings: runSettings ?? null,
     }),
   agentStop: (sessionId: string): Promise<void> => invoke("agent_stop", { sessionId }),
+  /** Native source of truth for cross-project/session busy indicators. */
+  activeAgentSessions: (): Promise<string[]> => invoke("active_agent_sessions"),
   openProjectInExplorer: (relativePath: string | null = null): Promise<void> =>
     invoke("open_project_in_explorer", { relativePath }),
   appVersion: (): Promise<string> => invoke("app_version"),
@@ -337,13 +534,13 @@ export type IntegrationTestResult = {
 };
 
 export type AgentEventPayload =
-  | { kind: "start"; payload: { prompt: string; permission_mode?: string; smart_agent_enabled?: boolean } }
+  | { kind: "start"; payload: { prompt: string; permission_mode?: string; smart_agent_enabled?: boolean; flavour_enabled?: boolean; task_profile?: AgentTaskProfile; execution_profile?: Exclude<AgentExecutionProfile, "auto">; repair_budget?: number; checkpoint_id?: string | null } }
   | { kind: "task_plan"; payload: { title: string; summary: string; steps: { id: string; label: string; state: string }[]; active_step: number; status: string; detail?: string } }
   | { kind: "task_progress"; payload: { step: number; phase: string; status: string; detail: string; completed_before?: number; complete_all?: boolean } }
   | { kind: "thinking"; payload: { iteration: number } }
   | { kind: "status"; payload: { message: string; attempt?: number; detail?: string } }
   | { kind: "reasoning"; payload: { text: string; iteration?: number } }
-  | { kind: "text"; payload: { text: string } }
+  | { kind: "text"; payload: { text: string; continuation?: boolean } }
   | { kind: "tool_preview"; payload: { id: string; name: string; arguments_delta?: string } }
   | { kind: "tool_preview_end"; payload: { id: string; name: string; reason: string } }
   | {

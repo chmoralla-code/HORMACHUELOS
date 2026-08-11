@@ -1,11 +1,13 @@
 :root {
   color-scheme: dark;
 
-  /* Monochrome foundry — solid dark gray surfaces */
+  /* Dark Foundry — the existing high-contrast desktop default. */
   --canvas: #1e1e1e;
   --panel: #242424;
   --raised: #2c2c2c;
   --elevated: #333333;
+  --sidebar-canvas: #1a1a1a;
+  --menu-surface: #242424;
   --text: #f2f2f2;
   --text-2: #c8c8c8;
   --text-muted: #9a9a9a;
@@ -18,6 +20,23 @@
   --warning: #a8a8a8;
   --info: #bcbcbc;
   --focus: #e0e0e0;
+  --on-accent: #211506;
+  --live-blue: #55b9ff;
+  --live-blue-strong: #72c8ff;
+  --live-blue-shadow: rgba(49, 158, 255, 0.72);
+  --live-blue-halo: rgba(20, 112, 255, 0.36);
+  --live-blue-outline: rgba(85, 185, 255, 0.88);
+
+  /* Theme-aware translucent surfaces used by dense desktop controls. */
+  --surface-soft: rgba(255, 255, 255, 0.025);
+  --surface-hover: rgba(255, 255, 255, 0.06);
+  --surface-strong: rgba(255, 255, 255, 0.12);
+  --surface-inset: rgba(0, 0, 0, 0.13);
+  --line-subtle: rgba(255, 255, 255, 0.08);
+  --shadow-strong: rgba(0, 0, 0, 0.42);
+  --scroll-thumb: #30352d;
+  --scroll-thumb-hover: #444a40;
+  --selection: rgba(255, 180, 84, 0.28);
 
   /* Backward-compatible component aliases */
   --bg-0: var(--canvas);
@@ -60,4 +79,122 @@
   --preview-h: 42vh;
   --header-h: 56px;
   --dock-h: 126px;
+}
+
+/* A paper-white workbench with cool blue controls. It intentionally keeps
+   strong contrast on code, logs, and project tree affordances. */
+:root[data-appearance="light"] {
+  color-scheme: light;
+  --canvas: #f4f7fb;
+  --panel: #ffffff;
+  --raised: #eef2f7;
+  --elevated: #e3e9f1;
+  --sidebar-canvas: #f9fbfe;
+  --menu-surface: #ffffff;
+  --text: #172230;
+  --text-2: #344254;
+  --text-muted: #66768a;
+  --text-faint: #8492a3;
+  --ember: #246fba;
+  --ember-strong: #15578f;
+  --ember-soft: rgba(36, 111, 186, 0.12);
+  --success: #237d55;
+  --danger: #b94b45;
+  --warning: #97651b;
+  --info: #276cae;
+  --focus: #1f67aa;
+  --on-accent: #ffffff;
+  --live-blue: #176faa;
+  --live-blue-strong: #0e639e;
+  --live-blue-shadow: rgba(23, 111, 170, 0.38);
+  --live-blue-halo: rgba(23, 111, 170, 0.18);
+  --live-blue-outline: rgba(23, 111, 170, 0.72);
+  --surface-soft: rgba(22, 37, 55, 0.035);
+  --surface-hover: rgba(31, 83, 136, 0.075);
+  --surface-strong: rgba(24, 42, 63, 0.12);
+  --surface-inset: rgba(31, 48, 70, 0.055);
+  --line-subtle: rgba(28, 47, 69, 0.1);
+  --shadow-strong: rgba(35, 57, 84, 0.16);
+  --scroll-thumb: #b9c5d3;
+  --scroll-thumb-hover: #94a9bd;
+  --selection: rgba(62, 133, 202, 0.22);
+
+  --bg-0: var(--canvas);
+  --bg-1: var(--panel);
+  --bg-2: var(--raised);
+  --bg-3: var(--elevated);
+  --bg-4: #f4f7fb;
+  --fg-0: var(--text);
+  --fg-1: var(--text-2);
+  --fg-2: var(--text-muted);
+  --fg-3: var(--text-muted);
+  --fg-4: var(--text-faint);
+  --accent: var(--ember);
+  --accent-dim: #5e87b1;
+  --accent-bg: var(--ember-soft);
+  --ok: var(--success);
+  --err: var(--danger);
+  --warn: var(--warning);
+  --border: rgba(28, 47, 69, 0.14);
+  --border-strong: rgba(28, 47, 69, 0.23);
+  --border-ember: rgba(36, 111, 186, 0.45);
+}
+
+/* Gray is intentionally neutral rather than merely a dimmed Dark mode: it
+   removes the blue cast while retaining the relaxed low-light contrast. */
+:root[data-appearance="gray"] {
+  color-scheme: dark;
+  --canvas: #2a2d32;
+  --panel: #34373d;
+  --raised: #40444b;
+  --elevated: #4b5058;
+  --sidebar-canvas: #303339;
+  --menu-surface: #383b41;
+  --text: #f1f2f3;
+  --text-2: #d3d5d8;
+  --text-muted: #afb3b9;
+  --text-faint: #8e949c;
+  --ember: #e1e4e8;
+  --ember-strong: #ffffff;
+  --ember-soft: rgba(235, 238, 242, 0.1);
+  --success: #9fc8ac;
+  --danger: #e3aaa5;
+  --warning: #dfc791;
+  --info: #b4c9df;
+  --focus: #eff2f5;
+  --on-accent: #24272c;
+  --live-blue: #8fd6ff;
+  --live-blue-strong: #b0e4ff;
+  --live-blue-shadow: rgba(102, 198, 255, 0.52);
+  --live-blue-halo: rgba(65, 165, 230, 0.24);
+  --live-blue-outline: rgba(143, 214, 255, 0.8);
+  --surface-soft: rgba(255, 255, 255, 0.035);
+  --surface-hover: rgba(255, 255, 255, 0.085);
+  --surface-strong: rgba(255, 255, 255, 0.145);
+  --surface-inset: rgba(0, 0, 0, 0.16);
+  --line-subtle: rgba(255, 255, 255, 0.1);
+  --shadow-strong: rgba(0, 0, 0, 0.38);
+  --scroll-thumb: #62676f;
+  --scroll-thumb-hover: #7a8088;
+  --selection: rgba(225, 228, 232, 0.2);
+
+  --bg-0: var(--canvas);
+  --bg-1: var(--panel);
+  --bg-2: var(--raised);
+  --bg-3: var(--elevated);
+  --bg-4: #2a2d32;
+  --fg-0: var(--text);
+  --fg-1: var(--text-2);
+  --fg-2: var(--text-muted);
+  --fg-3: var(--text-muted);
+  --fg-4: var(--text-faint);
+  --accent: var(--ember);
+  --accent-dim: #afb5bc;
+  --accent-bg: var(--ember-soft);
+  --ok: var(--success);
+  --err: var(--danger);
+  --warn: var(--warning);
+  --border: rgba(255, 255, 255, 0.1);
+  --border-strong: rgba(255, 255, 255, 0.18);
+  --border-ember: rgba(255, 255, 255, 0.28);
 }

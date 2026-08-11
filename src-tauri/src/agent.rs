@@ -68,7 +68,7 @@ impl AgentTaskProfile {
             Self::DesignEditFast => {
                 "\nDESIGN MODE FAST EDIT (higher priority than broad planning/investigation rules):\n\
 - The user selected an exact preview target and pressed Apply with AI. Implement now; do not ask for a plan or repeat the request. Normal safety boundaries still apply.\n\
-- Use the supplied route, DOM selector/excerpt, visible text, screenshot description, and ranked source candidates first. Usually one targeted read/search batch is enough. If a hint is wrong, expand once with a grep for the most distinctive route or visible-text phrase.\n\
+- Use the supplied route, DOM selector/excerpt, visible text, screenshot description, and resolved/ranked source locations first. An exact or strong Source Lens location should be opened directly with no broad search. For a likely location, allow only one focused verification using the most distinctive route, selector, or visible-text phrase.\n\
 - Aim for locate -> minimal patch -> smallest useful check -> done. Prefer 1-3 files and avoid unrelated refactors.\n\
 - For a copy, spacing, color, typography, table, or local layout change, do not inspect login/session flows, browse the web, run a full end-to-end suite, or perform a broad repository audit. Use a targeted typecheck/lint/build when quick, or re-read the changed source and preview it.\n\
 - Debug only a concrete failure. Once the requested target is changed and the focused check passes, finish immediately with a concise result.\n"
@@ -215,6 +215,10 @@ enum AutomaticContinuationReason {
 }
 
 impl AutomaticContinuationReason {
+    fn resumes_visible_reply(self) -> bool {
+        matches!(self, Self::OutputLimit)
+    }
+
     fn status_text(self) -> &'static str {
         match self {
             Self::OutputLimit => "Response limit reached — resuming from the next unfinished step…",
@@ -370,6 +374,7 @@ fn failed_tool_recovery_instruction(
     failures: &[(String, String)],
     consecutive_iterations: u8,
     repeated_signature: bool,
+    repair_budget: u8,
 ) -> String {
     let details = failures
         .iter()
@@ -382,9 +387,14 @@ fn failed_tool_recovery_instruction(
     } else {
         ""
     };
+    let escalation = if consecutive_iterations > repair_budget {
+        "The focused repair budget is exhausted. Escalate deliberately: inspect the exact failing source/error once, choose a materially different approach, and run one decisive check. If the task cannot be completed safely, preserve the checkpoint and report the concrete blocker instead of looping. "
+    } else {
+        "Stay within the focused repair budget and use the smallest correction supported by this error. "
+    };
     format!(
         "[System - Tool recovery]\nThe last tool iteration made no successful progress (failure round {consecutive_iterations}).\n\
-{repeated}Correct malformed arguments, use `.` for the project root (never an empty path or `..`), narrow broad searches, or choose a different registered tool.\n\
+{repeated}{escalation}Correct malformed arguments, use `.` for the project root (never an empty path or `..`), narrow broad searches, or choose a different registered tool.\n\
 Read the returned error and call the corrected/alternate tool now instead of only describing what you would do.\n\
 Recent failures:\n{details}"
     )
@@ -1482,17 +1492,33 @@ pub async fn run_loop(
     app: Arc<AppHandle>,
     project_root: String,
     prompt: String,
+    user_request: String,
     settings: Settings,
     session_id: String,
     run: Arc<SessionRun>,
     history: Vec<HistoryTurn>,
     cursor_resume_agent_id: Option<String>,
     task_profile: Option<String>,
+    execution_profile: Option<String>,
 ) -> Result<Option<String>> {
     let root = Path::new(&project_root);
+    let execution_profile = crate::execution_profile::ExecutionProfile::resolve(
+        execution_profile.as_deref(),
+        &prompt,
+        task_profile.as_deref(),
+    );
     let task_profile = AgentTaskProfile::from_wire(task_profile.as_deref());
+    let fast_execution = task_profile.is_fast_design_edit() || execution_profile.is_fast();
     let cancel = run.cancel.clone();
     let known_integration_secrets = Arc::new(crate::integrations::loaded_tokens());
+    let user_request = integration_chat::redact_sensitive_text(
+        if user_request.trim().is_empty() {
+            &prompt
+        } else {
+            &user_request
+        },
+        known_integration_secrets.as_ref(),
+    );
     let mut prompt =
         integration_chat::redact_sensitive_text(&prompt, known_integration_secrets.as_ref());
     // A selected video is sampled into one chronological contact sheet by the
@@ -1583,6 +1609,14 @@ pub async fn run_loop(
         history = compact_fast_design_history(&history);
     }
 
+    let mut flavour = crate::flavour::FlavourRun::begin(
+        root,
+        &session_id,
+        &user_request,
+        settings.flavour_enabled,
+        known_integration_secrets.as_ref(),
+    );
+
     // Cursor Cloud API has no /chat/completions — use the local Cursor SDK agent.
     // Cursor model ids are served only by the local Cursor SDK. They are not
     // OpenAI-compatible ids and must never be forwarded to the hosted chat
@@ -1592,7 +1626,8 @@ pub async fn run_loop(
     // is active, fall through to hosted OpenAI-compatible models so friends
     // installing the app are not blocked on a personal Cursor key.
     let mut settings = settings;
-    settings.model_effort = model_effort_for_task(&settings.model_effort, task_profile);
+    settings.model_effort = execution_profile
+        .model_effort(&model_effort_for_task(&settings.model_effort, task_profile));
     if uses_cursor_sdk(&settings.provider) {
         match crate::config::load_cursor_sdk_api_key(&settings.provider) {
             Ok(key) => {
@@ -1608,9 +1643,20 @@ pub async fn run_loop(
                 let permission_mode = normalized_permission_mode(&settings.permission_mode);
                 let smart_agent_policy = crate::smart_agent::SmartAgentRun::system_instructions(
                     smart_agent_enabled,
-                    task_profile.is_fast_design_edit(),
+                    fast_execution,
                 );
                 let task_profile_policy = task_profile.instructions();
+                let execution_profile_policy = execution_profile.instructions();
+                let project_context = if task_profile.is_fast_design_edit() {
+                    String::new()
+                } else {
+                    crate::project_intelligence::context_block(
+                        root,
+                        execution_profile.context_budget(),
+                    )
+                };
+                let flavour_context =
+                    flavour.context_block(execution_profile.context_budget().clamp(3_000, 8_000));
                 let completion_contract = if requires_project_completion {
                     "\n\nAUTONOMOUS LONG-TASK CONTRACT:\n\
 - This is an implementation task. Keep using tools until the requested website, app, APK, software, or fix is actually complete and verified.\n\
@@ -1621,7 +1667,7 @@ pub async fn run_loop(
                     ""
                 };
                 let wrapped_prompt = format!(
-                    "{identity}\n\n{policy}{computer_policy}{completion_contract}{smart_agent_policy}{task_profile_policy}\n\n\
+                    "{identity}\n\n{policy}{computer_policy}{completion_contract}{smart_agent_policy}{task_profile_policy}{execution_profile_policy}\n\n{project_context}{flavour_context}\n\n\
 IN-APP PREVIEW:\n\
 - Hormachuelos has a built-in Preview panel on the right. Do NOT open websites/games in Chrome or the system browser.\n\
 - After creating or updating HTML (index.html, game pages, etc.), call open_path on that HTML file so the in-app Preview opens.\n\
@@ -1633,15 +1679,18 @@ Current user request:\n{prompt}",
                     completion_contract = completion_contract,
                     smart_agent_policy = smart_agent_policy,
                     task_profile_policy = task_profile_policy,
+                    execution_profile_policy = execution_profile_policy,
+                    project_context = project_context,
+                    flavour_context = flavour_context,
                     prompt = prompt,
                 );
                 let resume_agent_id =
                     cursor_resume_id_for_task(cursor_resume_agent_id.clone(), task_profile);
                 let cursor_result = crate::cursor_bridge::run_cursor_turn(
-                    app,
+                    app.clone(),
                     &project_root,
                     &wrapped_prompt,
-                    &prompt,
+                    &user_request,
                     &key,
                     &settings.model,
                     &effort,
@@ -1655,8 +1704,14 @@ Current user request:\n{prompt}",
                     requires_project_completion,
                     smart_agent_enabled,
                     task_profile.wire_name(),
+                    execution_profile.wire_name(),
+                    &mut flavour,
                 )
                 .await;
+                match &cursor_result {
+                    Ok(_) => flavour.finish("finished", None, &[]),
+                    Err(error) => flavour.finish("error", Some(&error.to_string()), &[]),
+                }
                 // Fast Design turns use an isolated Cursor agent. Preserve the
                 // main conversation's durable id instead of replacing it with
                 // the disposable micro-edit agent.
@@ -1783,6 +1838,8 @@ Current user request:\n{prompt}",
         cancel: cancel.clone(),
         active_pid: run.active_pid.clone(),
         on_console_line: Some(on_console_line),
+        checkpoint: run.checkpoint(),
+        protect_command_changes: run.protect_command_changes(),
     };
 
     let mode = normalized_permission_mode(&settings.permission_mode);
@@ -1935,7 +1992,7 @@ BEHAVIOR:\n\
     let project_context = if task_profile.is_fast_design_edit() {
         String::new()
     } else {
-        project_context_block(root)
+        crate::project_intelligence::context_block(root, execution_profile.context_budget())
     };
     let model_id = settings.model.trim();
     let model_display = display_model_name(model_id);
@@ -1950,17 +2007,16 @@ BEHAVIOR:\n\
             ""
         };
     let smart_agent_enabled = settings.smart_agent_enabled && requires_project_completion;
-    let smart_agent_policy = crate::smart_agent::SmartAgentRun::system_instructions(
-        smart_agent_enabled,
-        task_profile.is_fast_design_edit(),
-    );
+    let smart_agent_policy =
+        crate::smart_agent::SmartAgentRun::system_instructions(smart_agent_enabled, fast_execution);
     let task_profile_policy = task_profile.instructions();
+    let execution_profile_policy = execution_profile.instructions();
     let tool_scheduling_rules = if mode == "multi_agent" {
         "15. MULTI-AGENT SCHEDULING: put independent, local, read-only discovery calls first in one tool response so the host can spawn them together. Use only read_file, list_dir, glob, grep, git_status, and file_info in that parallel pack. Each is a distinct function call with one exact snake_case name and separate arguments. Never parallelize writes, commands, browser actions, approvals, account actions, or computer control."
     } else {
         "15. Work efficiently: group independent local inspection calls (read_file, list_dir, glob, grep, git_status, file_info) in one tool response. The host may run that safe read-only batch together. Never assume results from one tool call while constructing another call in the same batch; keep writes, commands, browser actions, approvals, and computer actions ordered."
     };
-    let system = format!(
+    let system_base = format!(
         "You are Hormachuelos, an autonomous agent embedded in a desktop app with access to the user's computer. \
 You can answer questions, explain concepts, build websites, games, and apps, manage files, run programs, and perform system tasks. \
 The project root is: {root}\n\n\
@@ -1976,6 +2032,7 @@ ACTIVE RUNTIME (report these values accurately when asked):\n\
 {computer_policy}\
 {smart_agent_policy}\
 {task_profile_policy}\
+{execution_profile_policy}\
 CAPABILITIES:\n\
 - Workspace inspection tools — read_file, list_dir, glob, grep, git_status, and file_info — must use ONLY project-relative paths or patterns. The host already knows the root: use \".\" or \"src/main.ts\", never C:\\Users\\…. For other file tools, prefer project-relative paths and use an absolute path only when that tool explicitly permits it.\n\
 - run_command runs PowerShell hidden — scaffold, install, build, test, system tasks, CLIs. Use `cwd` when needed.\n\
@@ -2033,6 +2090,7 @@ TOOL REFERENCE: read_file, write_file, edit_file, list_dir, glob, grep, run_comm
         computer_policy = computer_policy,
         smart_agent_policy = smart_agent_policy,
         task_profile_policy = task_profile_policy,
+        execution_profile_policy = execution_profile_policy,
         execution_style = execution_style,
         tool_scheduling_rules = tool_scheduling_rules,
         memory_rules = memory_rules,
@@ -2086,6 +2144,11 @@ Do not implement unless I explicitly ask. Mutating tools still need approval."
         )
     };
 
+    let flavour_context_budget = execution_profile.context_budget().clamp(3_000, 8_000);
+    let system = format!(
+        "{system_base}\n\n{}",
+        flavour.context_block(flavour_context_budget)
+    );
     let mut messages: Vec<ChatMessage> = vec![ChatMessage::system(&system)];
 
     // Inject a bounded, protocol-safe summary of the recent session. This keeps
@@ -2113,12 +2176,14 @@ The tool entries are historical summaries; use fresh tools for the current works
     // count resets after every tool turn; it is not an iteration limit.
     let mut consecutive_stalled_recoveries: u8 = 0;
     let mut provider_blip_recoveries: u8 = 0;
+    // True only for the next provider pass after visible prose was cut off.
+    // The UI uses this wire marker to stitch the resumed suffix back onto the
+    // same reply instead of displaying broken mid-word message fragments.
+    let mut resume_assistant_next_iteration = false;
     let mut consecutive_failed_tool_iterations: u8 = 0;
     let mut previous_failed_tool_signature = String::new();
-    let mut smart_agent = crate::smart_agent::SmartAgentRun::new(
-        smart_agent_enabled,
-        task_profile.is_fast_design_edit(),
-    );
+    let mut smart_agent =
+        crate::smart_agent::SmartAgentRun::new(smart_agent_enabled, fast_execution);
     emit(
         &app,
         &session_id,
@@ -2127,9 +2192,21 @@ The tool entries are historical summaries; use fresh tools for the current works
             "prompt": prompt,
             "permission_mode": mode,
             "smart_agent_enabled": smart_agent_enabled,
+            "flavour_enabled": flavour.is_enabled(),
             "task_profile": task_profile.wire_name(),
+            "execution_profile": execution_profile.wire_name(),
+            "repair_budget": execution_profile.repair_budget(),
+            "checkpoint_id": run.checkpoint().map(|checkpoint| checkpoint.id()),
         }),
     );
+    if flavour.is_enabled() {
+        emit(
+            &app,
+            &session_id,
+            "status",
+            json!({ "message": "Flavour · recalling project and session memory…" }),
+        );
+    }
     smart_agent.emit_plan(&app, &session_id);
     emit(
         &app,
@@ -2148,6 +2225,13 @@ The tool entries are historical summaries; use fresh tools for the current works
             return Ok(None);
         }
 
+        // Refresh Flavour in place instead of appending memory messages. This
+        // makes successful tools and failure clues available during long runs
+        // without growing the provider transcript on every iteration.
+        messages[0] = ChatMessage::system(&format!(
+            "{system_base}\n\n{}",
+            flavour.context_block(flavour_context_budget)
+        ));
         compact_active_run_messages(&mut messages, pinned_message_count);
 
         emit(
@@ -2156,6 +2240,7 @@ The tool entries are historical summaries; use fresh tools for the current works
             "thinking",
             json!({ "iteration": iteration }),
         );
+        let resume_assistant = std::mem::take(&mut resume_assistant_next_iteration);
 
         let reasoning_streamed = Arc::new(AtomicBool::new(false));
         let reasoning_streamed_for_sink = reasoning_streamed.clone();
@@ -2192,7 +2277,7 @@ The tool entries are historical summaries; use fresh tools for the current works
                 &app_for_text,
                 &sid_for_text,
                 "text",
-                json!({ "text": text }),
+                json!({ "text": text, "continuation": resume_assistant }),
             );
         });
 
@@ -2515,7 +2600,12 @@ The tool entries are historical summaries; use fresh tools for the current works
         if !text_streamed.load(Ordering::SeqCst) {
             if let Some(t) = &resp.text {
                 if !t.is_empty() {
-                    emit(&app, &session_id, "text", json!({ "text": t }));
+                    emit(
+                        &app,
+                        &session_id,
+                        "text",
+                        json!({ "text": t, "continuation": resume_assistant }),
+                    );
                 }
             }
         }
@@ -2542,6 +2632,12 @@ The tool entries are historical summaries; use fresh tools for the current works
             };
 
             if let Some(reason) = continuation_reason {
+                resume_assistant_next_iteration = reason.resumes_visible_reply()
+                    && resp
+                        .text
+                        .as_deref()
+                        .map(str::trim)
+                        .is_some_and(|text| !text.is_empty());
                 consecutive_stalled_recoveries = next_stalled_recovery_count(
                     consecutive_stalled_recoveries,
                     response_made_concrete_progress(&resp),
@@ -2652,6 +2748,16 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
         let parallel_batch_len = parallel_readonly_batch_len(&resp.tool_calls, &mode);
         let mut parallel_read_results = if parallel_batch_len > 0 {
             let parallel_calls = &resp.tool_calls[..parallel_batch_len];
+            for call in parallel_calls {
+                if flavour.record_tool_call(&call.id, &call.name, &call.arguments) {
+                    emit(
+                        &app,
+                        &session_id,
+                        "status",
+                        json!({ "message": "Flavour · updating working memory…" }),
+                    );
+                }
+            }
             if mode == "multi_agent" {
                 emit(
                     &app,
@@ -2740,6 +2846,16 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
                 }
             }
 
+            if tool_index >= parallel_batch_len
+                && flavour.record_tool_call(&tc.id, &tc.name, &tc.arguments)
+            {
+                emit(
+                    &app,
+                    &session_id,
+                    "status",
+                    json!({ "message": "Flavour · updating working memory…" }),
+                );
+            }
             smart_agent.on_tool_call(&app, &session_id, &tc.id, &tc.name, &tc.arguments);
             let public_arguments = public_tool_arguments(&tc.name, &tc.arguments);
             let args_str = serde_json::to_string_pretty(&public_arguments).unwrap_or_default();
@@ -2863,6 +2979,7 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
                     }
                     if !approved {
                         let denied = "User denied tool execution.".to_string();
+                        flavour.record_tool_result(&tc.id, &tc.name, &tc.arguments, false, &denied);
                         let (content_preview, content_truncated) = truncate_utf8(&denied, 8000);
                         let preview = if content_truncated {
                             format!("{content_preview}...(truncated)")
@@ -2958,6 +3075,7 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
                 if final_review_instruction.is_some() {
                     let deferred =
                         "Completion is deferred until the requested final verification pass finishes.";
+                    flavour.record_tool_result(&tc.id, &tc.name, &tc.arguments, true, deferred);
                     messages.push(ChatMessage::tool(&tc.id, &tc.name, deferred));
                     emit(
                         &app,
@@ -2975,6 +3093,13 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
                 if smart_agent.request_final_review(&app, &session_id) {
                     let review_message =
                         crate::smart_agent::SmartAgentRun::final_review_instruction();
+                    flavour.record_tool_result(
+                        &tc.id,
+                        &tc.name,
+                        &tc.arguments,
+                        true,
+                        "Host requested one final workspace verification pass before delivery.",
+                    );
                     messages.push(ChatMessage::tool(
                         &tc.id,
                         &tc.name,
@@ -3051,6 +3176,16 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
                     .unwrap_or_default();
                 messages.push(ChatMessage::tool(&tc.id, &tc.name, &content));
                 smart_agent.complete(&app, &session_id);
+                flavour.record_tool_result(&tc.id, &tc.name, &tc.arguments, true, &summary);
+                flavour.finish("completed", Some(&summary), &files);
+                if flavour.is_enabled() {
+                    emit(
+                        &app,
+                        &session_id,
+                        "status",
+                        json!({ "message": "Flavour · session memory refreshed" }),
+                    );
+                }
                 emit(
                     &app,
                     &session_id,
@@ -3087,6 +3222,7 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
                 content.clone()
             };
             smart_agent.on_tool_result(&app, &session_id, &tc.id, &tc.name, ok);
+            flavour.record_tool_result(&tc.id, &tc.name, &tc.arguments, ok, &content);
             // Flag streamed commands so UI can skip re-dumping full output
             let streamed = matches!(tc.name.as_str(), "run_command") || tc.name.starts_with("git_");
             emit(
@@ -3139,6 +3275,7 @@ Do not write the options only as markdown. Do not scaffold or write files yet.",
                 &failed_tool_results,
                 consecutive_failed_tool_iterations,
                 repeated_signature,
+                execution_profile.repair_budget(),
             )));
         }
         iteration = iteration.saturating_add(1);
@@ -3292,6 +3429,7 @@ fn display_provider_name(provider_id: &str) -> String {
 }
 
 /// Shallow project tree + optional README for the system prompt.
+#[allow(dead_code)]
 fn project_context_block(root: &Path) -> String {
     let mut out = String::from("=== PROJECT CONTEXT (auto) ===\n");
     out.push_str(&format!("Root: {}\n", root.display()));
@@ -3363,10 +3501,11 @@ mod tests {
         resolve_tool_preview_name, response_made_concrete_progress, starts_as_explanatory_request,
         stop_reason_requires_continuation, task_likely_requires_project_completion,
         task_requires_project_completion, tool_confirm_summary, truncate_utf8, uses_cursor_sdk,
-        AgentTaskProfile, HistoryToolCall, HistoryTurn, InspectionPreviewWatchState,
-        ACTIVE_RUN_CONTEXT_MAX_BYTES, FAST_DESIGN_HISTORY_MAX_BYTES, FAST_DESIGN_HISTORY_MAX_TURNS,
-        MAX_CONSECUTIVE_STALLED_RECOVERIES, NATIVE_HISTORY_MAX_BYTES, NATIVE_HISTORY_MAX_TURNS,
-        PROVIDER_TOOL_RESULT_MAX_BYTES, STREAMED_INSPECTION_TOOL_TIMEOUT,
+        AgentTaskProfile, AutomaticContinuationReason, HistoryToolCall, HistoryTurn,
+        InspectionPreviewWatchState, ACTIVE_RUN_CONTEXT_MAX_BYTES, FAST_DESIGN_HISTORY_MAX_BYTES,
+        FAST_DESIGN_HISTORY_MAX_TURNS, MAX_CONSECUTIVE_STALLED_RECOVERIES,
+        NATIVE_HISTORY_MAX_BYTES, NATIVE_HISTORY_MAX_TURNS, PROVIDER_TOOL_RESULT_MAX_BYTES,
+        STREAMED_INSPECTION_TOOL_TIMEOUT,
     };
     use crate::llm::{ChatMessage, LlmResponse, ToolCall};
     use anyhow::anyhow;
@@ -4026,6 +4165,17 @@ mod tests {
             usage_tokens: 10,
         };
         assert!(!reply_was_cut_off(&with_tool));
+    }
+
+    #[test]
+    fn only_interrupted_visible_replies_are_marked_for_ui_stitching() {
+        assert!(AutomaticContinuationReason::OutputLimit.resumes_visible_reply());
+        // A provider blip may have shown partial bytes, but that failed response
+        // is not present in the next model context, so its retry is a new reply.
+        assert!(!AutomaticContinuationReason::ProviderBlip.resumes_visible_reply());
+        assert!(!AutomaticContinuationReason::CompletionCheck.resumes_visible_reply());
+        assert!(!AutomaticContinuationReason::AnnouncedAction.resumes_visible_reply());
+        assert!(!AutomaticContinuationReason::InspectionToolStall.resumes_visible_reply());
     }
 
     #[test]

@@ -3,17 +3,28 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#1e1e1e" />
     <title>Preview mode test harness</title>
     <link rel="stylesheet" href="/theme/tokens.css" />
     <link rel="stylesheet" href="/theme/globals.css" />
     <link rel="stylesheet" href="/app.css" />
     <link rel="stylesheet" href="/theme/workspace.css" />
     <style>
-      html, body, #app, .workbench { width: 100%; height: 100%; margin: 0; }
-      #app { display: block; }
+      html, body, #app { width: 100%; height: 100%; margin: 0; }
+      #app { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: var(--header-h) minmax(0, 1fr); }
       .workbench { grid-template-columns: minmax(0, 1fr) minmax(520px, 52vw); }
-      .test-stage { min-width: 0; background: #111; }
-      #chat-queue-probe { display: none; }
+      .test-stage { min-width: 0; background: var(--canvas); }
+      /* Keep the real Chat DOM renderable for computed-theme regression
+         checks without allowing it to affect the preview harness layout. */
+      #chat-queue-probe {
+        position: fixed;
+        left: -10000px;
+        top: 0;
+        width: 900px;
+        height: 700px;
+        overflow: hidden;
+      }
     </style>
   </head>
   <body>
@@ -23,6 +34,7 @@
         `https://asset.localhost/${encodeURIComponent(String(filePath).replaceAll("\\", "/"))}`;
     </script>
     <div id="app">
+      <header class="header" aria-label="Appearance test header"><div id="appearance-control"></div></header>
       <div class="workbench">
         <main class="test-stage">
           <div id="chat-queue-probe">
@@ -43,6 +55,11 @@
         rankDesignSourceCandidates,
       } from "./components/site-preview.ts";
       import { getProviderMeta, visibleProviders } from "./components/settings.ts";
+      import { setShimmerText } from "./components/util.ts";
+      import { initializeAppearance, mountAppearanceControl } from "./theme/appearance.ts";
+
+      initializeAppearance();
+      mountAppearanceControl(document.getElementById("appearance-control"));
 
       api.readProjectFile = async (relativePath) => ({
         path: relativePath,
@@ -80,10 +97,87 @@
         window.__previewCaptureRequests.push(region);
         return "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADElEQVR42mP8z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
       };
+      window.__previewBrowserCalls = [];
+      window.__previewBrowserListener = null;
+      api.onPreviewBrowserEvent = async (listener) => {
+        window.__previewBrowserListener = listener;
+        return () => {
+          if (window.__previewBrowserListener === listener) window.__previewBrowserListener = null;
+        };
+      };
+      api.createPreviewBrowser = async (label, url, bounds, visible) => {
+        window.__previewBrowserCalls.push({ command: "create", label, url, bounds, visible });
+        queueMicrotask(() => {
+          window.__previewBrowserListener?.({ label, kind: "loading", url });
+          window.__previewBrowserListener?.({ label, kind: "title", url, title: "Google" });
+          window.__previewBrowserListener?.({ label, kind: "ready", url, title: "Google" });
+        });
+      };
+      api.setPreviewBrowserBounds = async (label, bounds, visible) => {
+        window.__previewBrowserCalls.push({ command: "bounds", label, bounds, visible });
+      };
+      api.setPreviewBrowserInspection = async (label, mode, feedback) => {
+        window.__previewBrowserCalls.push({
+          command: "inspection",
+          label,
+          mode,
+          feedback: feedback || null,
+        });
+      };
+      api.setPreviewBrowserInspectionChrome = async (label, visible) => {
+        window.__previewBrowserCalls.push({ command: "inspection-chrome", label, visible });
+      };
+      api.capturePreviewBrowserSelection = async (label, region) => {
+        window.__previewCaptureRequests.push({ kind: "browser", label, ...region });
+        return "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADElEQVR42mP8z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
+      };
+      api.navigatePreviewBrowser = async (label, url) => {
+        window.__previewBrowserCalls.push({ command: "navigate", label, url });
+        queueMicrotask(() => {
+          window.__previewBrowserListener?.({ label, kind: "loading", url });
+          window.__previewBrowserListener?.({ label, kind: "ready", url });
+        });
+      };
+      api.previewBrowserAction = async (label, action) => {
+        window.__previewBrowserCalls.push({ command: "action", label, action });
+      };
+      api.closePreviewBrowser = async (label) => {
+        window.__previewBrowserCalls.push({ command: "close", label });
+      };
       api.savePastedImage = async (dataBase64, mime) => {
         window.__previewSavedImages = window.__previewSavedImages || [];
         window.__previewSavedImages.push({ dataBase64, mime });
         return "C:\\preview-fixture\\design-feature-reference.png";
+      };
+      window.__sourceLensRequests = [];
+      api.warmDesignSourceIndex = async () => 7;
+      api.invalidateDesignSourceIndex = async () => {};
+      api.resolveDesignTarget = async (probe) => {
+        window.__sourceLensRequests.push(probe);
+        const live = Boolean(probe.point);
+        return {
+          tag: live ? "button" : (probe.tag || "button"),
+          text: live ? "Publish" : (probe.text || "Preview target"),
+          selector: live ? "main > button.publish" : (probe.selector || "#target"),
+          domContext: probe.domContext || {
+            id: live ? "publish" : "target",
+            classes: live ? ["publish"] : [],
+            role: "",
+            ariaLabel: "",
+            testId: live ? "publish-action" : "preview-target",
+            name: "",
+            href: "/api/publish",
+            html: live ? '<button class="publish">Publish</button>' : '<button id="target">Preview target</button>',
+          },
+          rect: live ? { x: 84, y: 92, width: 128, height: 52 } : null,
+          sources: [
+            { path: "src/components/PublishButton.tsx", line: 42, column: 7, kind: "frontend", confidence: "exact", symbol: "PublishButton" },
+            { path: "src/styles/actions.css", line: 18, column: 1, kind: "style", confidence: "strong", symbol: null },
+            { path: "src/server/routes/publish.ts", line: 27, column: 1, kind: "backend", confidence: "strong", symbol: "publish" },
+          ],
+          inspectedBy: live ? "webview" : "dom",
+          indexPartial: false,
+        };
       };
 
       const preview = new SitePreview(document.getElementById("preview-test-host"));
@@ -92,14 +186,14 @@
       window.__previewPromptDispatches = [];
       window.__designTaskProfile = designTaskProfile;
       window.__rankDesignSourceCandidates = rankDesignSourceCandidates;
-      preview.setDescribeHandler((prompt, imagePath, taskProfile) => {
-        window.__previewPrompts.push(prompt);
-        window.__previewPromptDispatches.push({ prompt, imagePath, taskProfile });
+      preview.setDescribeHandler((request) => {
+        window.__previewPrompts.push(request.prompt);
+        window.__previewPromptDispatches.push(request);
         return "sent";
       });
       window.__chatQueueSends = [];
       const chatQueueProbe = new Chat({
-        onSend: (prompt, taskProfile) => window.__chatQueueSends.push({ prompt, taskProfile }),
+        onSend: (submission) => window.__chatQueueSends.push(submission),
         onStop: () => {},
         onNeedProject: () => {},
         onOpenProject: () => {},
@@ -124,12 +218,23 @@
 
       const lightningProbe = document.createElement("div");
       lightningProbe.className = "tool-card pending";
-      lightningProbe.innerHTML = '<span class="shine-ch shine-red">H</span>';
+      const lightningLabel = document.createElement("span");
+      lightningProbe.appendChild(lightningLabel);
       document.body.appendChild(lightningProbe);
-      const lightningStyle = getComputedStyle(lightningProbe.firstElementChild);
+      setShimmerText(lightningLabel, "Working", true);
+      const lightningStyle = getComputedStyle(lightningLabel);
       document.body.dataset.agenticAnimation = lightningStyle.animationName;
       document.body.dataset.agenticColor = lightningStyle.color;
       lightningProbe.remove();
+
+      const liveThinkingProbe = document.createElement("span");
+      document.body.appendChild(liveThinkingProbe);
+      setShimmerText(liveThinkingProbe, "Thinking…", true);
+      const liveThinkingStyle = getComputedStyle(liveThinkingProbe);
+      document.body.dataset.liveThinkingClass = liveThinkingProbe.className;
+      document.body.dataset.liveThinkingAnimation = liveThinkingStyle.animationName;
+      document.body.dataset.liveThinkingColor = liveThinkingStyle.color;
+      liveThinkingProbe.remove();
 
       const chipProbe = document.createElement("button");
       chipProbe.className = "chip chip-cap chip-cap-agentic";

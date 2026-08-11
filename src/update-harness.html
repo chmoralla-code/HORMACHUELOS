@@ -22,17 +22,32 @@
     <script type="module">
       import { api } from "./ipc.ts";
       import { Sidebar } from "./components/sidebar.ts";
-      import { checkDesktopUpdate, showUpdateDialog } from "./components/update-gate.ts";
+      import {
+        checkDesktopUpdate,
+        restoreUpdateState,
+        showUpdateDialog,
+      } from "./components/update-gate.ts";
+      import { snapshotSessionsForUpdate } from "./components/session.ts";
 
       window.__updateMode = "available";
       window.__installError = "";
       window.__manualInstallProgress = false;
       window.__finishInstall = null;
+      window.__restoreUpdateBackup = null;
+      window.__restoreUpdateState = restoreUpdateState;
+      window.__updateSessions = [{
+        id: "session-memory-only",
+        title: "Unsaved update handoff",
+        projectId: "C:\\Projects\\Atlas",
+        messages: [{ type: "user", text: "Keep this unsaved transcript safe.", at: 4 }],
+        createdAt: 4,
+      }];
       const updateProgressListeners = new Set();
       window.__emitInstallProgress = (event) => {
         for (const listener of updateProgressListeners) listener(event);
       };
       const updateDialogOptions = {
+        beforeInstall: () => snapshotSessionsForUpdate(window.__updateSessions),
         progressSubscriber: async (listener) => {
           updateProgressListeners.add(listener);
           return () => updateProgressListeners.delete(listener);
@@ -45,6 +60,11 @@
       };
       api.saveUpdateBackup = async (stateJson) => {
         document.body.dataset.updateBackup = stateJson;
+      };
+      api.loadUpdateBackup = async () => window.__restoreUpdateBackup;
+      api.clearUpdateBackup = async () => {
+        window.__restoreUpdateBackup = null;
+        document.body.dataset.updateBackupCleared = "true";
       };
       api.installAppUpdate = async (downloadUrl, version, sha256) => {
         if (window.__installError) throw window.__installError;

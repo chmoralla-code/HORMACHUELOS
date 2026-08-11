@@ -23,8 +23,8 @@ export type UpdateCheck = {
 };
 
 export type UpdateInstallOptions = {
-  /** Flush any in-memory chat/session work immediately before the backup. */
-  beforeInstall?: () => void | Promise<void>;
+  /** Add current in-memory app state to the host-owned pre-update backup. */
+  beforeInstall?: () => Record<string, string> | void | Promise<Record<string, string> | void>;
   /** Override the native progress source in browser harnesses. */
   progressSubscriber?: (
     callback: (event: AppUpdateProgress) => void,
@@ -37,19 +37,31 @@ type UpdateStateBackup = {
   entries: Record<string, string>;
 };
 
-function serializeUpdateState(): string {
+const SESSION_STORAGE_KEY = "ai-forge:sessions";
+
+function serializeUpdateState(overrides?: Record<string, string> | void): string {
   const entries: Record<string, string> = {};
-  const probeKey = "ai-forge:update-storage-probe";
-  localStorage.setItem(probeKey, "ok");
-  if (localStorage.getItem(probeKey) !== "ok") {
-    throw new Error("Local app data could not be verified before updating.");
+  try {
+    const length = localStorage.length;
+    for (let index = 0; index < length; index += 1) {
+      const key = localStorage.key(index);
+      if (!key?.startsWith("ai-forge:")) continue;
+      try {
+        const value = localStorage.getItem(key);
+        if (value !== null) entries[key] = value;
+      } catch {
+        // A single unreadable key must not hide readable app state or the
+        // in-memory session snapshot supplied by `beforeInstall`.
+      }
+    }
+  } catch {
+    // Some WebView profiles deny storage access entirely. The native backup
+    // can still safely carry the explicitly supplied in-memory entries.
   }
-  localStorage.removeItem(probeKey);
-  for (let index = 0; index < localStorage.length; index += 1) {
-    const key = localStorage.key(index);
-    if (!key?.startsWith("ai-forge:")) continue;
-    const value = localStorage.getItem(key);
-    if (value !== null) entries[key] = value;
+  if (overrides) {
+    for (const [key, value] of Object.entries(overrides)) {
+      if (key.startsWith("ai-forge:") && typeof value === "string") entries[key] = value;
+    }
   }
   return JSON.stringify({
     format: 1,
@@ -58,7 +70,31 @@ function serializeUpdateState(): string {
   } satisfies UpdateStateBackup);
 }
 
-/** Restore only missing WebView keys from the one-shot pre-update backup. */
+function mergeSessionBackup(current: string | null, backup: string): string {
+  const merged = new Map<string, unknown>();
+  const add = (raw: string | null) => {
+    if (!raw) return;
+    let sessions: unknown;
+    try {
+      sessions = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    if (!Array.isArray(sessions)) return;
+    for (const candidate of sessions) {
+      if (!candidate || typeof candidate !== "object") continue;
+      const id = String((candidate as { id?: unknown }).id || "").trim();
+      if (id) merged.set(id, candidate);
+    }
+  };
+  add(current);
+  // The native backup is captured after the live chat has been synchronized,
+  // so it deliberately wins for duplicate session ids.
+  add(backup);
+  return merged.size > 0 ? JSON.stringify([...merged.values()]) : backup;
+}
+
+/** Restore missing keys and merge the fresher session snapshot after relaunch. */
 export async function restoreUpdateState(): Promise<number> {
   const raw = await api.loadUpdateBackup();
   if (!raw) return 0;
@@ -67,11 +103,23 @@ export async function restoreUpdateState(): Promise<number> {
     throw new Error("The saved pre-update data has an unsupported format.");
   }
   let restored = 0;
+  let storageFailure = false;
   for (const [key, value] of Object.entries(backup.entries)) {
     if (!key.startsWith("ai-forge:") || typeof value !== "string") continue;
-    if (localStorage.getItem(key) !== null) continue;
-    localStorage.setItem(key, value);
-    restored += 1;
+    try {
+      const current = localStorage.getItem(key);
+      const next = key === SESSION_STORAGE_KEY
+        ? mergeSessionBackup(current, value)
+        : value;
+      if (current !== null && (key !== SESSION_STORAGE_KEY || current === next)) continue;
+      localStorage.setItem(key, next);
+      restored += 1;
+    } catch {
+      storageFailure = true;
+    }
+  }
+  if (storageFailure) {
+    throw new Error("The pre-update backup is safe, but WebView storage is still unavailable.");
   }
   await api.clearUpdateBackup();
   return restored;
@@ -362,8 +410,8 @@ async function installInsideApp(
     message: "Preparing the secure update",
   };
   onProgress(progressMessage(preparingEvent), preparingEvent);
-  await options.beforeInstall?.();
-  await api.saveUpdateBackup(serializeUpdateState());
+  const inMemoryEntries = await options.beforeInstall?.();
+  await api.saveUpdateBackup(serializeUpdateState(inMemoryEntries));
   const subscribeToProgress = options.progressSubscriber || onAppUpdateProgress;
   const unlisten = await subscribeToProgress(
     (event) => onProgress(progressMessage(event), event),

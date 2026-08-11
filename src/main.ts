@@ -4,10 +4,9 @@ import {
   onComputerUseFx,
   onComputerUseStatus,
   type AgentEvent,
-  type AgentTaskProfile,
 } from "./ipc";
 import { Sidebar } from "./components/sidebar";
-import { Chat } from "./components/chat";
+import { Chat, type ChatPromptSubmission } from "./components/chat";
 import { ConsolePanel } from "./components/console";
 import { displayModelName, displayProviderName, getProviderMeta, getSettingsSafe, isHostedCatalogRestricted, visibleProviders } from "./components/settings";
 import { ModelBar } from "./components/modelbar";
@@ -46,14 +45,16 @@ import {
   replaceProjectWorkspacePath,
 } from "./components/projects";
 import {
-  loadSessions, saveSession, saveSessionForUpdate, scheduleSessionSave,
-  flushSessionSaves, flushSessionSavesForUpdate,
+  loadSessions, saveSession, scheduleSessionSave, snapshotSessionsForUpdate,
+  flushSessionSaves,
   deleteSession, deleteAllSessions, newSessionId, sessionTitle,
   recordAgentEvent, buildLlmHistory, redactChatCredentials, addSessionTokens, SESSION_TOKEN_BUDGET,
   rehomeSessionsToProjectRoot,
   type Session,
 } from "./components/session";
 import { icon } from "./components/icons";
+import { reconcileRunIds } from "./components/run-lifecycle";
+import { initializeAppearance, mountAppearanceControl } from "./theme/appearance";
 
 let sidebar: Sidebar;
 let chat: Chat;
@@ -74,6 +75,11 @@ let activeSessionId: string | null = null;
 const sessionRegistry = new Map<string, Session>();
 /** Session ids with an in-flight agent run (multiple can run at once). */
 const runningSessions = new Set<string>();
+/** Runs reserved in the UI but not yet acknowledged by the native registry. */
+const startingSessions = new Set<string>();
+/** Delayed native reconciliation after terminal events closes event/IPC races. */
+const terminalReconcileTimers = new Map<string, ReturnType<typeof setTimeout>[]>();
+let runReconcileGeneration = 0;
 /** Runs that emitted an explicit completion handshake before agent_run returned. */
 const verifiedRunCompletions = new Set<string>();
 /** Coalesce done+end and hold the audible cue while queued/background work remains. */
@@ -449,6 +455,87 @@ function updateGlobalRunStatus() {
   else sidebar.setStatus(`${n} runs`, true);
 }
 
+function clearTerminalReconcileTimers(sessionId: string) {
+  const timers = terminalReconcileTimers.get(sessionId) || [];
+  for (const timer of timers) window.clearTimeout(timer);
+  terminalReconcileTimers.delete(sessionId);
+}
+
+/** Clear every frontend-only artifact belonging to one released run. */
+function releaseFrontendRun(sessionId: string): boolean {
+  const wasTracked = runningSessions.delete(sessionId);
+  startingSessions.delete(sessionId);
+  clearTerminalReconcileTimers(sessionId);
+  if (verifiedRunCompletions.delete(sessionId)) completionCuePending = true;
+  runModelProfiles.delete(sessionId);
+  runProjectPaths.delete(sessionId);
+  runPrompts.delete(sessionId);
+  runTouchedFiles.delete(sessionId);
+  runBaselineFiles.delete(sessionId);
+  previewOpenedForRun.delete(sessionId);
+  pendingConfirms.delete(sessionId);
+  return wasTracked;
+}
+
+/**
+ * Reconcile display state with the native run map. The native command owns the
+ * actual future, cancellation flag, and process handle; the Set above is only a
+ * fast UI cache and must never keep the model locked after native cleanup.
+ */
+async function reconcileActiveAgentSessions(options: { processQueue?: boolean } = {}) {
+  const generation = ++runReconcileGeneration;
+  let nativeIds: string[];
+  try {
+    nativeIds = await api.activeAgentSessions();
+  } catch (error) {
+    console.warn("active agent reconciliation unavailable", error);
+    return;
+  }
+  if (generation !== runReconcileGeneration) return;
+
+  const acknowledgedNativeIds = nativeIds.filter(
+    (id) => typeof id === "string" && id.trim(),
+  );
+  for (const id of acknowledgedNativeIds) startingSessions.delete(id);
+  const snapshot = reconcileRunIds(runningSessions, acknowledgedNativeIds, startingSessions);
+  let changed = false;
+  for (const id of snapshot.activeIds) {
+    if (!runningSessions.has(id)) {
+      runningSessions.add(id);
+      changed = true;
+    }
+  }
+  for (const id of snapshot.releasedIds) {
+    changed = releaseFrontendRun(id) || changed;
+  }
+
+  const activeRunning = !!activeSessionId && runningSessions.has(activeSessionId);
+  if (typeof chat !== "undefined" && chat.running !== activeRunning) {
+    chat.setRunning(activeRunning, {
+      processQueue: !activeRunning && options.processQueue === true,
+    });
+    if (!activeRunning && typeof workspacePanel !== "undefined") {
+      void workspacePanel.finishRun();
+    }
+    if (!activeRunning && activeSessionId) persistCurrentSession();
+    changed = true;
+  }
+  if (changed) {
+    void restoreActiveSessionModelPreference();
+    updateGlobalRunStatus();
+    refreshSidebar();
+    scheduleCompletionCueWhenIdle();
+  }
+}
+
+function scheduleTerminalRunReconciliation(sessionId: string) {
+  clearTerminalReconcileTimers(sessionId);
+  const timers = [250, 1000, 3000].map((delay) => window.setTimeout(() => {
+    void reconcileActiveAgentSessions({ processQueue: true });
+  }, delay));
+  terminalReconcileTimers.set(sessionId, timers);
+}
+
 /**
  * The model selector is shared UI, but each session remembers its own
  * provider/model. While the selected session is busy, lock to the model that
@@ -620,7 +707,7 @@ function persistCurrentSession(deferred = false) {
   else saveSession(s);
 }
 
-function prepareForAppUpdate() {
+function prepareForAppUpdate(): Record<string, string> {
   if (runningSessions.size > 0) {
     throw new Error("Stop active AI runs before updating so their latest work can be saved safely.");
   }
@@ -630,10 +717,16 @@ function prepareForAppUpdate() {
       syncVisiblePreviewIntoSession(session);
       sessionRegistry.set(session.id, session);
       session.messages = chat.getMessages();
-      saveSessionForUpdate(session);
+      // Keep ordinary persistence best-effort. If WebView storage is full, the
+      // pending queue is included in the native snapshot returned below.
+      saveSession(session);
     }
   }
-  flushSessionSavesForUpdate();
+  flushSessionSaves();
+  return snapshotSessionsForUpdate([
+    ...sessions,
+    ...sessionRegistry.values(),
+  ]);
 }
 
 /** Tokens already used across all sessions in this project. */
@@ -903,6 +996,7 @@ function switchSession(id: string) {
   refreshSidebar();
   syncUsageBar();
   updateGlobalRunStatus();
+  void reconcileActiveAgentSessions({ processQueue: false });
 }
 
 function renameSession(id: string, title: string) {
@@ -922,10 +1016,7 @@ function removeSession(id: string) {
   // Stop this session's run if active; other sessions keep running
   if (runningSessions.has(id)) {
     api.agentStop(id).catch(() => {});
-    runningSessions.delete(id);
-    verifiedRunCompletions.delete(id);
-    runModelProfiles.delete(id);
-    runPrompts.delete(id);
+    releaseFrontendRun(id);
   }
   deleteSession(id);
   sessionRegistry.delete(id);
@@ -1016,10 +1107,7 @@ function doRemoveAllSessions() {
   const ids = sessions.map((session) => session.id);
   for (const id of ids.filter((id) => runningSessions.has(id))) {
     api.agentStop(id).catch(() => {});
-    runningSessions.delete(id);
-    verifiedRunCompletions.delete(id);
-    runModelProfiles.delete(id);
-    runPrompts.delete(id);
+    releaseFrontendRun(id);
   }
   deleteAllSessions(currentProjectPath!);
   for (const id of ids) sessionRegistry.delete(id);
@@ -1069,6 +1157,7 @@ function loadProjectSessions() {
   syncUsageBar();
   syncSmartAgentPanel();
   restoreActiveSessionPreview();
+  void reconcileActiveAgentSessions({ processQueue: false });
 }
 
 function showFatalError(msg: string) {
@@ -1530,46 +1619,48 @@ function openSettings(_integrationId?: string) {
   // Settings is hidden from the product UI.
 }
 
-async function refreshProviderReadiness(): Promise<boolean> {
+async function refreshProviderReadiness(
+  providerOverride?: string,
+  reflectInActiveComposer = true,
+): Promise<boolean> {
   const settings = await getSettingsSafe();
-  const provider = getProviderMeta(settings.provider);
-  const label = displayProviderName(settings.provider);
+  const providerId = String(providerOverride || settings.provider).trim();
+  const provider = getProviderMeta(providerId);
+  const label = displayProviderName(providerId);
+  const finish = (ready: boolean) => {
+    if (reflectInActiveComposer) chat?.setProviderReady(ready, label);
+    return ready;
+  };
   if (!provider) {
-    chat?.setProviderReady(false, label);
-    return false;
+    return finish(false);
   }
 
   // Keyless local providers, or hosted-managed aliases, are ready immediately.
   if (provider.id === "ollama" || provider.hostedManaged || provider.id === "hormachuelos_free") {
-    chat?.setProviderReady(true, label);
-    return true;
+    return finish(true);
   }
 
-  if (await api.hasApiKey(settings.provider).catch(() => false)) {
-    chat?.setProviderReady(true, label);
-    return true;
+  if (await api.hasApiKey(providerId).catch(() => false)) {
+    return finish(true);
   }
 
   // Active Hormachuelos plans unlock cloud providers (including OpenAI branding
   // without a local Cursor key, and OpenRouter Free Models Router).
-  if (settings.provider !== "ollama") {
+  if (providerId !== "ollama") {
     const lic = await api.getLicenseStatus().catch(() => null);
     const hostedReady = Boolean(
       lic?.hosted && lic.active && String(lic.licenseKey || "").trim(),
     );
     if (hostedReady) {
-      chat?.setProviderReady(true, label);
-      return true;
+      return finish(true);
     }
   }
 
   if (!provider.keyRequired && provider.id !== "openrouter" && provider.id !== "cursor") {
-    chat?.setProviderReady(true, label);
-    return true;
+    return finish(true);
   }
 
-  chat?.setProviderReady(false, label);
-  return false;
+  return finish(false);
 }
 
 async function openGCashTopUp() {
@@ -1604,7 +1695,12 @@ function openClientSuccessCenter() {
   clientSuccessCenter?.open();
 }
 
-async function sendPrompt(prompt: string, taskProfile: AgentTaskProfile = "default") {
+async function sendPrompt(submission: ChatPromptSubmission) {
+  let prompt = redactChatCredentials(submission.modelText);
+  const visiblePrompt = redactChatCredentials(submission.visibleText || submission.modelText);
+  const titlePrompt = redactChatCredentials(submission.titleHint || visiblePrompt || prompt);
+  const taskProfile = submission.taskProfile || "default";
+  if (!prompt.trim() || !visiblePrompt.trim()) return;
   cancelDoneWorkingCue();
   if (!currentProjectPath) {
     reportError("Open or create a project before starting.");
@@ -1612,31 +1708,30 @@ async function sendPrompt(prompt: string, taskProfile: AgentTaskProfile = "defau
     return;
   }
   const projectRoot = currentProjectPath;
-  pendingPromptStarts += 1;
-  let providerReady = false;
-  try {
-    providerReady = await refreshProviderReadiness();
-  } finally {
-    pendingPromptStarts = Math.max(0, pendingPromptStarts - 1);
-    scheduleCompletionCueWhenIdle();
-  }
-  if (!providerReady) {
-    reportError("Connect the selected provider before sending a request.");
+  const runProfile = modelBar.currentProfile() || (modelBar.settings ? {
+    provider: modelBar.settings.provider,
+    model: modelBar.settings.model,
+    effort: modelBar.settings.model_effort,
+  } : null);
+  if (!runProfile?.provider || !runProfile.model) {
+    reportError("Choose an AI provider and model before sending a request.");
     return;
   }
+  const runSettings = modelBar.settings ? {
+    ...modelBar.settings,
+    provider: runProfile.provider,
+    model: runProfile.model,
+    model_effort: runProfile.effort || modelBar.settings.model_effort,
+  } : undefined;
   if (isHostedCatalogRestricted()) {
     const allowed = visibleProviders();
-    const providerId = String(modelBar?.settings?.provider || "").trim();
-    const modelId = String(modelBar?.settings?.model || "").trim();
+    const providerId = String(runProfile.provider).trim();
+    const modelId = String(runProfile.model).trim();
     const provider = allowed.find((entry) => entry.id === providerId);
     if (!provider || (provider.models.length > 0 && !provider.models.includes(modelId))) {
       reportError("This AI provider or model is not enabled for your account.");
       return;
     }
-  }
-  if (!sameProjectPath(projectRoot, currentProjectPath)) {
-    reportError("Project changed before the request started. Send it again from the active project.");
-    return;
   }
   if (isUsageExhausted()) {
     reportError(usageBlockMessage());
@@ -1662,46 +1757,46 @@ async function sendPrompt(prompt: string, taskProfile: AgentTaskProfile = "defau
   if (!existing || !hasMessages) {
     // Fresh session — create one and start clean
     if (existing) {
-      existing.title = sessionTitle(prompt);
+      existing.title = sessionTitle(titlePrompt);
     } else {
       const s: Session = {
         id: newSessionId(),
-        title: sessionTitle(prompt),
+        title: sessionTitle(titlePrompt),
         projectId: projectRoot,
         messages: [],
         createdAt: Date.now(),
         sessionTokens: 0,
+        preferredProvider: runProfile.provider,
+        preferredModel: runProfile.model,
+        preferredEffort: runProfile.effort,
       };
       sessions.unshift(s);
       sessionRegistry.set(s.id, s);
       activeSessionId = s.id;
       existing = s;
     }
-    chat.startSession(prompt);
+    chat.startSession(visiblePrompt, prompt);
   } else {
     // Continuing an existing conversation — append, don't clear
-    chat.continueSession(prompt);
+    chat.continueSession(visiblePrompt, prompt);
   }
 
   const sessionId = activeSessionId!;
   // Send compact memory from this session only (never other chats).
   const history = buildLlmHistory(chat.getMessages(), prompt);
-  if (modelBar.settings) {
-    const profile = {
-      provider: modelBar.settings.provider,
-      model: modelBar.settings.model,
-      effort: modelBar.settings.model_effort,
-    };
-    runModelProfiles.set(sessionId, profile);
-    const owning = sessionForId(sessionId);
-    if (owning) {
-      owning.preferredProvider = profile.provider;
-      owning.preferredModel = profile.model;
-      owning.preferredEffort = profile.effort;
-      sessionRegistry.set(owning.id, owning);
-      saveSession(owning);
-    }
+  runModelProfiles.set(sessionId, runProfile);
+  const owning = sessionForId(sessionId);
+  if (owning) {
+    owning.preferredProvider = runProfile.provider;
+    owning.preferredModel = runProfile.model;
+    owning.preferredEffort = runProfile.effort;
+    sessionRegistry.set(owning.id, owning);
+    saveSession(owning);
   }
+  // Persist the user turn and reserve its exact owner before the first await.
+  // Switching sessions after this point only moves the view; it cannot move the run.
+  persistCurrentSession();
+  startingSessions.add(sessionId);
   runningSessions.add(sessionId);
   syncActiveSessionModelLock();
   runProjectPaths.set(sessionId, projectRoot);
@@ -1711,26 +1806,47 @@ async function sendPrompt(prompt: string, taskProfile: AgentTaskProfile = "defau
   void snapshotProjectFiles(projectRoot).then((snap) => {
     if (sameProjectPath(runProjectPaths.get(sessionId), projectRoot)) runBaselineFiles.set(sessionId, snap);
   });
-  // Only touch workspace/console UI while this project is still visible.
-  if (sameProjectPath(projectRoot, currentProjectPath)) {
-    await workspacePanel.beginRun();
-    if (sameProjectPath(projectRoot, currentProjectPath) && activeSessionId === sessionId) {
-      chat.setRunning(true);
-    }
+  if (activeSessionId === sessionId) {
+    chat.setRunning(true);
   }
   updateGlobalRunStatus();
   // Shared project budget — continues across all sessions
   syncUsageBar();
   refreshSidebar();
   try {
+    pendingPromptStarts += 1;
+    let providerReady = false;
+    try {
+      // Check the provider captured above. A later session switch may update
+      // settings.json, but must not change this request's readiness decision.
+      providerReady = await refreshProviderReadiness(runProfile.provider, false);
+    } finally {
+      pendingPromptStarts = Math.max(0, pendingPromptStarts - 1);
+      scheduleCompletionCueWhenIdle();
+    }
+    if (activeSessionId === sessionId) {
+      chat.setProviderReady(providerReady, displayProviderName(runProfile.provider));
+    }
+    if (!providerReady) {
+      throw new Error("Connect the selected provider before sending a request.");
+    }
+    if (isUsageExhausted()) throw new Error(usageBlockMessage());
+
+    // Only touch workspace/console UI while this owning session is visible.
+    if (sameProjectPath(projectRoot, currentProjectPath) && activeSessionId === sessionId) {
+      await workspacePanel.beginRun(sessionId);
+    }
     const resumeAgentId = sessionForId(sessionId)?.cursorAgentId || null;
     const nextAgentId = await api.agentRun(
       agentPrompt,
+      prompt,
       sessionId,
       history,
       projectRoot,
       resumeAgentId,
       taskProfile,
+      workspacePanel.getExecutionProfile(),
+      runSettings,
     );
     if (typeof nextAgentId === "string" && nextAgentId.trim()) {
       const owning = sessionForId(sessionId);
@@ -1743,7 +1859,7 @@ async function sendPrompt(prompt: string, taskProfile: AgentTaskProfile = "defau
       // Run finished without a Cursor agent — fine for non-Cursor models.
     }
   } catch (e: any) {
-    const msg = String(e ?? "");
+    const msg = e instanceof Error ? e.message : String(e ?? "");
     // Stale Cursor agent ids from before per-session stores break continue.
     // Drop them so the next send creates a clean agent for this chat only.
     if (
@@ -1768,12 +1884,12 @@ async function sendPrompt(prompt: string, taskProfile: AgentTaskProfile = "defau
       /already running/i.test(msg) || /wait for it to finish/i.test(msg);
     if (!isBusy) {
       if (activeSessionId === sessionId) {
-        chat.appendAssistantText(`Error: ${e}`);
+        chat.appendAssistantText(`Error: ${msg}`);
         chat.appendEnd("no_tool_calls");
       } else {
         const s = sessionRegistry.get(sessionId) || sessions.find((x) => x.id === sessionId);
         if (s) {
-          recordAgentEvent(s.messages, { kind: "text", payload: { text: `Error: ${e}` } });
+          recordAgentEvent(s.messages, { kind: "text", payload: { text: `Error: ${msg}` } });
           recordAgentEvent(s.messages, { kind: "end", payload: { reason: "no_tool_calls" } });
           saveSession(s);
           sessionRegistry.set(s.id, s);
@@ -1784,9 +1900,7 @@ async function sendPrompt(prompt: string, taskProfile: AgentTaskProfile = "defau
   } finally {
     // Only drop the busy flag here — after backend finish_run. Early deletes on
     // cancelled/done events race a follow-up send ("session already running").
-    if (verifiedRunCompletions.delete(sessionId)) completionCuePending = true;
-    runningSessions.delete(sessionId);
-    runModelProfiles.delete(sessionId);
+    releaseFrontendRun(sessionId);
     if (activeSessionId === sessionId) {
       void restoreActiveSessionModelPreference();
     } else {
@@ -1813,8 +1927,6 @@ async function sendPrompt(prompt: string, taskProfile: AgentTaskProfile = "defau
     updateGlobalRunStatus();
     syncUsageBar();
     refreshSidebar();
-    runProjectPaths.delete(sessionId);
-    runPrompts.delete(sessionId);
     scheduleCompletionCueWhenIdle();
   }
 }
@@ -1822,6 +1934,11 @@ async function sendPrompt(prompt: string, taskProfile: AgentTaskProfile = "defau
 function handleAgentEvent(e: AgentEvent) {
   const sid = e.session_id;
   const isActive = !!sid && sid === activeSessionId;
+  // Any event proves the native command registered this run. Terminal events
+  // are emitted slightly before the command future returns, so reconcile after
+  // short grace periods instead of unlocking on the event itself.
+  if (sid) startingSessions.delete(sid);
+  if (sid && isTerminalAgentEvent(e)) scheduleTerminalRunReconciliation(sid);
   const owningSession = sid ? sessionForId(sid) : undefined;
   const smartStateChanged = owningSession ? applySmartAgentEvent(owningSession, e) : false;
   if (e.kind === "start") cancelDoneWorkingCue();
@@ -2032,8 +2149,7 @@ async function init() {
   // Preview actions use Chat's normal send/queue rules. That means a Build
   // choice always reaches the selected model, even when another task is still
   // running, instead of being silently dropped by a direct agent_run call.
-  sitePreview.setDescribeHandler((prompt, imagePath, taskProfile) =>
-    chat.submitPreviewPrompt(prompt, imagePath, taskProfile));
+  sitePreview.setDescribeHandler((request) => chat.submitPreviewPrompt(request));
   chat.setProjectReady(false);
   const HOSTED_SITE = "https://hormachuelos.vercel.app";
   let websiteUser: WebsiteAccount | null = null;
@@ -2340,6 +2456,17 @@ async function init() {
   });
 
   onAgentEvent(handleAgentEvent).catch((error) => console.warn("agent event bridge unavailable", error));
+  const syncWindowActivity = () => {
+    const backgrounded = document.visibilityState !== "visible";
+    document.documentElement.classList.toggle("app-backgrounded", backgrounded);
+    if (!backgrounded) void reconcileActiveAgentSessions({ processQueue: true });
+  };
+  document.addEventListener("visibilitychange", syncWindowActivity);
+  window.addEventListener("focus", () => {
+    void reconcileActiveAgentSessions({ processQueue: true });
+  });
+  syncWindowActivity();
+  void reconcileActiveAgentSessions({ processQueue: true });
 
   mountComputerUseHud();
   onComputerUseFx((event) => {
@@ -2351,4 +2478,6 @@ async function init() {
   }).catch((error) => console.warn("computer use status bridge unavailable", error));
 }
 
+initializeAppearance();
+mountAppearanceControl(document.getElementById("appearance-control"));
 init().catch((e) => console.error("init failed", e));
