@@ -401,6 +401,8 @@ async fn execute_cursor_host_tool(
         cancel: run.cancel.clone(),
         active_pid: run.active_pid.clone(),
         on_console_line: Some(on_console_line),
+        checkpoint: run.checkpoint(),
+        protect_command_changes: run.protect_command_changes(),
     };
     let tool_name = name.clone();
     let tool_arguments = arguments.clone();
@@ -882,6 +884,7 @@ pub async fn run_cursor_turn(
     requires_project_completion: bool,
     smart_agent_enabled: bool,
     task_profile: &str,
+    execution_profile: &str,
     flavour: &mut FlavourRun,
 ) -> Result<Option<String>> {
     let mut continuation_pass: u32 = 0;
@@ -889,8 +892,9 @@ pub async fn run_cursor_turn(
     let mut current_prompt = prompt.to_string();
     let mut current_agent_id = resume_agent_id;
     let smart_agent_active = smart_agent_enabled && requires_project_completion;
-    let fast_design_edit = task_profile.eq_ignore_ascii_case("design_edit_fast");
-    let mut smart_agent = SmartAgentRun::new(smart_agent_active, fast_design_edit);
+    let fast_execution = task_profile.eq_ignore_ascii_case("design_edit_fast")
+        || execution_profile.eq_ignore_ascii_case("fast");
+    let mut smart_agent = SmartAgentRun::new(smart_agent_active, fast_execution);
     let computer_use_active = computer_use_enabled && !crate::computer_use::is_paused();
     emit(
         &app,
@@ -907,6 +911,8 @@ pub async fn run_cursor_turn(
             "smart_agent_enabled": smart_agent_active,
             "flavour_enabled": flavour.is_enabled(),
             "task_profile": task_profile,
+            "execution_profile": execution_profile,
+            "checkpoint_id": run.checkpoint().map(|checkpoint| checkpoint.id()),
         }),
     );
     if flavour.is_enabled() {
@@ -1063,7 +1069,7 @@ pub async fn run_cursor_turn(
         };
         current_prompt = format!(
             "{}\n\n{continuation}",
-            flavour.context_block(if fast_design_edit { 3_000 } else { 8_000 })
+            flavour.context_block(if fast_execution { 3_000 } else { 8_000 })
         );
     }
 }

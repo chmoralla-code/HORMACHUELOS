@@ -71,7 +71,7 @@ impl Phase {
 #[derive(Debug)]
 pub struct SmartAgentRun {
     enabled: bool,
-    fast_design_edit: bool,
+    fast_execution: bool,
     phase: Phase,
     final_review_requested: bool,
     saw_validation: bool,
@@ -83,10 +83,10 @@ pub struct SmartAgentRun {
 }
 
 impl SmartAgentRun {
-    pub fn new(enabled: bool, fast_design_edit: bool) -> Self {
+    pub fn new(enabled: bool, fast_execution: bool) -> Self {
         Self {
             enabled,
-            fast_design_edit,
+            fast_execution,
             phase: Phase::Scope,
             final_review_requested: false,
             saw_validation: false,
@@ -104,14 +104,14 @@ impl SmartAgentRun {
 
     /// Provider-facing instruction that makes the reasoning process more
     /// deliberate without asking the model to expose private chain-of-thought.
-    pub fn system_instructions(enabled: bool, fast_design_edit: bool) -> &'static str {
+    pub fn system_instructions(enabled: bool, fast_execution: bool) -> &'static str {
         if !enabled {
             return "";
         }
-        if fast_design_edit {
-            return "\nFAST DESIGN EDIT LEDGER:\n\
-- Treat this as one short, selected-target change: locate from the supplied source hints, apply the smallest coherent patch, and run only the cheapest relevant check.\n\
-- Do not turn the edit into a broad audit or a multi-stage redesign. Expand discovery once only when the supplied target hint is wrong.\n\
+        if fast_execution {
+            return "\nFAST EXECUTION LEDGER:\n\
+- Treat this as one short, selected-target change when source hints exist; otherwise keep it equally focused. Use cached project intelligence, apply the smallest coherent patch, and run only the cheapest relevant check.\n\
+- Do not turn the task into a broad audit or a multi-stage redesign. Expand discovery once only when the focused target is wrong.\n\
 - After a successful focused check (or a targeted source re-read when no quick validator exists), call done immediately with a concise result.\n";
         }
         "\nSMART AGENT EXECUTION LEDGER:\n\
@@ -142,9 +142,9 @@ impl SmartAgentRun {
             session_id,
             "task_plan",
             json!({
-                "title": if self.fast_design_edit { "Fast Design Edit" } else { "Smart Agent" },
-                "summary": if self.fast_design_edit {
-                    "Locating the selected feature, applying a minimal patch, and checking only that result."
+                "title": if self.fast_execution { "Fast Agent" } else { "Smart Agent" },
+                "summary": if self.fast_execution {
+                    "Applying a focused patch and checking only the requested result."
                 } else {
                     "Keeping this task focused, verified, and moving without manual continue prompts."
                 },
@@ -400,7 +400,7 @@ impl SmartAgentRun {
         self.enabled
             && !self.final_review_requested
             && !self.saw_validation
-            && (!self.fast_design_edit || !self.saw_successful_change)
+            && (!self.fast_execution || !self.saw_successful_change)
     }
 
     pub fn request_final_review(&mut self, app: &AppHandle, session_id: &str) -> bool {

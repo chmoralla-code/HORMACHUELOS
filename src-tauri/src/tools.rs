@@ -29,6 +29,10 @@ pub struct ToolRunContext {
     pub active_pid: Arc<Mutex<Option<u32>>>,
     /// Optional live console callback: (stream "stdout"|"stderr", line).
     pub on_console_line: Option<Arc<ConsoleLineCallback>>,
+    /// Copy-on-write journal for agent-owned workspace mutations.
+    pub checkpoint: Option<Arc<crate::checkpoint::RunCheckpoint>>,
+    /// Safe Build snapshots relevant project files around shell commands.
+    pub protect_command_changes: bool,
 }
 
 impl ToolRunContext {
@@ -37,6 +41,8 @@ impl ToolRunContext {
             cancel: Arc::new(AtomicBool::new(false)),
             active_pid: Arc::new(Mutex::new(None)),
             on_console_line: None,
+            checkpoint: None,
+            protect_command_changes: false,
         }
     }
 }
@@ -3132,7 +3138,16 @@ pub fn execute(
     let mut normalized_arguments = args.clone();
     normalize_tool_arguments(name, &mut normalized_arguments);
     let args = &normalized_arguments;
-    match name {
+    let checkpoint_ticket = ctx
+        .checkpoint
+        .as_ref()
+        .map(|checkpoint| checkpoint.prepare_tool_action(name, args, ctx.protect_command_changes))
+        .transpose()?
+        .flatten();
+    // Keep `?` inside this closure so a failed mutation still reaches the
+    // checkpoint finalizer and can record any partial filesystem effect.
+    let mut result = (|| -> Result<String> {
+        match name {
         "read_file" => {
             let p = args
                 .get("path")
@@ -3726,10 +3741,44 @@ pub fn execute(
             let result = crate::computer_use::execute_tool(name, args)?;
             Ok(serde_json::to_string_pretty(&result)?)
         }
-        other => Err(anyhow::anyhow!(
-            "Unknown tool: {other}. Call exactly one registered snake_case tool name per request."
-        )),
+            other => Err(anyhow::anyhow!(
+                "Unknown tool: {other}. Call exactly one registered snake_case tool name per request."
+            )),
+        }
+    })();
+
+    if let (Some(checkpoint), Some(ticket)) = (&ctx.checkpoint, checkpoint_ticket) {
+        if let Some(warning) = checkpoint.finish_tool_action(ticket, result.is_ok()) {
+            match &mut result {
+                Ok(content) => content.push_str(&format!("\nRollback warning: {warning}")),
+                Err(error) => {
+                    let detail = error.to_string();
+                    result = Err(anyhow::anyhow!("{detail}\nRollback warning: {warning}"));
+                }
+            }
+        }
     }
+    if result.is_ok() {
+        if matches!(
+            name,
+            "write_file"
+                | "edit_file"
+                | "move_file"
+                | "copy_file"
+                | "delete_file"
+                | "make_dir"
+                | "download_file"
+                | "run_command"
+        ) {
+            crate::project_intelligence::invalidate(root);
+        }
+        if name == "run_command" {
+            if let Some(command) = args.get("command").and_then(Value::as_str) {
+                crate::project_intelligence::record_successful_command(root, command);
+            }
+        }
+    }
+    result
 }
 
 #[derive(Serialize)]

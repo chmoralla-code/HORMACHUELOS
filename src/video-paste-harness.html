@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Video paste test harness</title>
+    <link rel="stylesheet" href="/theme/tokens.css" />
+    <link rel="stylesheet" href="/theme/globals.css" />
+    <link rel="stylesheet" href="/app.css" />
+    <link rel="stylesheet" href="/theme/workspace.css" />
+  </head>
+  <body>
+    <main>
+      <section id="chat" class="chat" aria-live="polite"></section>
+      <section id="forge-dock" class="forge-dock" aria-label="Composer"></section>
+      <div id="toast" hidden></div>
+    </main>
+    <script type="module">
+      const calls = [];
+      let nativeResult = { paths: [], errors: [] };
+      let callbackId = 0;
+      const callbacks = new Map();
+      window.__TAURI_INTERNALS__ = {
+        invoke: async (cmd, args = {}, options = {}) => {
+          calls.push({
+            cmd,
+            args: args instanceof Uint8Array || args instanceof ArrayBuffer ? null : args,
+            byteLength: args instanceof Uint8Array || args instanceof ArrayBuffer ? args.byteLength : null,
+            headers: options.headers || {},
+          });
+          if (cmd === "save_pasted_video") return String.raw`C:\Temp\hormachuelos-paste\video-memory.mp4`;
+          if (cmd === "import_video_path") return String.raw`C:\Temp\hormachuelos-paste\video-path.mp4`;
+          if (cmd === "import_clipboard_videos") return nativeResult;
+          if (cmd === "save_pasted_image") return String.raw`C:\Temp\hormachuelos-paste\image.png`;
+          throw new Error(`Unexpected invoke: ${cmd}`);
+        },
+        transformCallback: (callback) => {
+          const id = ++callbackId;
+          callbacks.set(id, callback);
+          return id;
+        },
+        unregisterCallback: (id) => callbacks.delete(id),
+        convertFileSrc: (path) => `asset://${encodeURIComponent(path)}`,
+      };
+
+      const { Chat } = await import("./components/chat.ts");
+      const noop = () => {};
+      const chat = new Chat({
+        onSend: noop,
+        onStop: noop,
+        onNeedProject: noop,
+        onOpenProject: noop,
+        onNewProject: noop,
+        onRevealProject: noop,
+        onOpenSettings: noop,
+        getSessionId: () => "video-paste-harness",
+      });
+      chat.setProjectReady(true);
+
+      const reset = () => {
+        document.querySelectorAll(".composer-attach-remove").forEach((button) => button.click());
+        calls.length = 0;
+        nativeResult = { paths: [], errors: [] };
+        const toast = document.getElementById("toast");
+        toast.hidden = true;
+        toast.textContent = "";
+      };
+
+      const clipboard = ({ files = [], types = [], plain = "", uris = "" } = {}) => ({
+        files,
+        items: [],
+        types,
+        getData: (type) => type === "text/plain" ? plain : type === "text/uri-list" ? uris : "",
+      });
+
+      const runPaste = async (clipboardData) => {
+        let prevented = false;
+        await chat.handleComposerPaste({
+          clipboardData,
+          preventDefault: () => { prevented = true; },
+        });
+        return {
+          prevented,
+          calls: structuredClone(calls),
+          chips: Array.from(document.querySelectorAll(".composer-attach-chip")).map((chip) => ({
+            path: chip.dataset.path,
+            text: chip.textContent,
+            video: chip.classList.contains("composer-attach-video"),
+          })),
+          toast: document.getElementById("toast").textContent,
+        };
+      };
+
+      window.__videoPasteHarness = {
+        memoryVideo: async () => {
+          reset();
+          const file = new File([new Uint8Array([0, 1, 2, 3, 4])], "snipping-recording.mp4", {
+            type: "video/mp4",
+          });
+          return runPaste(clipboard({ files: [file], types: ["Files"] }));
+        },
+        explorerPath: async () => {
+          reset();
+          return runPaste(clipboard({
+            types: ["text/plain"],
+            plain: String.raw`C:\Users\Example\Videos\screen recording.mp4`,
+          }));
+        },
+        nativeOnly: async () => {
+          reset();
+          nativeResult = {
+            paths: [String.raw`C:\Temp\hormachuelos-paste\video-native.mp4`],
+            errors: [],
+          };
+          return runPaste(clipboard({ types: ["Files"] }));
+        },
+        thumbnailAndNativeVideo: async () => {
+          reset();
+          nativeResult = {
+            paths: [String.raw`C:\Temp\hormachuelos-paste\video-snipping.mp4`],
+            errors: [],
+          };
+          const thumbnail = new File([new Uint8Array([1, 2, 3])], "preview.png", {
+            type: "image/png",
+          });
+          return runPaste(clipboard({ files: [thumbnail], types: ["Files"] }));
+        },
+        ordinaryText: async () => {
+          reset();
+          return runPaste(clipboard({ types: ["text/plain"], plain: "keep this normal paste" }));
+        },
+      };
+    </script>
+  </body>
+</html>

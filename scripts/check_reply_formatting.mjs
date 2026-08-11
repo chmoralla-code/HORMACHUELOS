@@ -6,21 +6,39 @@ import vm from "node:vm";
 const require = createRequire(import.meta.url);
 const ts = require("typescript");
 
-function loadReplyFormatter() {
-  const source = readFileSync(new URL("../src/components/util.ts", import.meta.url), "utf8");
-  const output = ts.transpileModule(source, {
+function transpileModule(path) {
+  const source = readFileSync(new URL(path, import.meta.url), "utf8");
+  return ts.transpileModule(source, {
     compilerOptions: {
       target: ts.ScriptTarget.ES2022,
       module: ts.ModuleKind.CommonJS,
     },
   }).outputText;
-  const sandbox = { module: { exports: {} }, exports: null };
-  sandbox.exports = sandbox.module.exports;
-  vm.runInNewContext(output, sandbox, { filename: "util.ts" });
-  return sandbox.module.exports.normalizeAssistantMarkdown;
 }
 
-const normalizeAssistantMarkdown = loadReplyFormatter();
+function loadReplyModules() {
+  const utilSandbox = { module: { exports: {} }, exports: null };
+  utilSandbox.exports = utilSandbox.module.exports;
+  vm.runInNewContext(transpileModule("../src/components/util.ts"), utilSandbox, { filename: "util.ts" });
+
+  const sessionSandbox = {
+    module: { exports: {} },
+    exports: null,
+    require: (specifier) => {
+      if (specifier === "./util") return utilSandbox.module.exports;
+      throw new Error(`Unexpected session dependency: ${specifier}`);
+    },
+  };
+  sessionSandbox.exports = sessionSandbox.module.exports;
+  vm.runInNewContext(transpileModule("../src/components/session.ts"), sessionSandbox, { filename: "session.ts" });
+
+  return {
+    normalizeAssistantMarkdown: utilSandbox.module.exports.normalizeAssistantMarkdown,
+    appendAssistantTranscriptChunk: sessionSandbox.module.exports.appendAssistantTranscriptChunk,
+  };
+}
+
+const { normalizeAssistantMarkdown, appendAssistantTranscriptChunk } = loadReplyModules();
 
 const malformedCompletion = [
   "done",
@@ -59,6 +77,39 @@ assert.equal(
   normalizeAssistantMarkdown('Before\n<tool_call>{"name":"done"}</tool_call>\nAfter'),
   "Before\n\nAfter",
 );
+
+// A provider output-limit recovery can insert thought/tool events between a
+// cut-off prefix and its suffix. The explicit continuation marker must keep
+// that as one assistant reply without merging ordinary later prose.
+const recoveryTranscript = [
+  { type: "user", text: "Please finish the build." },
+  { type: "run_start", permissionMode: "multi_agent" },
+  { type: "assistant", text: "The glob" },
+  { type: "thinking", iteration: 2, text: "Resuming after the output limit." },
+];
+appendAssistantTranscriptChunk(recoveryTranscript, "als.css update is complete.", 20, true);
+assert.equal(
+  recoveryTranscript.filter((message) => message.type === "assistant").length,
+  1,
+);
+assert.equal(recoveryTranscript[2].text, "The globals.css update is complete.");
+
+recoveryTranscript.push({ type: "tool_result", id: "build", name: "run_command", ok: true, content: "ok" });
+appendAssistantTranscriptChunk(recoveryTranscript, "A separate verified result.", 30, false);
+assert.equal(
+  recoveryTranscript.filter((message) => message.type === "assistant").length,
+  2,
+);
+
+const priorRunBoundary = [
+  { type: "assistant", text: "Prior answer." },
+  { type: "end", reason: "completed" },
+  { type: "run_start", permissionMode: "plan" },
+  { type: "thinking", iteration: 0, text: "" },
+];
+appendAssistantTranscriptChunk(priorRunBoundary, "Fresh answer.", 40, true);
+assert.equal(priorRunBoundary[0].text, "Prior answer.");
+assert.equal(priorRunBoundary.at(-1).text, "Fresh answer.");
 
 // Keep the session-bound lock intact even if the toolbar is refactored.
 const modelBar = readFileSync(new URL("../src/components/modelbar.ts", import.meta.url), "utf8");

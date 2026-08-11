@@ -12,7 +12,12 @@ export type SessionMessage =
       at?: number;
     }
   /** Restores the visual run mode when a transcript is opened again. */
-  | { type: "run_start"; permissionMode: "plan" | "multi_agent"; at?: number }
+  | {
+      type: "run_start";
+      permissionMode: "plan" | "multi_agent";
+      executionProfile?: "fast" | "balanced" | "thorough" | "safe";
+      at?: number;
+    }
   /** Keeps the visual Multi-Agent activity batch with the session it belongs to. */
   | { type: "multi_agent_batch"; tools: SessionMultiAgentTool[]; at?: number }
   | { type: "thinking"; iteration: number; text: string; at?: number }
@@ -30,6 +35,55 @@ export type SessionMultiAgentTool = {
   name: string;
   arguments: unknown;
 };
+
+/**
+ * Store one streamed assistant chunk while preserving intentional transcript
+ * boundaries. Provider recovery can insert thinking/status events between a
+ * cut-off prefix and its resumed suffix; `resumePrevious` reconnects only that
+ * explicitly marked suffix to the latest assistant message in the same run.
+ */
+export function appendAssistantTranscriptChunk(
+  messages: SessionMessage[],
+  text: string,
+  at?: number,
+  resumePrevious = false,
+): void {
+  if (!text) return;
+
+  let assistantIndex = -1;
+  const lastIndex = messages.length - 1;
+  if (lastIndex >= 0 && messages[lastIndex].type === "assistant") {
+    assistantIndex = lastIndex;
+  } else if (resumePrevious) {
+    for (let index = lastIndex; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (message.type === "assistant") {
+        assistantIndex = index;
+        break;
+      }
+      // Never let a recovery marker reach into a prior run or user turn.
+      if (
+        message.type === "user" ||
+        message.type === "run_start" ||
+        message.type === "question" ||
+        message.type === "done" ||
+        message.type === "end" ||
+        message.type === "cancelled"
+      ) {
+        break;
+      }
+    }
+  }
+
+  if (assistantIndex >= 0) {
+    const message = messages[assistantIndex] as Extract<SessionMessage, { type: "assistant" }>;
+    message.text += text;
+    message.at = at;
+    return;
+  }
+
+  messages.push({ type: "assistant", text, at });
+}
 
 /**
  * The preview workspace belongs to a conversation, rather than to the whole
@@ -934,6 +988,7 @@ export function recordAgentEvent(
       messages.push({
         type: "run_start",
         permissionMode: normalizeSessionPermissionMode(e.payload?.permission_mode),
+        executionProfile: e.payload?.execution_profile,
         at,
       });
       break;
@@ -962,13 +1017,12 @@ export function recordAgentEvent(
     }
     case "text": {
       const safeText = redactChatCredentials(e.payload.text || "");
-      const last = messages[messages.length - 1];
-      if (last && last.type === "assistant") {
-        last.text = redactChatCredentials(last.text + safeText);
-        last.at = at;
-      } else {
-        messages.push({ type: "assistant", text: safeText, at });
-      }
+      appendAssistantTranscriptChunk(
+        messages,
+        safeText,
+        at,
+        e.payload.continuation === true,
+      );
       break;
     }
     case "tool_call":

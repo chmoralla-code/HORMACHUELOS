@@ -141,18 +141,18 @@ select, select option { background: var(--raised); color: var(--text); }
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
-  /* Keep working three-dots wave looping even when reduced motion is on */
+  /* A static state remains clear and avoids background compositor work. */
   .thinking-simple .dots span,
   .thinking-running .dots span,
   .thinking-dots-btn .dots span,
   .thinking-wrap.thinking-wave-live .dots span,
   .tool-wave-dots span,
   .thinking-simple .dots span::before {
-    animation-name: thinkingDotWave !important;
-    animation-duration: 0.9s !important;
-    animation-iteration-count: infinite !important;
+    animation: none !important;
+    opacity: 0.72 !important;
+    transform: none !important;
   }
-  /* Letter-by-letter blue shine — keep looping under reduced motion */
+  /* Live labels are one DOM node; reduced motion keeps the color, not motion. */
   .thinking-wrap:not(.thinking-done) .thinking-toggle-row .thinking-simple-label,
   .thinking-wrap:not(.thinking-done) .thinking-simple-label,
   .tool-batch-wrap.is-running .tool-batch-label,
@@ -167,24 +167,6 @@ select, select option { background: var(--raised); color: var(--text); }
     background-clip: unset !important;
     -webkit-text-fill-color: unset !important;
     color: rgba(175, 175, 175, 0.88) !important;
-  }
-  .activity-shimmer .shine-ch,
-  .thinking-wrap:not(.thinking-done) .shine-ch,
-  .tool-batch-wrap.is-running .shine-ch,
-  .tool-card.pending .shine-ch,
-  .thinking-running .shine-ch,
-  .shine-ch.shine-blue,
-  .shine-ch.shine-red,
-  .activity-shimmer.shine-red .shine-ch {
-    animation-name: lightningFadeInOutBlue !important;
-    animation-duration: 1.05s !important;
-    animation-timing-function: ease-in-out !important;
-    animation-iteration-count: infinite !important;
-    color: var(--live-blue) !important;
-    -webkit-text-fill-color: currentColor !important;
-  }
-  .activity-shimmer.shine-blue .shine-ch {
-    animation-name: lightningFadeInOutBlue !important;
   }
   .activity-shimmer.shine-red,
   .thinking-wrap:not(.thinking-done) .thinking-simple-label.shine-red,

@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.74";
-const BUILTIN_MSI_SHA256 = "afa092fa3adfa5fce7acf1b6094a145c9664b7b20d82219a81f50fe597724e10";
-const BUILTIN_EXE_SHA256 = "ba897315b4eb85becbafd35c1de8c760937ed2059574d95b0b615e5331d5d734";
-const BUILTIN_RELEASE_NOTES = "Preview toolbar cleanup: the project path and localhost search field now keeps a stable width when the preview is resized. Build, publishing, Android, Software, Design Mode, and Source Lens now live in a compact Preview actions menu with keyboard support. Browser-tab navigation remains uncluttered.";
+const BUILTIN_RELEASE_VERSION = "0.1.75";
+const BUILTIN_MSI_SHA256 = "a96acb9096e99c715a6adae8a5feebd36b32fc5a73b9b94762504a8ed39390ba";
+const BUILTIN_EXE_SHA256 = "1757b8b298184a1be050185a08f7d7d2e8af572174b32264d99e688e2eb3d7e6";
+const BUILTIN_RELEASE_NOTES = "AI replies are now consistently organized and readable in Light mode. Source Lens and Design Mode are more flexible across preview browser tabs. Chat accepts pasted local videos and ScreenSketch recordings. Project and session switching no longer revives completed agents, run ownership is isolated, and rendering and lifecycle paths are tuned for smoother FPS. New Auto, Fast, Balanced, Thorough, and Safe execution profiles add persistent project intelligence, bounded repair escalation, and conflict-aware per-run checkpoints with undo and rollback.";
 
 // A visual-preference update must never interrupt an active desktop task.
 // The release is discoverable through the update flow, but stays optional.

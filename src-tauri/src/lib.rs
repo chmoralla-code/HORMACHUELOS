@@ -1,10 +1,12 @@
 pub mod agent;
 pub mod app_updater;
+pub mod checkpoint;
 pub mod computer_fx;
 pub mod computer_use;
 pub mod config;
 pub mod cursor_bridge;
 pub mod design_source;
+pub mod execution_profile;
 pub mod flavour;
 pub mod integration_chat;
 pub mod integrations;
@@ -12,6 +14,7 @@ pub mod license;
 pub mod llm;
 pub mod preview_browser;
 pub mod preview_capture;
+pub mod project_intelligence;
 pub mod smart_agent;
 pub mod state;
 pub mod templates;
@@ -789,6 +792,8 @@ fn import_image_path(path: String) -> Result<String, String> {
 }
 
 const MAX_PASTE_VIDEO_BYTES: u64 = 750 * 1024 * 1024;
+const MAX_RAW_PASTE_VIDEO_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_CLIPBOARD_VIDEO_FILES: usize = 20;
 
 fn is_supported_video_extension(ext: &str) -> bool {
     matches!(
@@ -797,14 +802,48 @@ fn is_supported_video_extension(ext: &str) -> bool {
     )
 }
 
-/// Copy a user-selected video into the app's attachment directory. Keeping a
-/// private copy makes the attachment survive Explorer moves and lets the
-/// WebView sample frames without granting an agent access to arbitrary paths.
+fn write_paste_video_bytes(bytes: &[u8], ext: &str, max_bytes: u64) -> Result<String, String> {
+    let ext = ext.trim().trim_start_matches('.').to_ascii_lowercase();
+    if !is_supported_video_extension(&ext) {
+        return Err(format!(
+            "Unsupported video type .{ext}. Use MP4, MOV, WEBM, MKV, AVI, WMV, FLV, MPEG, or 3GP."
+        ));
+    }
+    if bytes.is_empty() {
+        return Err("Video is empty.".into());
+    }
+    if bytes.len() as u64 > max_bytes {
+        return Err(format!(
+            "Pasted video is too large (max {} MB). Use + → Video for larger files.",
+            max_bytes / (1024 * 1024)
+        ));
+    }
+
+    let dir = std::env::temp_dir().join("hormachuelos-paste");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let dest = dir.join(format!("video-{}.{}", uuid::Uuid::new_v4(), ext));
+    std::fs::write(&dest, bytes).map_err(|e| format!("Could not save pasted video: {e}"))?;
+    Ok(dest.to_string_lossy().into_owned())
+}
+
+/// Persist an in-memory video exposed by the WebView clipboard. Raw IPC avoids
+/// the large base64/JSON expansion that would otherwise duplicate recordings.
 #[tauri::command]
-fn import_video_path(path: String) -> Result<String, String> {
+fn save_pasted_video(request: tauri::ipc::Request<'_>) -> Result<String, String> {
+    let ext = request
+        .headers()
+        .get("x-ai-forge-video-extension")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("Pasted video must use a raw byte payload.".into());
+    };
+    write_paste_video_bytes(bytes, ext, MAX_RAW_PASTE_VIDEO_BYTES)
+}
+
+fn import_video_file(src: &std::path::Path) -> Result<String, String> {
     use std::io::{Read, Write};
 
-    let src = std::path::PathBuf::from(path.trim().trim_matches('"'));
     if !src.is_file() {
         return Err(format!("Video file not found: {}", src.display()));
     }
@@ -817,7 +856,7 @@ fn import_video_path(path: String) -> Result<String, String> {
             "Unsupported video type .{ext}. Use MP4, MOV, WEBM, MKV, AVI, WMV, FLV, MPEG, or 3GP."
         ));
     }
-    let metadata = std::fs::metadata(&src).map_err(|e| format!("Could not inspect video: {e}"))?;
+    let metadata = std::fs::metadata(src).map_err(|e| format!("Could not inspect video: {e}"))?;
     if metadata.len() == 0 {
         return Err("Video is empty.".into());
     }
@@ -829,7 +868,7 @@ fn import_video_path(path: String) -> Result<String, String> {
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let dest = dir.join(format!("video-{}.{}", uuid::Uuid::new_v4(), ext));
     let copied = (|| -> Result<u64, String> {
-        let input = std::fs::File::open(&src).map_err(|e| format!("Could not read video: {e}"))?;
+        let input = std::fs::File::open(src).map_err(|e| format!("Could not read video: {e}"))?;
         let mut output = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -850,6 +889,149 @@ fn import_video_path(path: String) -> Result<String, String> {
     }
     copied?;
     Ok(dest.to_string_lossy().into_owned())
+}
+
+/// Copy a user-selected video into the app's attachment directory. Keeping a
+/// private copy makes the attachment survive Explorer moves and lets the
+/// WebView sample frames without granting an agent access to arbitrary paths.
+#[tauri::command]
+fn import_video_path(path: String) -> Result<String, String> {
+    let src = std::path::PathBuf::from(path.trim().trim_matches('"'));
+    import_video_file(&src)
+}
+
+#[derive(Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClipboardVideoImportResult {
+    paths: Vec<String>,
+    errors: Vec<String>,
+}
+
+fn import_clipboard_video_files(paths: Vec<std::path::PathBuf>) -> ClipboardVideoImportResult {
+    let mut result = ClipboardVideoImportResult::default();
+    let mut seen = std::collections::HashSet::new();
+    let mut supported_count = 0usize;
+
+    for src in paths {
+        let ext = src
+            .extension()
+            .map(|value| value.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        if !is_supported_video_extension(&ext) {
+            continue;
+        }
+        let identity = src.to_string_lossy().to_ascii_lowercase();
+        if !seen.insert(identity) {
+            continue;
+        }
+        supported_count += 1;
+        if supported_count > MAX_CLIPBOARD_VIDEO_FILES {
+            continue;
+        }
+        match import_video_file(&src) {
+            Ok(path) => result.paths.push(path),
+            Err(error) => {
+                let name = src
+                    .file_name()
+                    .map(|value| value.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "video".into());
+                result.errors.push(format!("{name}: {error}"));
+            }
+        }
+    }
+
+    if supported_count > MAX_CLIPBOARD_VIDEO_FILES {
+        result.errors.push(format!(
+            "Only the first {MAX_CLIPBOARD_VIDEO_FILES} copied videos can be attached at once."
+        ));
+    }
+    result
+}
+
+#[cfg(windows)]
+fn clipboard_file_paths() -> Result<Vec<std::path::PathBuf>, String> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows::Win32::{
+        System::{
+            DataExchange::{
+                CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
+            },
+            Ole::CF_HDROP,
+        },
+        UI::Shell::{DragQueryFileW, HDROP},
+    };
+
+    struct ClipboardGuard;
+    impl Drop for ClipboardGuard {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = CloseClipboard();
+            }
+        }
+    }
+
+    let mut last_error = None;
+    let mut opened = false;
+    for attempt in 0..4 {
+        match unsafe { OpenClipboard(None) } {
+            Ok(()) => {
+                opened = true;
+                break;
+            }
+            Err(error) => {
+                last_error = Some(error.to_string());
+                if attempt < 3 {
+                    std::thread::sleep(std::time::Duration::from_millis(12));
+                }
+            }
+        }
+    }
+    if !opened {
+        return Err(format!(
+            "Could not open the Windows clipboard: {}",
+            last_error.unwrap_or_else(|| "clipboard is busy".into())
+        ));
+    }
+    let _guard = ClipboardGuard;
+
+    if unsafe { IsClipboardFormatAvailable(CF_HDROP.0 as u32) }.is_err() {
+        return Ok(Vec::new());
+    }
+    let handle = unsafe { GetClipboardData(CF_HDROP.0 as u32) }
+        .map_err(|error| format!("Could not read copied files: {error}"))?;
+    let hdrop = HDROP(handle.0);
+    let count = unsafe { DragQueryFileW(hdrop, u32::MAX, None) };
+    let mut paths = Vec::with_capacity((count as usize).min(256));
+    for index in 0..count.min(256) {
+        let len = unsafe { DragQueryFileW(hdrop, index, None) };
+        if len == 0 {
+            continue;
+        }
+        let mut buffer = vec![0u16; len as usize + 1];
+        let copied = unsafe { DragQueryFileW(hdrop, index, Some(&mut buffer)) };
+        if copied == 0 {
+            continue;
+        }
+        let path = std::ffi::OsString::from_wide(&buffer[..copied as usize]);
+        paths.push(std::path::PathBuf::from(path));
+    }
+    Ok(paths)
+}
+
+#[cfg(not(windows))]
+fn clipboard_file_paths() -> Result<Vec<std::path::PathBuf>, String> {
+    Ok(Vec::new())
+}
+
+/// Import videos copied in Explorer or Windows Snipping Tool. WebView2 does
+/// not consistently expose the native CF_HDROP list to DOM ClipboardEvents.
+#[tauri::command]
+async fn import_clipboard_videos() -> Result<ClipboardVideoImportResult, String> {
+    tokio::task::spawn_blocking(|| -> Result<ClipboardVideoImportResult, String> {
+        Ok(import_clipboard_video_files(clipboard_file_paths()?))
+    })
+    .await
+    .map_err(|error| format!("Could not inspect the clipboard: {error}"))?
 }
 
 #[tauri::command]
@@ -909,6 +1091,38 @@ fn clear_project_files(state: tauri::State<'_, state::AppState>) -> Result<u64, 
 }
 
 #[tauri::command]
+fn list_run_checkpoints(
+    project_root: Option<String>,
+    state: tauri::State<'_, state::AppState>,
+) -> Vec<checkpoint::CheckpointSummary> {
+    let project_root = project_root.or_else(|| state.project_root.lock().unwrap().clone());
+    state.checkpoints.list(project_root.as_deref())
+}
+
+#[tauri::command]
+fn rollback_run_checkpoint(
+    checkpoint_id: String,
+    scope: Option<String>,
+    state: tauri::State<'_, state::AppState>,
+) -> Result<checkpoint::RollbackResult, String> {
+    let checkpoint = state
+        .checkpoints
+        .get(checkpoint_id.trim())
+        .ok_or_else(|| "Rollback checkpoint was not found or has expired.".to_string())?;
+    let checkpoint_project = checkpoint.summary().project_root;
+    if state.has_active_run_for_project(&checkpoint_project) {
+        return Err(
+            "Wait for active agents in this project to finish before rolling back its files."
+                .into(),
+        );
+    }
+    let last_action_only = scope
+        .as_deref()
+        .is_some_and(|value| value.eq_ignore_ascii_case("last_action"));
+    checkpoint.rollback(last_action_only)
+}
+
+#[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn agent_run(
     prompt: String,
@@ -918,6 +1132,8 @@ async fn agent_run(
     project_root: Option<String>,
     cursor_agent_id: Option<String>,
     task_profile: Option<String>,
+    execution_profile: Option<String>,
+    run_settings: Option<config::Settings>,
     app: tauri::AppHandle,
     state: tauri::State<'_, state::AppState>,
 ) -> Result<Option<String>, String> {
@@ -965,14 +1181,20 @@ async fn agent_run(
             .clone()
             .ok_or_else(|| "No project open. Create or open a project first.".to_string())?
     };
-    // Always reload settings from disk so Plan/Auto/Full mode changes apply
-    // even if in-memory state was stale.
-    let settings = match config::Settings::load() {
-        Ok(s) => {
-            *state.settings.lock().unwrap() = s.clone();
-            s
+    // Prefer the complete settings snapshot captured synchronously at submit.
+    // The shared model bar may be restored for another session while this
+    // command is starting; falling back to disk preserves older callers.
+    let settings = if let Some(captured) = run_settings {
+        captured.validate().map_err(|error| error.to_string())?;
+        captured
+    } else {
+        match config::Settings::load() {
+            Ok(s) => {
+                *state.settings.lock().unwrap() = s.clone();
+                s
+            }
+            Err(_) => state.settings.lock().unwrap().clone(),
         }
-        Err(_) => state.settings.lock().unwrap().clone(),
     };
 
     // A hosted plan's wallet is enforced by the hosted API, not this local
@@ -996,7 +1218,22 @@ async fn agent_run(
         }
     }
 
-    let run = state.start_run(&session_id)?;
+    let resolved_execution_profile = execution_profile::ExecutionProfile::resolve(
+        execution_profile.as_deref(),
+        &prompt,
+        task_profile.as_deref(),
+    );
+    let (run, _run_guard) = state.start_run(&session_id)?;
+    let checkpoint = state.checkpoints.begin_run(
+        &session_id,
+        std::path::Path::new(&project_root),
+        resolved_execution_profile.wire_name(),
+    )?;
+    run.set_project_root(project_root.clone());
+    run.set_checkpoint(
+        checkpoint.clone(),
+        resolved_execution_profile.protects_command_changes(),
+    );
     let app_handle = Arc::new(app);
     // Prefer the session-bound Cursor agent id from the frontend so each chat
     // in the same project keeps its own durable memory across app restarts.
@@ -1011,18 +1248,25 @@ async fn agent_run(
         user_request.unwrap_or_default(),
         settings,
         session_id.clone(),
-        run,
+        run.clone(),
         history.unwrap_or_default(),
         cursor_resume,
         task_profile,
+        Some(resolved_execution_profile.wire_name().to_string()),
     )
     .await;
+    checkpoint.mark_finished(if run.cancel.load(std::sync::atomic::Ordering::SeqCst) {
+        "cancelled"
+    } else if result.is_err() {
+        "error"
+    } else {
+        "finished"
+    });
     match &result {
         Ok(Some(agent_id)) => state.set_cursor_agent_id(&session_id, Some(agent_id.clone())),
         Ok(None) => {}
         Err(_) => {}
     }
-    state.finish_run(&session_id);
     result.map_err(|e| e.to_string())
 }
 
@@ -1035,6 +1279,12 @@ fn agent_stop(session_id: String, state: tauri::State<'_, state::AppState>) -> R
         return Err("No active run for this session.".into());
     }
     Ok(())
+}
+
+/// Native run registry is the source of truth for session/project busy state.
+#[tauri::command]
+fn active_agent_sessions(state: tauri::State<'_, state::AppState>) -> Vec<String> {
+    state.active_run_ids()
 }
 
 #[tauri::command]
@@ -1253,14 +1503,20 @@ pub fn run() {
             read_project_file,
             delete_project_file,
             clear_project_files,
+            list_run_checkpoints,
+            rollback_run_checkpoint,
             export_client_pack,
             get_license_status,
             apply_license_key,
             record_license_usage,
             save_pasted_image,
+            save_pasted_video,
             preview_capture::capture_preview_selection,
             preview_browser::create_preview_browser,
             preview_browser::set_preview_browser_bounds,
+            preview_browser::set_preview_browser_inspection,
+            preview_browser::set_preview_browser_inspection_chrome,
+            preview_browser::capture_preview_browser_selection,
             preview_browser::navigate_preview_browser,
             preview_browser::preview_browser_action,
             preview_browser::close_preview_browser,
@@ -1269,8 +1525,10 @@ pub fn run() {
             design_source::resolve_design_target,
             import_image_path,
             import_video_path,
+            import_clipboard_videos,
             agent_run,
             agent_stop,
+            active_agent_sessions,
             open_project_in_explorer,
             app_version,
             list_agent_skills,
@@ -1296,7 +1554,9 @@ pub fn run() {
 
 #[cfg(test)]
 mod desktop_config_tests {
-    use super::quick_session_workspace_in;
+    use super::{
+        import_clipboard_video_files, quick_session_workspace_in, write_paste_video_bytes,
+    };
 
     #[test]
     fn quick_sessions_workspace_is_created_under_its_managed_root() {
@@ -1333,5 +1593,49 @@ mod desktop_config_tests {
                 .any(|source| source == "https://hormachuelos.vercel.app"),
             "the packaged webview must be allowed to start and poll browser sign-in"
         );
+    }
+
+    #[test]
+    fn pasted_video_bytes_are_bounded_and_written_to_the_private_directory() {
+        let path = write_paste_video_bytes(b"fake-video", "MP4", 1024)
+            .expect("write a bounded pasted video");
+        let path = std::path::PathBuf::from(path);
+        assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some("mp4"));
+        assert_eq!(
+            std::fs::read(&path).expect("read pasted video"),
+            b"fake-video"
+        );
+        assert!(write_paste_video_bytes(b"", "mp4", 1024).is_err());
+        assert!(write_paste_video_bytes(b"video", "exe", 1024).is_err());
+        assert!(write_paste_video_bytes(b"1234", "mp4", 3)
+            .expect_err("reject oversized raw video")
+            .contains("too large"));
+        std::fs::remove_file(path).expect("remove pasted-video fixture");
+    }
+
+    #[test]
+    fn clipboard_video_import_filters_duplicates_and_reports_bad_files() {
+        let fixture =
+            std::env::temp_dir().join(format!("ai-forge-clipboard-video-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&fixture).expect("create clipboard fixture");
+        let video = fixture.join("screen-recording.mp4");
+        let image = fixture.join("screenshot.png");
+        let missing = fixture.join("missing.webm");
+        std::fs::write(&video, b"fake-mp4").expect("write video fixture");
+        std::fs::write(&image, b"fake-png").expect("write image fixture");
+
+        let result = import_clipboard_video_files(vec![video.clone(), video, image, missing]);
+        assert_eq!(result.paths.len(), 1, "one unique video should import");
+        assert_eq!(result.errors.len(), 1, "missing video should be reported");
+        assert!(result.errors[0].contains("missing.webm"));
+        let imported = std::path::PathBuf::from(&result.paths[0]);
+        assert_eq!(
+            std::fs::read(&imported).expect("read imported video"),
+            b"fake-mp4"
+        );
+        assert!(imported.starts_with(std::env::temp_dir().join("hormachuelos-paste")));
+
+        std::fs::remove_file(imported).expect("remove imported fixture");
+        std::fs::remove_dir_all(fixture).expect("remove clipboard fixture");
     }
 }

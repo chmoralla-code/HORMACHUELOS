@@ -1326,13 +1326,26 @@
   font-family: var(--font-mono);
 }
 .msg { max-width: 880px; margin: 0 auto 14px; }
+
+/* Skip paint/layout for sealed history outside the scroll viewport. Chromium
+   remembers the measured height after first render, so long chats stay smooth
+   without changing their scroll geometry. */
+#chat > .thinking-wrap.thinking-done,
+#chat > .tool-batch-wrap.is-done,
+#chat > .tool-card-wrap,
+#chat > .done-card,
+#chat > .summary-card,
+#chat > .multi-agent-batch.complete {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 72px;
+}
 .msg.user {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
 }
 .msg-body {
-  color: #ffffff;
+  color: var(--text);
   font-size: 13px;
   line-height: 1.55;
   white-space: pre-wrap;
@@ -1340,13 +1353,13 @@
   margin-top: 6px;
   padding: 12px 14px;
   border-radius: var(--radius-sm, 6px);
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
   backdrop-filter: blur(6px);
 }
 .msg.user .msg-body {
-  color: #ffffff;
-  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+  background: var(--surface-hover);
   border: none;
   border-radius: 18px;
   padding: 10px 16px;
@@ -1439,14 +1452,14 @@
   background: rgba(255, 255, 255, 0.08);
 }
 .msg.assistant .msg-body {
-  color: #ffffff;
+  color: var(--text);
   background: transparent;
   border: none;
   border-color: transparent;
   padding: 2px 0 4px;
   backdrop-filter: none;
 }
-.msg.assistant .msg-body.md { white-space: normal; color: #ffffff; font-size: 13.5px; line-height: 1.6; }
+.msg.assistant .msg-body.md { white-space: normal; color: var(--text); font-size: 13.5px; line-height: 1.6; }
 .msg.assistant .msg-body.md,
 .msg.assistant .msg-body.md p,
 .msg.assistant .msg-body.md li,
@@ -1457,18 +1470,20 @@
 .msg.assistant .msg-body.md h5,
 .msg.assistant .msg-body.md h6,
 .msg.assistant .msg-body.md strong {
-  color: #ffffff;
+  color: var(--text);
 }
 .msg.assistant .msg-body.md em {
-  color: rgba(210, 210, 210, 0.78);
+  color: var(--text-muted);
   font-style: italic;
 }
 
 /* ===== Flagship reply chrome ===== */
 #chat.chat-sol {
-  --sol-rail: rgba(255, 255, 255, 0.22);
-  --sol-ink: #f7f7f7;
-  --sol-mute: rgba(200, 200, 200, 0.72);
+  --sol-rail: var(--border-strong);
+  --sol-rail-fade: var(--line-subtle);
+  --sol-ink: var(--text);
+  --sol-mute: var(--text-muted);
+  --sol-reasoning: rgba(255, 195, 225, 0.88);
 }
 #chat.chat-sol .msg.sol-reply {
   max-width: 920px;
@@ -1486,9 +1501,9 @@
   border-radius: 2px;
   background: linear-gradient(
     180deg,
-    rgba(255, 255, 255, 0.55) 0%,
-    rgba(255, 255, 255, 0.12) 55%,
-    rgba(255, 255, 255, 0.04) 100%
+    var(--sol-rail) 0%,
+    var(--sol-rail-fade) 55%,
+    transparent 100%
   );
 }
 .msg-role-sol {
@@ -1501,7 +1516,7 @@
   font-family: var(--font-display);
 }
 .msg-role-sol .sol-mark {
-  color: rgba(255, 255, 255, 0.7);
+  color: var(--text-muted);
   font-size: 11px;
   line-height: 1;
   display: inline-flex;
@@ -1516,7 +1531,7 @@
 .msg-role-sol .sol-name {
   font-size: 12px;
   font-weight: 600;
-  color: rgba(245, 245, 245, 0.92);
+  color: var(--text);
   letter-spacing: 0.02em;
 }
 .msg-role-sol .sol-tag {
@@ -1524,10 +1539,10 @@
   font-weight: 600;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: rgba(180, 180, 180, 0.75);
+  color: var(--text-muted);
   font-family: var(--font-mono);
   padding: 2px 6px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid var(--border);
   border-radius: 999px;
 }
 .msg-role-sol .sol-tag-ultra {
@@ -1555,7 +1570,7 @@
   font-weight: 650;
   letter-spacing: -0.01em;
   margin: 1.1em 0 0.45em;
-  color: #fff;
+  color: var(--text);
 }
 #chat.chat-sol .msg.sol-reply .msg-body.md h1 { font-size: 1.28em; }
 #chat.chat-sol .msg.sol-reply .msg-body.md h2 { font-size: 1.14em; }
@@ -1569,12 +1584,12 @@
   margin: 0.28em 0;
 }
 #chat.chat-sol .msg.sol-reply .msg-body.md strong {
-  color: #fff;
+  color: var(--text);
   font-weight: 650;
 }
 #chat.chat-sol .msg.sol-reply .msg-body.md code.md-inline {
-  background: rgba(255, 255, 255, 0.07);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: var(--surface-inset);
+  border: 1px solid var(--border);
   border-radius: 5px;
   padding: 0.12em 0.4em;
   font-size: 0.9em;
@@ -1583,9 +1598,9 @@
   margin: 0.75em 0 1em;
   padding: 14px 16px;
   border-radius: 10px;
-  background: rgba(0, 0, 0, 0.35);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  background: var(--surface-inset);
+  border: 1px solid var(--border);
+  box-shadow: inset 0 1px 0 var(--surface-soft);
   font-size: 12.5px;
   line-height: 1.55;
 }
@@ -1628,7 +1643,7 @@
 #chat.chat-sol .thinking-wrap.sol-thinking .thinking-body {
   font-size: 13px;
   line-height: 1.6;
-  color: rgba(255, 195, 225, 0.88);
+  color: var(--sol-reasoning);
   max-height: min(48vh, 380px);
 }
 #chat.chat-sol .tool-batch-wrap,
@@ -1721,12 +1736,30 @@
   color: rgba(255, 190, 222, 0.96);
 }
 
+/* Premium accents stay saturated enough to read on the paper workbench. */
+:root[data-appearance="light"] #chat.chat-sol {
+  --sol-reasoning: #7b2e5b;
+}
+:root[data-appearance="light"] .msg-role-sol .sol-tag-ultra {
+  color: #8b2059;
+  border-color: rgba(139, 32, 89, 0.42);
+  background: rgba(190, 53, 127, 0.1);
+}
+:root[data-appearance="light"] #chat.chat-claude .msg-role-claude,
+:root[data-appearance="light"] #chat.chat-claude .claude-tag {
+  color: #8b342f;
+}
+:root[data-appearance="light"] #chat.chat-claude .claude-tag {
+  border-color: rgba(139, 52, 47, 0.36);
+  background: rgba(139, 52, 47, 0.09);
+}
+
 .msg.system .msg-body {
   color: var(--fg-3);
   font-size: 12px;
   font-style: italic;
-  background: rgba(255, 255, 255, 0.03);
-  border-color: rgba(255, 255, 255, 0.08);
+  background: var(--surface-soft);
+  border-color: var(--border);
 }
 .msg-meta {
   display: flex;
@@ -1799,8 +1832,8 @@
 }
 .msg-copy:hover {
   color: var(--fg-1);
-  background: rgba(255, 255, 255, 0.05);
-  border-color: rgba(255, 255, 255, 0.08);
+  background: var(--surface-hover);
+  border-color: var(--border);
 }
 .msg-copy.copied {
   color: var(--fg-1);
@@ -1894,14 +1927,14 @@
 .msg-body.md h2 {
   font-size: 1.12em;
   padding: 0.55em 0 0.38em;
-  border-bottom: 1px solid rgba(215, 230, 255, 0.15);
+  border-bottom: 1px solid var(--line-subtle);
   letter-spacing: 0.01em;
 }
 .msg-body.md h2:first-child { margin-top: 0; }
 .msg-body.md h3 {
   font-size: 0.82em;
   margin-top: 1.25em;
-  color: rgba(173, 207, 255, 0.88);
+  color: var(--info);
   letter-spacing: 0.075em;
   text-transform: uppercase;
 }
@@ -1913,17 +1946,18 @@
 .msg-body.md code.md-inline {
   font-family: var(--font-mono);
   font-size: 0.86em;
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: var(--surface-inset);
+  border: 1px solid var(--border);
   border-radius: 6px;
   padding: 0.12em 0.42em;
-  color: rgba(235, 235, 235, 0.95);
+  color: var(--text);
 }
 .msg-body.md pre.md-code {
   font-family: var(--font-mono);
   font-size: 11px;
-  background: rgba(0, 0, 0, 0.35);
-  border: 1px solid rgba(242, 240, 232, 0.08);
+  background: var(--surface-inset);
+  border: 1px solid var(--border);
+  color: var(--text);
   border-radius: var(--radius-sm);
   padding: 10px 12px;
   overflow-x: auto;
@@ -1932,7 +1966,7 @@
 }
 .msg-body.md pre.md-code code { background: none; border: none; padding: 0; }
 .msg-body.md a.md-link {
-  color: #7eb6ff;
+  color: var(--info);
   text-decoration: none;
   display: inline-flex;
   align-items: center;
@@ -1956,16 +1990,14 @@
   max-width: 100%;
   margin: 0.9em 0 1.05em;
   overflow: auto;
-  border: 1px solid rgba(208, 224, 255, 0.14);
+  border: 1px solid var(--border);
   border-radius: 10px;
-  background:
-    linear-gradient(180deg, rgba(126, 182, 255, 0.075), rgba(255, 255, 255, 0.018)),
-    rgba(8, 11, 16, 0.36);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
-  scrollbar-color: rgba(148, 185, 237, 0.42) transparent;
+  background: linear-gradient(180deg, var(--surface-hover), var(--surface-inset));
+  box-shadow: inset 0 1px 0 var(--surface-soft);
+  scrollbar-color: var(--scroll-thumb) transparent;
 }
 .msg-body.md .md-table-wrap:focus {
-  outline: 2px solid rgba(126, 182, 255, 0.58);
+  outline: 2px solid var(--focus);
   outline-offset: 2px;
 }
 .msg-body.md table.md-table {
@@ -1979,14 +2011,14 @@
 .msg-body.md .md-table th,
 .msg-body.md .md-table td {
   padding: 9px 11px;
-  border-bottom: 1px solid rgba(208, 224, 255, 0.1);
+  border-bottom: 1px solid var(--border);
   text-align: left;
   vertical-align: top;
   overflow-wrap: anywhere;
 }
 .msg-body.md .md-table th {
-  background: rgba(126, 182, 255, 0.11);
-  color: rgba(238, 246, 255, 0.96);
+  background: var(--ember-soft);
+  color: var(--text);
   font-size: 0.78em;
   font-weight: 650;
   letter-spacing: 0.045em;
@@ -1994,13 +2026,13 @@
   white-space: nowrap;
 }
 .msg-body.md .md-table td {
-  color: rgba(232, 236, 242, 0.9);
+  color: var(--text-2);
 }
 .msg-body.md .md-table tbody tr:nth-child(even) td {
-  background: rgba(255, 255, 255, 0.018);
+  background: var(--surface-soft);
 }
 .msg-body.md .md-table tbody tr:hover td {
-  background: rgba(126, 182, 255, 0.065);
+  background: var(--surface-hover);
 }
 .msg-body.md .md-table tbody tr:last-child td {
   border-bottom: 0;
@@ -2232,7 +2264,7 @@
   border: none;
   border-radius: 4px;
   background: transparent;
-  color: rgba(160, 160, 160, 0.78);
+  color: var(--text-muted);
   font-size: 12.5px;
   font-family: var(--font-ui, var(--font-sans, inherit));
   line-height: 1.45;
@@ -2242,10 +2274,10 @@
   transition: color 0.15s ease;
 }
 .thinking-toggle-row:hover {
-  color: rgba(210, 210, 210, 0.92);
+  color: var(--text-2);
 }
 .thinking-toggle-row:focus-visible {
-  outline: 1px solid rgba(180, 180, 180, 0.35);
+  outline: 1px solid var(--border-strong);
   outline-offset: 2px;
 }
 .thinking-toggle-row .thinking-simple-label {
@@ -2257,7 +2289,7 @@
 .thinking-toggle-row .thinking-chev {
   display: inline-flex;
   align-items: center;
-  color: rgba(140, 140, 140, 0.7);
+  color: var(--text-faint);
   transition: transform 0.18s ease;
   flex-shrink: 0;
 }
@@ -2269,7 +2301,7 @@
   transform: rotate(-90deg);
 }
 .thinking-wrap:not(.thinking-done) .thinking-toggle-row {
-  color: rgba(185, 185, 185, 0.88);
+  color: var(--text-2);
 }
 
 .thinking-wrap:not(.thinking-done) .thinking-toggle-row .thinking-simple-label,
@@ -2279,7 +2311,7 @@
 .tool-card.pending .tool-name,
 .thinking-running .thinking-simple-label,
 .activity-shimmer {
-  /* Letter shine owns color — keep container readable as fallback */
+  /* One animation per live label. Older builds animated every character. */
   display: inline !important;
   max-width: 100%;
   overflow: visible !important;
@@ -2289,29 +2321,10 @@
   -webkit-background-clip: unset !important;
   background-clip: unset !important;
   -webkit-text-fill-color: unset !important;
-  color: rgba(175, 175, 175, 0.88) !important;
-  animation: none !important;
-  white-space: nowrap;
-}
-.activity-shimmer .shine-ch,
-.thinking-wrap:not(.thinking-done) .shine-ch,
-.tool-batch-wrap.is-running .shine-ch,
-.tool-card.pending .shine-ch,
-.thinking-running .shine-ch,
-.shine-ch.shine-red,
-.shine-ch.shine-pink,
-.activity-shimmer.shine-red .shine-ch,
-.activity-shimmer.shine-pink .shine-ch {
-  display: inline-block;
-  color: var(--live-blue) !important;
-  -webkit-text-fill-color: currentColor !important;
-  text-shadow: 0 0 8px var(--live-blue-shadow), 0 0 18px var(--live-blue-halo);
-  animation-name: lightningFadeInOutBlue !important;
-  animation-duration: 1.05s !important;
-  animation-timing-function: ease-in-out !important;
-  animation-iteration-count: infinite !important;
-  animation-delay: calc(var(--i, 0) * 0.035s) !important;
+  color: var(--text-muted) !important;
+  animation: lightningFadeInOutBlue 1.25s ease-in-out infinite !important;
   will-change: opacity, transform;
+  white-space: nowrap;
 }
 .activity-shimmer.shine-blue,
 .activity-shimmer.shine-red,
@@ -2323,20 +2336,10 @@
 .tool-card.pending .tool-name.shine-red,
 .thinking-running .thinking-simple-label.shine-blue,
 .thinking-running .thinking-simple-label.shine-red {
-  color: var(--live-blue-strong) !important;
+  color: var(--live-blue) !important;
   text-shadow: 0 0 10px var(--live-blue-shadow);
   letter-spacing: 0.02em;
   font-weight: 500;
-}
-#chat.chat-sol .activity-shimmer .shine-ch.shine-pink,
-#chat.chat-sol .thinking-wrap:not(.thinking-done) .shine-ch.shine-pink,
-#chat.chat-sol .tool-batch-wrap.is-running .shine-ch.shine-pink,
-#chat.chat-sol .tool-card.pending .shine-ch.shine-pink,
-#chat.chat-sol .thinking-running .shine-ch.shine-pink {
-  color: #ff75bb !important;
-  -webkit-text-fill-color: currentColor !important;
-  text-shadow: 0 0 8px rgba(255, 75, 175, 0.76), 0 0 18px rgba(235, 30, 138, 0.4) !important;
-  animation-name: lightningFadeInOutPink !important;
 }
 #chat.chat-sol .activity-shimmer.shine-pink,
 #chat.chat-sol .thinking-wrap:not(.thinking-done) .thinking-toggle-row .thinking-simple-label.shine-pink,
@@ -2347,6 +2350,7 @@
   text-shadow: 0 0 10px rgba(255, 70, 170, 0.52);
   letter-spacing: 0.02em;
   font-weight: 500;
+  animation-name: lightningFadeInOutPink !important;
 }
 #chat.chat-sol .thinking-dots-btn .dots span,
 #chat.chat-sol .thinking-simple .dots span,
@@ -2411,7 +2415,7 @@
   align-items: center;
   justify-content: flex-start;
   gap: 8px;
-  color: rgba(180, 180, 180, 0.85);
+  color: var(--text-muted);
   font-size: 12.5px;
   font-family: inherit;
   padding: 2px 0;
@@ -2433,7 +2437,7 @@
   margin: 6px auto;
   padding: 2px 0;
   width: 100%;
-  color: rgba(180, 180, 180, 0.88);
+  color: var(--text-muted);
   font-size: 12.5px;
   font-family: inherit;
 }
@@ -2505,7 +2509,7 @@
 }
 .thinking-running .thinking-simple-label {
   display: inline !important;
-  color: rgba(190, 190, 190, 0.9);
+  color: var(--text-2);
   opacity: 0.95;
 }
 
@@ -2539,7 +2543,7 @@
   width: 100%;
   margin: 0;
   padding: 4px 0 4px 12px;
-  color: rgba(170, 170, 170, 0.72);
+  color: var(--text-muted);
   font-size: 12.5px;
   font-family: inherit;
   line-height: 1.55;
@@ -2554,7 +2558,7 @@
   outline: none;
   box-shadow: none;
   background: transparent;
-  border-left: 2px solid rgba(140, 140, 140, 0.28);
+  border-left: 2px solid var(--border-strong);
   scrollbar-width: none;
   -ms-overflow-style: none;
 }
@@ -2572,14 +2576,14 @@
 }
 .thinking-stream {
   white-space: pre-wrap;
-  color: rgba(170, 170, 170, 0.72);
+  color: var(--text-muted);
 }
 .thinking-wrap.thinking-done .thinking-body {
   max-height: min(36vh, 260px);
 }
 .thinking-wrap.thinking-done .thinking-body,
 .thinking-wrap.thinking-done .thinking-stream {
-  color: rgba(155, 155, 155, 0.65);
+  color: var(--text-faint);
 }
 .thinking-caret {
   display: inline-block;
@@ -2587,7 +2591,7 @@
   height: 1.05em;
   margin-left: 1px;
   vertical-align: text-bottom;
-  background: rgba(220, 220, 220, 0.82);
+  background: var(--text-2);
   animation: thinkingCaretBlink 0.85s steps(1, end) infinite;
 }
 @keyframes thinkingCaretBlink {
@@ -2596,7 +2600,7 @@
 }
 .thinking-wrap.is-typing .thinking-body,
 .thinking-wrap.is-typing .thinking-stream {
-  color: rgba(205, 205, 205, 0.82);
+  color: var(--text-2);
 }
 
 /* Lightning fade-in/fade-out for tools, confirmations, and agentic summaries. */
@@ -2803,18 +2807,18 @@
   font-size: 11px;
   white-space: pre-wrap;
   word-break: break-word;
-  color: rgba(180, 180, 180, 0.78);
+  color: var(--text-muted);
   padding: 6px 0 8px 12px;
   margin: 2px 0 4px;
   max-height: 280px;
   overflow-y: auto;
   display: none;
-  border-left: 2px solid rgba(140, 140, 140, 0.28);
+  border-left: 2px solid var(--border-strong);
   background: transparent;
 }
 .tool-card.open .tool-card-body { display: block; }
-.tool-card-body .args { color: rgba(150, 150, 150, 0.7); border-bottom: 1px solid rgba(255,255,255,0.06); padding-bottom: 8px; margin-bottom: 8px; }
-.tool-card-body .result { color: rgba(210, 210, 210, 0.88); }
+.tool-card-body .args { color: var(--text-faint); border-bottom: 1px solid var(--border); padding-bottom: 8px; margin-bottom: 8px; }
+.tool-card-body .result { color: var(--text-2); }
 
 /* Multi-Agent: a compact parallel-work control room, not a second chat layout. */
 .multi-agent-batch {
@@ -2901,6 +2905,16 @@
   border-color: rgba(141, 234, 184, 0.52);
   background: rgba(58, 196, 130, 0.2);
 }
+.multi-agent-batch.complete::before {
+  animation: none;
+  will-change: auto;
+  transform: rotate(0deg) scale(1.05);
+}
+.multi-agent-batch.complete.stopped .multi-agent-live {
+  border-color: rgba(205, 214, 232, 0.42);
+  background: rgba(116, 128, 151, 0.16);
+  color: rgba(222, 229, 241, 0.9);
+}
 .multi-agent-batch.complete.needs-attention .multi-agent-live {
   border-color: rgba(255, 151, 151, 0.62);
   background: rgba(196, 58, 58, 0.18);
@@ -2983,6 +2997,17 @@
   background: #ff9696;
   box-shadow: none;
 }
+.multi-agent-tool.interrupted,
+.multi-agent-tool.cancelled {
+  border-color: rgba(177, 188, 211, 0.28);
+  opacity: 0.82;
+}
+.multi-agent-tool.interrupted .multi-agent-tool-pulse,
+.multi-agent-tool.cancelled .multi-agent-tool-pulse {
+  background: rgba(181, 192, 214, 0.82);
+  box-shadow: none;
+  animation: none;
+}
 .tool-batch-wrap.multi-agent-tool-batch .tool-batch-label {
   color: rgba(206, 220, 255, 0.94);
 }
@@ -3009,6 +3034,16 @@
   0% { box-shadow: 0 0 0 0 rgba(130, 233, 255, 0.56); }
   70% { box-shadow: 0 0 0 6px rgba(130, 233, 255, 0); }
   100% { box-shadow: 0 0 0 0 rgba(130, 233, 255, 0); }
+}
+
+/* WebView2 normally throttles a hidden document, but explicit pausing also
+   covers minimized/occluded desktop windows and prevents needless GPU work. */
+:root.app-backgrounded .activity-shimmer,
+:root.app-backgrounded .thinking-wrap:not(.dots-frozen) .dots span,
+:root.app-backgrounded .tool-card.pending .tool-wave-dots span,
+:root.app-backgrounded .multi-agent-batch::before,
+:root.app-backgrounded .multi-agent-tool.working .multi-agent-tool-pulse {
+  animation-play-state: paused !important;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -5376,33 +5411,10 @@
     transform: none !important;
   }
 
-  .activity-shimmer .shine-ch,
-  .thinking-wrap:not(.thinking-done) .shine-ch,
-  .tool-batch-wrap.is-running .shine-ch,
-  .tool-card.pending .shine-ch,
-  .thinking-running .shine-ch,
-  .shine-ch.shine-red,
-  .shine-ch.shine-pink,
-  .activity-shimmer.shine-red .shine-ch,
-  .activity-shimmer.shine-pink .shine-ch {
-    /* These are the intentionally lightweight live-work indicators. Keep
-       them alive even when Windows asks WebView2 for reduced motion; the
-       matching globals rule already keeps the thinking-dot wave enabled. */
-    animation-name: lightningFadeInOutBlue !important;
-    animation-duration: 1.05s !important;
-    animation-timing-function: ease-in-out !important;
-    animation-iteration-count: infinite !important;
-    animation-delay: calc(var(--i, 0) * 0.035s) !important;
-    color: #55b9ff !important;
+  .activity-shimmer {
+    animation: none !important;
+    will-change: auto !important;
     opacity: 1 !important;
-    text-shadow: 0 0 8px rgba(49, 158, 255, 0.72), 0 0 18px rgba(20, 112, 255, 0.36) !important;
-  }
-
-  #chat.chat-sol .shine-ch.shine-pink,
-  #chat.chat-sol .activity-shimmer.shine-pink .shine-ch {
-    animation-name: lightningFadeInOutPink !important;
-    color: #ff98cd !important;
-    text-shadow: 0 0 8px rgba(255, 75, 175, 0.76), 0 0 18px rgba(235, 30, 138, 0.4) !important;
   }
 
   .chip-cap-agentic::after {

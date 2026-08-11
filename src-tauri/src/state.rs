@@ -6,6 +6,20 @@ use tauri::{AppHandle, Manager};
 
 pub type QuestionResponder = tokio::sync::oneshot::Sender<String>;
 pub type ConfirmResponder = tokio::sync::oneshot::Sender<bool>;
+type SessionRuns = Arc<Mutex<HashMap<String, Arc<SessionRun>>>>;
+
+/// Owns one registry entry. Dropping the command future (or unwinding after a
+/// panic) releases the session just as reliably as an ordinary return.
+pub struct ActiveRunGuard {
+    runs: SessionRuns,
+    session_id: String,
+}
+
+impl Drop for ActiveRunGuard {
+    fn drop(&mut self) {
+        self.runs.lock().unwrap().remove(&self.session_id);
+    }
+}
 
 /// Per-session agent run handles — allows multiple sessions to run concurrently.
 pub struct SessionRun {
@@ -13,6 +27,9 @@ pub struct SessionRun {
     pub question_tx: Mutex<Option<QuestionResponder>>,
     pub confirm_tx: Mutex<Option<ConfirmResponder>>,
     pub active_pid: Arc<Mutex<Option<u32>>>,
+    checkpoint: Mutex<Option<Arc<crate::checkpoint::RunCheckpoint>>>,
+    protect_command_changes: AtomicBool,
+    project_root: Mutex<Option<String>>,
 }
 
 impl SessionRun {
@@ -22,7 +39,40 @@ impl SessionRun {
             question_tx: Mutex::new(None),
             confirm_tx: Mutex::new(None),
             active_pid: Arc::new(Mutex::new(None)),
+            checkpoint: Mutex::new(None),
+            protect_command_changes: AtomicBool::new(false),
+            project_root: Mutex::new(None),
         }
+    }
+
+    pub fn set_checkpoint(
+        &self,
+        checkpoint: Arc<crate::checkpoint::RunCheckpoint>,
+        protect_command_changes: bool,
+    ) {
+        *self.checkpoint.lock().unwrap() = Some(checkpoint);
+        self.protect_command_changes
+            .store(protect_command_changes, Ordering::SeqCst);
+    }
+
+    pub fn checkpoint(&self) -> Option<Arc<crate::checkpoint::RunCheckpoint>> {
+        self.checkpoint.lock().unwrap().clone()
+    }
+
+    pub fn protect_command_changes(&self) -> bool {
+        self.protect_command_changes.load(Ordering::SeqCst)
+    }
+
+    pub fn set_project_root(&self, project_root: String) {
+        *self.project_root.lock().unwrap() = Some(project_root);
+    }
+
+    fn owns_project(&self, project_root: &str) -> bool {
+        self.project_root
+            .lock()
+            .unwrap()
+            .as_deref()
+            .is_some_and(|value| project_path_key(value) == project_path_key(project_root))
     }
 
     pub fn request_stop(&self) {
@@ -51,7 +101,10 @@ pub struct AppState {
     pub settings: Mutex<Settings>,
     pub recent_projects: Mutex<Vec<String>>,
     /// Active agent runs keyed by frontend session id.
-    pub runs: Mutex<HashMap<String, Arc<SessionRun>>>,
+    runs: SessionRuns,
+    /// Durable copy-on-write checkpoints survive the run so the Changes panel
+    /// can safely undo agent-owned file mutations.
+    pub checkpoints: crate::checkpoint::CheckpointStore,
     /// Cursor SDK local agent ids keyed by session (for multi-turn resume).
     pub cursor_agent_ids: Mutex<HashMap<String, String>>,
 }
@@ -70,7 +123,8 @@ impl AppState {
             project_root: Mutex::new(None),
             settings: Mutex::new(settings),
             recent_projects: Mutex::new(recent),
-            runs: Mutex::new(HashMap::new()),
+            runs: Arc::new(Mutex::new(HashMap::new())),
+            checkpoints: crate::checkpoint::CheckpointStore::new(),
             cursor_agent_ids: Mutex::new(HashMap::new()),
         }
     }
@@ -95,7 +149,7 @@ impl AppState {
         }
     }
 
-    pub fn start_run(&self, session_id: &str) -> Result<Arc<SessionRun>, String> {
+    pub fn start_run(&self, session_id: &str) -> Result<(Arc<SessionRun>, ActiveRunGuard), String> {
         let mut runs = self.runs.lock().unwrap();
         if runs.contains_key(session_id) {
             return Err(
@@ -104,15 +158,29 @@ impl AppState {
         }
         let run = Arc::new(SessionRun::new());
         runs.insert(session_id.to_string(), run.clone());
-        Ok(run)
+        let guard = ActiveRunGuard {
+            runs: self.runs.clone(),
+            session_id: session_id.to_string(),
+        };
+        Ok((run, guard))
     }
 
     pub fn get_run(&self, session_id: &str) -> Option<Arc<SessionRun>> {
         self.runs.lock().unwrap().get(session_id).cloned()
     }
 
-    pub fn finish_run(&self, session_id: &str) {
-        self.runs.lock().unwrap().remove(session_id);
+    pub fn active_run_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.runs.lock().unwrap().keys().cloned().collect();
+        ids.sort();
+        ids
+    }
+
+    pub fn has_active_run_for_project(&self, project_root: &str) -> bool {
+        self.runs
+            .lock()
+            .unwrap()
+            .values()
+            .any(|run| run.owns_project(project_root))
     }
 
     pub fn stop_run(&self, session_id: &str) -> bool {
@@ -223,7 +291,30 @@ fn save_recent(list: Vec<String>) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::remove_recent_project_path;
+    use super::{remove_recent_project_path, AppState};
+
+    #[test]
+    fn active_run_guard_releases_the_session_on_drop() {
+        let state = AppState::new();
+        state.runs.lock().unwrap().clear();
+
+        let (run, guard) = state.start_run("session-b").expect("run should start");
+        run.set_project_root(r"C:\Projects\Atlas".into());
+        assert_eq!(state.active_run_ids(), vec!["session-b"]);
+        assert!(state.has_active_run_for_project(r"c:/projects/atlas/"));
+        assert!(!state.has_active_run_for_project(r"C:\Projects\Beacon"));
+        assert!(state.start_run("session-b").is_err());
+
+        let (_other, other_guard) = state
+            .start_run("session-a")
+            .expect("other run should start");
+        assert_eq!(state.active_run_ids(), vec!["session-a", "session-b"]);
+
+        drop(guard);
+        assert_eq!(state.active_run_ids(), vec!["session-a"]);
+        drop(other_guard);
+        assert!(state.active_run_ids().is_empty());
+    }
 
     #[test]
     fn removing_a_recent_project_normalizes_windows_paths_without_touching_others() {

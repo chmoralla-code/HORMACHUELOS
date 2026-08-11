@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Fast Ship Engine test harness</title>
+    <link rel="stylesheet" href="/theme/tokens.css" />
+    <link rel="stylesheet" href="/theme/globals.css" />
+    <link rel="stylesheet" href="/app.css" />
+    <link rel="stylesheet" href="/theme/workspace.css" />
+    <style>
+      body { margin: 0; min-height: 100vh; background: var(--canvas); color: var(--text); }
+      #inspector { width: 360px; height: 760px; margin: 18px; border: 1px solid var(--border); }
+      #chat, #file-viewer { display: none; }
+    </style>
+  </head>
+  <body>
+    <aside class="inspector" id="inspector" aria-label="Project inspector">
+      <div class="inspector-tabs" role="tablist">
+        <button class="inspector-tab" data-inspector-tab="files">Files</button>
+        <button class="inspector-tab active" data-inspector-tab="changes">Changes</button>
+        <button class="inspector-tab" data-inspector-tab="console">Console</button>
+      </div>
+      <section class="inspector-panel" id="files-panel"></section>
+      <section class="inspector-panel" id="changes-panel"></section>
+      <section class="inspector-panel" id="console-panel"></section>
+    </aside>
+    <main id="chat"></main>
+    <section id="file-viewer"></section>
+    <div id="modal-root"></div>
+    <script type="module">
+      localStorage.removeItem("hormachuelos.execution-profile.v1");
+      const calls = [];
+      let checkpoints = [{
+        id: "checkpoint-1",
+        sessionId: "session-1",
+        projectRoot: String.raw`C:\Projects\Atlas`,
+        profile: "safe",
+        status: "finished",
+        actionCount: 3,
+        protectedPaths: 2,
+        conflictCount: 0,
+        commandSideEffectsUnprotected: true,
+        unprotectedActions: 0,
+        createdAtMs: Date.now(),
+        finishedAtMs: Date.now(),
+      }];
+      let rollbackResult = {
+        checkpointId: "checkpoint-1",
+        rolledBackActions: 3,
+        restoredPaths: 2,
+        conflicts: [],
+        status: "rolled_back",
+        message: "Rolled back 3 agent actions.",
+      };
+      window.__TAURI_INTERNALS__ = {
+        invoke: async (cmd, args = {}) => {
+          calls.push({ cmd, args: structuredClone(args || {}) });
+          if (cmd === "list_project_files") return { nodes: [], truncated: false };
+          if (cmd === "list_run_checkpoints") return structuredClone(checkpoints);
+          if (cmd === "rollback_run_checkpoint") {
+            checkpoints = checkpoints.map((item) => item.id === args.checkpointId
+              ? { ...item, status: rollbackResult.status, conflictCount: rollbackResult.conflicts.length }
+              : item);
+            return structuredClone(rollbackResult);
+          }
+          if (cmd === "read_project_file") return { path: args.relativePath, content: "", size: 0, language: "ts" };
+          throw new Error(`Unexpected invoke: ${cmd}`);
+        },
+        transformCallback: () => 1,
+        unregisterCallback: () => {},
+      };
+
+      const { WorkspacePanel } = await import("./components/workspace.ts");
+      const panel = new WorkspacePanel();
+      await panel.setProject(String.raw`C:\Projects\Atlas`);
+      document.querySelector('[data-inspector-tab="changes"]').click();
+
+      const snapshot = () => {
+        const active = document.querySelector(".execution-profile-option.active");
+        const rollback = Array.from(document.querySelectorAll(".checkpoint-actions button"))
+          .find((button) => button.textContent.includes("Roll back"));
+        return {
+          profile: panel.getExecutionProfile(),
+          activeLabel: active?.textContent,
+          storedProfile: localStorage.getItem("hormachuelos.execution-profile.v1"),
+          checkpointText: document.querySelector(".checkpoint-root")?.textContent || "",
+          rollbackDisabled: rollback?.disabled,
+          notice: document.querySelector(".checkpoint-notice")?.textContent || "",
+          noticeClass: document.querySelector(".checkpoint-notice")?.className || "",
+          foreground: getComputedStyle(document.querySelector(".checkpoint-card")).color,
+          background: getComputedStyle(document.querySelector(".checkpoint-card")).backgroundColor,
+        };
+      };
+
+      const waitForRollback = async (previousCount) => {
+        for (let index = 0; index < 30; index += 1) {
+          if (calls.filter((call) => call.cmd === "rollback_run_checkpoint").length > previousCount) return;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        throw new Error("Rollback invoke did not arrive");
+      };
+
+      const clickRollback = async (scope, result) => {
+        rollbackResult = result;
+        const label = scope === "run" ? "Roll back run" : "Undo last";
+        const button = Array.from(document.querySelectorAll(".checkpoint-actions button"))
+          .find((candidate) => candidate.textContent.includes(label));
+        const previousCount = calls.filter((call) => call.cmd === "rollback_run_checkpoint").length;
+        button.click();
+        await Promise.resolve();
+        document.querySelector("#modal-root .modal-foot .btn.danger").click();
+        await waitForRollback(previousCount);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return {
+          ...snapshot(),
+          rollbackCalls: calls.filter((call) => call.cmd === "rollback_run_checkpoint"),
+        };
+      };
+
+      window.__fastShipHarness = {
+        initial: snapshot,
+        select: (profile) => {
+          document.querySelector(`[data-execution-profile="${profile}"]`).click();
+          return snapshot();
+        },
+        rollbackRun: () => clickRollback("run", {
+          checkpointId: "checkpoint-1",
+          rolledBackActions: 3,
+          restoredPaths: 2,
+          conflicts: [],
+          status: "rolled_back",
+          message: "Rolled back 3 agent actions.",
+        }),
+        rollbackConflict: async () => {
+          checkpoints = checkpoints.map((item) => ({ ...item, status: "finished", conflictCount: 0 }));
+          await panel.setProject(String.raw`C:\Projects\Atlas`);
+          document.querySelector('[data-inspector-tab="changes"]').click();
+          return clickRollback("run", {
+            checkpointId: "checkpoint-1",
+            rolledBackActions: 1,
+            restoredPaths: 1,
+            conflicts: ["src/main.ts changed after the agent recorded it"],
+            status: "partial_rollback",
+            message: "Rolled back 1 action; 1 conflict was preserved for safety.",
+          });
+        },
+      };
+    </script>
+  </body>
+</html>

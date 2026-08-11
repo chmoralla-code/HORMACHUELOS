@@ -36,15 +36,17 @@ export function escapeHtml(s: string): string {
 }
 
 /**
- * Paint a label with letter-by-letter shine (live activity rows).
- * OpenAI aliases use pink; every other provider uses the blue live effect.
+ * Paint one lightweight live-activity label.
+ *
+ * Older builds wrapped every character in its own infinitely animated span.
+ * A long agent transcript could therefore leave thousands of independent CSS
+ * animations behind. Keep the same provider tone on one compositor-friendly
+ * element instead; terminal cleanup can stop it with a single class change.
  */
 export function setShimmerText(el: HTMLElement | null, text: string, shimmer: boolean) {
   if (!el) return;
   const pinkOpenAi = !!el.closest("#chat.chat-sol");
   const toneClass = pinkOpenAi ? "shine-pink" : "shine-blue";
-  const animationName = pinkOpenAi ? "lightningFadeInOutPink" : "lightningFadeInOutBlue";
-  const fallbackColor = pinkOpenAi ? "#ff75bb" : "#55b9ff";
   if (!shimmer) {
     el.removeAttribute("data-shimmer");
     el.removeAttribute("aria-label");
@@ -56,7 +58,7 @@ export function setShimmerText(el: HTMLElement | null, text: string, shimmer: bo
     el.getAttribute("data-shimmer") === text &&
     el.classList.contains("activity-shimmer") &&
     el.classList.contains(toneClass) &&
-    el.querySelector(`.shine-ch.${toneClass}`)
+    el.textContent === text
   ) {
     return;
   }
@@ -64,24 +66,7 @@ export function setShimmerText(el: HTMLElement | null, text: string, shimmer: bo
   el.setAttribute("aria-label", text);
   el.classList.remove("shine-blue", "shine-red", "shine-pink");
   el.classList.add("activity-shimmer", toneClass);
-  const frag = document.createDocumentFragment();
-  const chars = Array.from(text);
-  const max = 120;
-  for (let i = 0; i < chars.length; i++) {
-    if (i >= max) {
-      frag.appendChild(document.createTextNode(chars.slice(max).join("")));
-      break;
-    }
-    const span = document.createElement("span");
-    span.className = `shine-ch ${toneClass}`;
-    span.style.setProperty("--i", String(i));
-    // Inline fallback keeps the selected tone visible while WebView resolves CSS.
-    span.style.animation = `${animationName} 1.25s ease-in-out ${i * 0.045}s infinite`;
-    span.style.color = fallbackColor;
-    span.textContent = chars[i] === " " ? "\u00A0" : chars[i];
-    frag.appendChild(span);
-  }
-  el.replaceChildren(frag);
+  el.textContent = text;
 }
 
 export function basename(p: string): string {

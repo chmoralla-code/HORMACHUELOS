@@ -15,7 +15,16 @@
       #app { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: var(--header-h) minmax(0, 1fr); }
       .workbench { grid-template-columns: minmax(0, 1fr) minmax(520px, 52vw); }
       .test-stage { min-width: 0; background: var(--canvas); }
-      #chat-queue-probe { display: none; }
+      /* Keep the real Chat DOM renderable for computed-theme regression
+         checks without allowing it to affect the preview harness layout. */
+      #chat-queue-probe {
+        position: fixed;
+        left: -10000px;
+        top: 0;
+        width: 900px;
+        height: 700px;
+        overflow: hidden;
+      }
     </style>
   </head>
   <body>
@@ -107,6 +116,21 @@
       api.setPreviewBrowserBounds = async (label, bounds, visible) => {
         window.__previewBrowserCalls.push({ command: "bounds", label, bounds, visible });
       };
+      api.setPreviewBrowserInspection = async (label, mode, feedback) => {
+        window.__previewBrowserCalls.push({
+          command: "inspection",
+          label,
+          mode,
+          feedback: feedback || null,
+        });
+      };
+      api.setPreviewBrowserInspectionChrome = async (label, visible) => {
+        window.__previewBrowserCalls.push({ command: "inspection-chrome", label, visible });
+      };
+      api.capturePreviewBrowserSelection = async (label, region) => {
+        window.__previewCaptureRequests.push({ kind: "browser", label, ...region });
+        return "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADElEQVR42mP8z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
+      };
       api.navigatePreviewBrowser = async (label, url) => {
         window.__previewBrowserCalls.push({ command: "navigate", label, url });
         queueMicrotask(() => {
@@ -194,9 +218,11 @@
 
       const lightningProbe = document.createElement("div");
       lightningProbe.className = "tool-card pending";
-      lightningProbe.innerHTML = '<span class="shine-ch shine-red">H</span>';
+      const lightningLabel = document.createElement("span");
+      lightningProbe.appendChild(lightningLabel);
       document.body.appendChild(lightningProbe);
-      const lightningStyle = getComputedStyle(lightningProbe.firstElementChild);
+      setShimmerText(lightningLabel, "Working", true);
+      const lightningStyle = getComputedStyle(lightningLabel);
       document.body.dataset.agenticAnimation = lightningStyle.animationName;
       document.body.dataset.agenticColor = lightningStyle.color;
       lightningProbe.remove();
@@ -204,11 +230,10 @@
       const liveThinkingProbe = document.createElement("span");
       document.body.appendChild(liveThinkingProbe);
       setShimmerText(liveThinkingProbe, "Thinking…", true);
-      const liveThinkingChar = liveThinkingProbe.querySelector(".shine-ch");
-      const liveThinkingStyle = liveThinkingChar ? getComputedStyle(liveThinkingChar) : null;
-      document.body.dataset.liveThinkingClass = liveThinkingChar?.className || "";
-      document.body.dataset.liveThinkingAnimation = liveThinkingStyle?.animationName || "";
-      document.body.dataset.liveThinkingColor = liveThinkingStyle?.color || "";
+      const liveThinkingStyle = getComputedStyle(liveThinkingProbe);
+      document.body.dataset.liveThinkingClass = liveThinkingProbe.className;
+      document.body.dataset.liveThinkingAnimation = liveThinkingStyle.animationName;
+      document.body.dataset.liveThinkingColor = liveThinkingStyle.color;
       liveThinkingProbe.remove();
 
       const chipProbe = document.createElement("button");
