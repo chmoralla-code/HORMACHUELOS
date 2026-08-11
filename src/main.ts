@@ -45,8 +45,8 @@ import {
   replaceProjectWorkspacePath,
 } from "./components/projects";
 import {
-  loadSessions, saveSession, saveSessionForUpdate, scheduleSessionSave,
-  flushSessionSaves, flushSessionSavesForUpdate,
+  loadSessions, saveSession, scheduleSessionSave, snapshotSessionsForUpdate,
+  flushSessionSaves,
   deleteSession, deleteAllSessions, newSessionId, sessionTitle,
   recordAgentEvent, buildLlmHistory, redactChatCredentials, addSessionTokens, SESSION_TOKEN_BUDGET,
   rehomeSessionsToProjectRoot,
@@ -707,7 +707,7 @@ function persistCurrentSession(deferred = false) {
   else saveSession(s);
 }
 
-function prepareForAppUpdate() {
+function prepareForAppUpdate(): Record<string, string> {
   if (runningSessions.size > 0) {
     throw new Error("Stop active AI runs before updating so their latest work can be saved safely.");
   }
@@ -717,10 +717,16 @@ function prepareForAppUpdate() {
       syncVisiblePreviewIntoSession(session);
       sessionRegistry.set(session.id, session);
       session.messages = chat.getMessages();
-      saveSessionForUpdate(session);
+      // Keep ordinary persistence best-effort. If WebView storage is full, the
+      // pending queue is included in the native snapshot returned below.
+      saveSession(session);
     }
   }
-  flushSessionSavesForUpdate();
+  flushSessionSaves();
+  return snapshotSessionsForUpdate([
+    ...sessions,
+    ...sessionRegistry.values(),
+  ]);
 }
 
 /** Tokens already used across all sessions in this project. */

@@ -671,6 +671,49 @@ function safeSessionForStorage(session: Session): Session {
   };
 }
 
+/**
+ * Build the session portion of the native pre-update backup without requiring
+ * another localStorage write. A full or temporarily unavailable WebView store
+ * must not prevent the already in-memory transcript from being handed to the
+ * host-owned recovery file.
+ */
+export function snapshotSessionsForUpdate(currentSessions: Iterable<Session>): Record<string, string> {
+  const merged = new Map<string, Session>();
+  const add = (candidate: unknown) => {
+    if (!candidate || typeof candidate !== "object") return;
+    const session = candidate as Partial<Session>;
+    if (
+      typeof session.id !== "string" || !session.id.trim() ||
+      typeof session.title !== "string" ||
+      typeof session.projectId !== "string" || !session.projectId.trim() ||
+      !Array.isArray(session.messages) ||
+      !Number.isFinite(session.createdAt)
+    ) {
+      return;
+    }
+    try {
+      const safe = safeSessionForStorage(session as Session);
+      merged.set(safe.id, safe);
+    } catch {
+      // One corrupt legacy session must not prevent the remaining sessions
+      // from reaching the native update backup.
+    }
+  };
+
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    const stored: unknown = raw ? JSON.parse(raw) : [];
+    if (Array.isArray(stored)) stored.forEach(add);
+  } catch {
+    // Reads can also be denied by a damaged WebView profile. The in-memory
+    // registry and pending-save queue below remain enough to protect live work.
+  }
+  for (const session of pendingSessionSaves.values()) add(session);
+  for (const session of currentSessions) add(session);
+
+  return { [STORAGE_KEY]: JSON.stringify([...merged.values()]) };
+}
+
 function sanitizeSessionModelId(value: unknown, max: number): string | undefined {
   if (typeof value !== "string") return undefined;
   const text = value.trim();
@@ -709,15 +752,6 @@ export function saveSession(session: Session): void {
   if (!writeSessions([session])) pendingSessionSaves.set(session.id, session);
 }
 
-/** Persist synchronously or block an update rather than claiming data is safe. */
-export function saveSessionForUpdate(session: Session): void {
-  pendingSessionSaves.delete(session.id);
-  clearSessionSaveTimerIfIdle();
-  if (writeSessions([session])) return;
-  pendingSessionSaves.set(session.id, session);
-  throw new Error("Session storage is unavailable or full. Free some disk space, then try updating again.");
-}
-
 /** Debounced persistence for high-frequency streamed text/reasoning events. */
 export function scheduleSessionSave(session: Session): void {
   pendingSessionSaves.set(session.id, session);
@@ -736,20 +770,6 @@ export function flushSessionSaves(): void {
   if (pendingSessionSaves.size === 0) return;
   const queued = [...pendingSessionSaves.values()];
   if (!writeSessions(queued)) return;
-  for (const session of queued) pendingSessionSaves.delete(session.id);
-}
-
-/** Flush every queued session or abort the update with a visible error. */
-export function flushSessionSavesForUpdate(): void {
-  if (sessionSaveTimer !== null) {
-    clearTimeout(sessionSaveTimer);
-    sessionSaveTimer = null;
-  }
-  if (pendingSessionSaves.size === 0) return;
-  const queued = [...pendingSessionSaves.values()];
-  if (!writeSessions(queued)) {
-    throw new Error("Queued session data could not be saved. Free some disk space, then try updating again.");
-  }
   for (const session of queued) pendingSessionSaves.delete(session.id);
 }
 

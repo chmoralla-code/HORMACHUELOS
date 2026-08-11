@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.75";
-const BUILTIN_MSI_SHA256 = "a96acb9096e99c715a6adae8a5feebd36b32fc5a73b9b94762504a8ed39390ba";
-const BUILTIN_EXE_SHA256 = "1757b8b298184a1be050185a08f7d7d2e8af572174b32264d99e688e2eb3d7e6";
-const BUILTIN_RELEASE_NOTES = "AI replies are now consistently organized and readable in Light mode. Source Lens and Design Mode are more flexible across preview browser tabs. Chat accepts pasted local videos and ScreenSketch recordings. Project and session switching no longer revives completed agents, run ownership is isolated, and rendering and lifecycle paths are tuned for smoother FPS. New Auto, Fast, Balanced, Thorough, and Safe execution profiles add persistent project intelligence, bounded repair escalation, and conflict-aware per-run checkpoints with undo and rollback.";
+const BUILTIN_RELEASE_VERSION = "0.1.76";
+const BUILTIN_MSI_SHA256 = "99939990038fc4e9ccfb67b787c15e24c25eb734c4e7a731b058111342288f71";
+const BUILTIN_EXE_SHA256 = "2584a08d6dfcbb2422b36b79b3d9b92dd084eec1bd17338296e6aff1726bd6ec";
+const BUILTIN_RELEASE_NOTES = "Fixes the in-app updater stopping with a session storage unavailable or full error. Update preflight now copies active and pending sessions directly into the host-owned native recovery backup without requiring another WebView storage write. After relaunch, fresher backed-up sessions are merged safely, and the backup is retained whenever WebView storage remains unavailable so recovery can retry. This is an optional update and does not interrupt active sessions.";
 
 // A visual-preference update must never interrupt an active desktop task.
 // The release is discoverable through the update flow, but stays optional.
