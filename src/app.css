@@ -123,7 +123,7 @@
   flex-direction: column;
   overflow: hidden;
   padding: 9px 12px 8px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-top: 1px solid var(--line-subtle);
 }
 .sb-sessions-section.is-collapsed {
   flex: 0 0 43px;
@@ -132,7 +132,7 @@
 }
 .sb-section-label {
   font-size: 9px;
-  color: rgba(230, 235, 240, 0.68);
+  color: var(--text-faint);
   text-transform: uppercase;
   letter-spacing: 0.09em;
   margin-bottom: 7px;
@@ -155,9 +155,9 @@
 #sidebar .sb-actions > .sb-update-action {
   min-height: 36px;
   padding: 7px 10px;
-  border: 1px solid rgba(255, 255, 255, 0.11);
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.025);
+  background: var(--surface-soft);
 }
 .sb-action {
   display: flex;
@@ -2163,14 +2163,14 @@
 
 .chip-cap-agentic {
   position: relative;
-  color: #72c8ff !important;
-  border-color: rgba(69, 173, 255, 0.48) !important;
+  color: var(--live-blue-strong) !important;
+  border-color: var(--live-blue-outline) !important;
 }
 .chip-cap-agentic::after {
   content: "";
   position: absolute;
   inset: -1px;
-  border: 1px solid rgba(85, 185, 255, 0.88);
+  border: 1px solid var(--live-blue-outline);
   border-radius: inherit;
   pointer-events: none;
   animation: lightningChipFadeBlue 1.5s ease-in-out infinite;
@@ -2303,9 +2303,9 @@
 .activity-shimmer.shine-red .shine-ch,
 .activity-shimmer.shine-pink .shine-ch {
   display: inline-block;
-  color: #55b9ff !important;
+  color: var(--live-blue) !important;
   -webkit-text-fill-color: currentColor !important;
-  text-shadow: 0 0 8px rgba(49, 158, 255, 0.72), 0 0 18px rgba(20, 112, 255, 0.36);
+  text-shadow: 0 0 8px var(--live-blue-shadow), 0 0 18px var(--live-blue-halo);
   animation-name: lightningFadeInOutBlue !important;
   animation-duration: 1.05s !important;
   animation-timing-function: ease-in-out !important;
@@ -2313,13 +2313,18 @@
   animation-delay: calc(var(--i, 0) * 0.035s) !important;
   will-change: opacity, transform;
 }
+.activity-shimmer.shine-blue,
 .activity-shimmer.shine-red,
+.thinking-wrap:not(.thinking-done) .thinking-toggle-row .thinking-simple-label.shine-blue,
 .thinking-wrap:not(.thinking-done) .thinking-toggle-row .thinking-simple-label.shine-red,
+.tool-batch-wrap.is-running .tool-batch-label.shine-blue,
 .tool-batch-wrap.is-running .tool-batch-label.shine-red,
+.tool-card.pending .tool-name.shine-blue,
 .tool-card.pending .tool-name.shine-red,
+.thinking-running .thinking-simple-label.shine-blue,
 .thinking-running .thinking-simple-label.shine-red {
-  color: #72c8ff !important;
-  text-shadow: 0 0 10px rgba(36, 145, 255, 0.48);
+  color: var(--live-blue-strong) !important;
+  text-shadow: 0 0 10px var(--live-blue-shadow);
   letter-spacing: 0.02em;
   font-weight: 500;
 }
@@ -3157,8 +3162,8 @@
   gap: 7px;
   padding: 9px 10px;
   border-radius: 9px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid var(--surface-strong);
+  background: var(--surface-soft);
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
 }
@@ -3177,17 +3182,17 @@
   font-size: 11px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: rgba(235, 235, 235, 0.9);
+  color: var(--text-2);
   font-weight: 600;
 }
 .sb-usage-row-pct {
   font-size: 13px;
   font-weight: 700;
-  color: #f5f5f5;
+  color: var(--text);
 }
 .sb-usage-row-hint {
   font-size: 10px;
-  color: rgba(220, 220, 220, 0.82);
+  color: var(--text-muted);
   letter-spacing: 0.02em;
 }
 .sb-usage-row.is-low .sb-usage-meter-fill {
@@ -3215,7 +3220,7 @@
   gap: 3px;
   padding-bottom: 7px;
   margin-bottom: 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  border-bottom: 1px solid var(--surface-strong);
 }
 .sb-usage-sub-top {
   display: flex;
@@ -3226,7 +3231,7 @@
 .sb-usage-sub-name {
   font-size: 14px;
   font-weight: 700;
-  color: #f7f7f7;
+  color: var(--text);
   letter-spacing: 0.02em;
 }
 .sb-usage-sub-badge {
@@ -3235,26 +3240,26 @@
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: rgba(20, 20, 20, 0.92);
-  background: rgba(240, 240, 240, 0.92);
+  color: var(--on-accent);
+  background: var(--ember);
   border-radius: 999px;
   padding: 3px 8px;
   line-height: 1.2;
 }
 .sb-usage-sub-badge.is-free {
-  color: rgba(235, 235, 235, 0.9);
-  background: rgba(255, 255, 255, 0.12);
-  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: var(--text-2);
+  background: var(--surface-strong);
+  border: 1px solid var(--border-strong);
 }
 .sb-usage-sub-meta {
   font-size: 10px;
-  color: rgba(225, 225, 225, 0.88);
+  color: var(--text-muted);
   line-height: 1.35;
 }
 .sb-usage-sub-period {
   font-size: 10px;
   font-weight: 600;
-  color: rgba(245, 245, 245, 0.95);
+  color: var(--text-2);
   line-height: 1.35;
 }
 .sb-usage.is-free .sb-usage-sub-name {
@@ -3262,7 +3267,7 @@
 }
 .sb-usage-plan {
   font-size: 10px;
-  color: rgba(225, 225, 225, 0.88);
+  color: var(--text-muted);
   letter-spacing: 0.02em;
   line-height: 1.4;
   font-weight: 500;
@@ -3280,14 +3285,14 @@
   width: 100%;
   height: 6px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.14);
+  background: var(--surface-strong);
   overflow: hidden;
 }
 .sb-usage-meter-fill {
   height: 100%;
   width: 100%;
   border-radius: inherit;
-  background: rgba(245, 245, 245, 0.92);
+  background: var(--ember);
   transition: width 0.35s ease, background 0.25s ease;
 }
 .sb-usage.usage-empty {
@@ -3299,9 +3304,9 @@
   width: 100%;
   padding: 6px 8px;
   border-radius: 7px;
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  background: rgba(255, 255, 255, 0.08);
-  color: rgba(245, 245, 245, 0.95);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-hover);
+  color: var(--text-2);
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
@@ -3310,9 +3315,9 @@
   letter-spacing: 0;
 }
 .sb-usage-topup:hover {
-  background: rgba(255, 255, 255, 0.14);
-  border-color: rgba(255, 255, 255, 0.28);
-  color: #fff;
+  background: var(--surface-strong);
+  border-color: var(--border-ember);
+  color: var(--text);
 }
 
 .sb-account-section {
@@ -3334,13 +3339,13 @@
 }
 .sb-account-refresh:hover {
   color: var(--text);
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--surface-hover);
 }
 .sb-account {
   overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.11);
+  border: 1px solid var(--border);
   border-radius: 9px;
-  background: rgba(255, 255, 255, 0.025);
+  background: var(--surface-soft);
   transition: border-color 0.15s ease, background 0.15s ease;
 }
 .sb-account-identity {
@@ -3356,7 +3361,7 @@
   transition: background 0.15s ease;
 }
 .sb-account-identity:hover {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--surface-hover);
 }
 .sb-account-identity:focus-visible,
 .sb-account-usage-toggle:focus-visible {
@@ -3364,7 +3369,7 @@
   outline-offset: -2px;
 }
 .sb-account-usage {
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  border-top: 1px solid var(--border);
 }
 .sb-account-usage-toggle {
   display: grid;
@@ -3373,7 +3378,7 @@
   gap: 8px;
   min-height: 32px;
   padding: 6px 10px;
-  color: rgba(230, 235, 240, 0.78);
+  color: var(--text-muted);
   cursor: pointer;
   list-style: none;
   transition: color 0.15s ease, background 0.15s ease;
@@ -3381,7 +3386,7 @@
 .sb-account-usage-toggle::-webkit-details-marker { display: none; }
 .sb-account-usage-toggle:hover {
   color: var(--text);
-  background: rgba(255, 255, 255, 0.045);
+  background: var(--surface-hover);
 }
 .sb-account-usage-label {
   font-size: 9px;
@@ -3391,7 +3396,7 @@
 }
 .sb-account-usage-value {
   overflow: hidden;
-  color: rgba(240, 242, 245, 0.92);
+  color: var(--text-2);
   font-family: var(--font-mono);
   font-size: 10px;
   font-variant-numeric: tabular-nums;
@@ -3417,7 +3422,7 @@
 .sb-account-usage > .sb-usage {
   margin: 0 8px 8px;
   padding: 8px 9px;
-  background: rgba(0, 0, 0, 0.13);
+  background: var(--surface-inset);
 }
 .sb-account-row {
   display: flex;
@@ -5098,6 +5103,82 @@
 .h-project { order: 1; }
 .h-provider { order: 2; margin-left: auto; }
 .drawer-btn-right { order: 3; margin-left: 0; }
+.appearance-control {
+  order: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 34px;
+  margin-left: auto;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-soft);
+  box-shadow: inset 0 1px var(--surface-soft);
+  color: var(--text-muted);
+  font-family: var(--font-display);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
+}
+.appearance-label {
+  padding: 0 5px 0 6px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+.appearance-mode {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 26px;
+  padding: 4px 7px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 9px;
+  line-height: 1;
+  letter-spacing: 0.04em;
+  text-transform: none;
+  transition: color var(--dur) var(--ease), background var(--dur) var(--ease), border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease), transform var(--dur) var(--ease);
+}
+.appearance-mode:hover {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+.appearance-mode:active { transform: translateY(1px); }
+.appearance-mode[aria-pressed="true"] {
+  color: var(--text);
+  background: var(--elevated);
+  border-color: var(--border-ember);
+  box-shadow: 0 4px 12px var(--shadow-strong);
+}
+.appearance-mode:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.appearance-swatch {
+  width: 10px;
+  height: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 3px;
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.28);
+}
+.appearance-mode[data-appearance-mode="light"] .appearance-swatch {
+  border-color: rgba(26, 48, 72, 0.18);
+  background: linear-gradient(135deg, #ffffff 0 52%, #d9e7f7 52% 100%);
+}
+.appearance-mode[data-appearance-mode="dark"] .appearance-swatch {
+  background: linear-gradient(135deg, #34455d 0 52%, #10151e 52% 100%);
+}
+.appearance-mode[data-appearance-mode="gray"] .appearance-swatch {
+  background: linear-gradient(135deg, #9aa1aa 0 52%, #3f444c 52% 100%);
+}
+.appearance-control + .workspace-menu-anchor { margin-left: 8px; }
 .workspace-menu-anchor {
   order: 3;
   position: relative;
@@ -5146,10 +5227,10 @@
   right: 0;
   width: min(244px, calc(100vw - 24px));
   padding: 6px;
-  background: #242424;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: var(--menu-surface);
+  border: 1px solid var(--border-strong);
   border-radius: 9px;
-  box-shadow: 0 18px 46px rgba(0, 0, 0, 0.42), inset 0 1px rgba(255, 255, 255, 0.035);
+  box-shadow: 0 18px 46px var(--shadow-strong), inset 0 1px var(--surface-soft);
 }
 .workspace-menu-title {
   padding: 6px 8px 5px;
@@ -5180,8 +5261,8 @@
 .workspace-menu-item:hover:not(:disabled),
 .workspace-menu-item:focus-visible {
   color: var(--fg-0);
-  background: rgba(255, 255, 255, 0.065);
-  border-color: rgba(255, 255, 255, 0.09);
+  background: var(--surface-hover);
+  border-color: var(--border);
   outline: none;
 }
 .workspace-menu-item:disabled {
@@ -5209,7 +5290,16 @@
 .workspace-menu-divider {
   height: 1px;
   margin: 5px 4px;
-  background: rgba(255, 255, 255, 0.09);
+  background: var(--line-subtle);
+}
+
+@media (max-width: 1030px) {
+  .appearance-label { display: none; }
+}
+
+@media (max-width: 940px) {
+  .appearance-mode-label { display: none; }
+  .appearance-mode { min-width: 28px; padding-inline: 6px; }
 }
 
 /* Collapse transitions */
@@ -5295,16 +5385,24 @@
   .shine-ch.shine-pink,
   .activity-shimmer.shine-red .shine-ch,
   .activity-shimmer.shine-pink .shine-ch {
-    animation: none !important;
-    color: #72c8ff !important;
+    /* These are the intentionally lightweight live-work indicators. Keep
+       them alive even when Windows asks WebView2 for reduced motion; the
+       matching globals rule already keeps the thinking-dot wave enabled. */
+    animation-name: lightningFadeInOutBlue !important;
+    animation-duration: 1.05s !important;
+    animation-timing-function: ease-in-out !important;
+    animation-iteration-count: infinite !important;
+    animation-delay: calc(var(--i, 0) * 0.035s) !important;
+    color: #55b9ff !important;
     opacity: 1 !important;
-    transform: none !important;
-    text-shadow: none !important;
+    text-shadow: 0 0 8px rgba(49, 158, 255, 0.72), 0 0 18px rgba(20, 112, 255, 0.36) !important;
   }
 
   #chat.chat-sol .shine-ch.shine-pink,
   #chat.chat-sol .activity-shimmer.shine-pink .shine-ch {
+    animation-name: lightningFadeInOutPink !important;
     color: #ff98cd !important;
+    text-shadow: 0 0 8px rgba(255, 75, 175, 0.76), 0 0 18px rgba(235, 30, 138, 0.4) !important;
   }
 
   .chip-cap-agentic::after {

@@ -10,9 +10,9 @@
 
 .sidebar {
   min-width: 0;
-  background: #1a1a1a;
+  background: var(--sidebar-canvas);
   border-right: 1px solid var(--border);
-  box-shadow: inset -1px 0 rgba(0, 0, 0, 0.22);
+  box-shadow: inset -1px 0 var(--surface-inset);
   overflow: hidden;
 }
 
@@ -20,7 +20,7 @@
 .header {
   height: var(--header-h);
   padding: 0 18px;
-  background: #1e1e1e;
+  background: var(--panel);
   border-bottom: 1px solid var(--border);
 }
 
@@ -53,8 +53,8 @@
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  background: #121212;
-  border-left: 1px solid rgba(255, 255, 255, 0.1);
+  background: var(--panel);
+  border-left: 1px solid var(--border);
   opacity: 0;
   transform: translateX(12px);
   pointer-events: none;

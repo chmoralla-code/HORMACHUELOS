@@ -24,12 +24,14 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.70";
-const BUILTIN_MSI_SHA256 = "c4b4caab51c3e3de1c3ae03fd148e74dd781c12796bc6a34faf026e43ede653c";
-const BUILTIN_EXE_SHA256 = "194f3a20a4bc7bf66cf98542fe25144f28349118cfe39b4db1174e103b13b2d6";
-const BUILTIN_RELEASE_NOTES = "Adds Flavour, a local-first memory system that recalls relevant project preferences and private session progress before, during, and after AI work. Flavour stays bounded through long sessions, learns from explicit corrections, approvals, and verified workflows, redacts credentials, isolates projects and sessions, refreshes across native and Cursor tools, and includes a visible On/Off control in the chat Add menu.";
+const BUILTIN_RELEASE_VERSION = "0.1.73";
+const BUILTIN_MSI_SHA256 = "907f72a1bd6aee84e04c9e5b4bac2852ff1b8eb6756984f6e0b2d595a0427c47";
+const BUILTIN_EXE_SHA256 = "ab553dbf39f59f75199c63d42fc1dc6685c27a0897dceaa4d27c672d96912ba1";
+const BUILTIN_RELEASE_NOTES = "Choose a persistent Light, Dark, or Gray appearance from the header. Improved long-session reliability, preview editing, project navigation, blue live-work effects, single-instance behavior, and the Windows installer experience.";
 
-const BUILTIN_FORCE_UPDATE = true;
+// A visual-preference update must never interrupt an active desktop task.
+// The release is discoverable through the update flow, but stays optional.
+const BUILTIN_FORCE_UPDATE = false;
 const GITHUB_RELEASES_BASE = "https://github.com/chmoralla-code/HORMACHUELOS/releases/download";
 
 /**

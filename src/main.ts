@@ -53,6 +53,7 @@ import {
   type Session,
 } from "./components/session";
 import { icon } from "./components/icons";
+import { initializeAppearance, mountAppearanceControl } from "./theme/appearance";
 
 let sidebar: Sidebar;
 let chat: Chat;
@@ -2355,4 +2356,6 @@ async function init() {
   }).catch((error) => console.warn("computer use status bridge unavailable", error));
 }
 
+initializeAppearance();
+mountAppearanceControl(document.getElementById("appearance-control"));
 init().catch((e) => console.error("init failed", e));

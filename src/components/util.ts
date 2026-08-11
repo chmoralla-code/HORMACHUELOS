@@ -37,18 +37,18 @@ export function escapeHtml(s: string): string {
 
 /**
  * Paint a label with letter-by-letter shine (live activity rows).
- * OpenAI aliases use pink; other providers retain the existing blue effect.
+ * OpenAI aliases use pink; every other provider uses the blue live effect.
  */
 export function setShimmerText(el: HTMLElement | null, text: string, shimmer: boolean) {
   if (!el) return;
   const pinkOpenAi = !!el.closest("#chat.chat-sol");
-  const toneClass = pinkOpenAi ? "shine-pink" : "shine-red";
-  const animationName = pinkOpenAi ? "lightningFadeInOutPink" : "letterShineRed";
-  const fallbackColor = pinkOpenAi ? "#ff75bb" : "#c44a44";
+  const toneClass = pinkOpenAi ? "shine-pink" : "shine-blue";
+  const animationName = pinkOpenAi ? "lightningFadeInOutPink" : "lightningFadeInOutBlue";
+  const fallbackColor = pinkOpenAi ? "#ff75bb" : "#55b9ff";
   if (!shimmer) {
     el.removeAttribute("data-shimmer");
     el.removeAttribute("aria-label");
-    el.classList.remove("activity-shimmer", "shine-red", "shine-pink");
+    el.classList.remove("activity-shimmer", "shine-blue", "shine-red", "shine-pink");
     el.textContent = text;
     return;
   }
@@ -62,7 +62,7 @@ export function setShimmerText(el: HTMLElement | null, text: string, shimmer: bo
   }
   el.setAttribute("data-shimmer", text);
   el.setAttribute("aria-label", text);
-  el.classList.remove("shine-red", "shine-pink");
+  el.classList.remove("shine-blue", "shine-red", "shine-pink");
   el.classList.add("activity-shimmer", toneClass);
   const frag = document.createDocumentFragment();
   const chars = Array.from(text);

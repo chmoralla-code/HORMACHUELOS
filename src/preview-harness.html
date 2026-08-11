@@ -3,16 +3,18 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#1e1e1e" />
     <title>Preview mode test harness</title>
     <link rel="stylesheet" href="/theme/tokens.css" />
     <link rel="stylesheet" href="/theme/globals.css" />
     <link rel="stylesheet" href="/app.css" />
     <link rel="stylesheet" href="/theme/workspace.css" />
     <style>
-      html, body, #app, .workbench { width: 100%; height: 100%; margin: 0; }
-      #app { display: block; }
+      html, body, #app { width: 100%; height: 100%; margin: 0; }
+      #app { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: var(--header-h) minmax(0, 1fr); }
       .workbench { grid-template-columns: minmax(0, 1fr) minmax(520px, 52vw); }
-      .test-stage { min-width: 0; background: #111; }
+      .test-stage { min-width: 0; background: var(--canvas); }
       #chat-queue-probe { display: none; }
     </style>
   </head>
@@ -23,6 +25,7 @@
         `https://asset.localhost/${encodeURIComponent(String(filePath).replaceAll("\\", "/"))}`;
     </script>
     <div id="app">
+      <header class="header" aria-label="Appearance test header"><div id="appearance-control"></div></header>
       <div class="workbench">
         <main class="test-stage">
           <div id="chat-queue-probe">
@@ -43,6 +46,11 @@
         rankDesignSourceCandidates,
       } from "./components/site-preview.ts";
       import { getProviderMeta, visibleProviders } from "./components/settings.ts";
+      import { setShimmerText } from "./components/util.ts";
+      import { initializeAppearance, mountAppearanceControl } from "./theme/appearance.ts";
+
+      initializeAppearance();
+      mountAppearanceControl(document.getElementById("appearance-control"));
 
       api.readProjectFile = async (relativePath) => ({
         path: relativePath,
@@ -192,6 +200,16 @@
       document.body.dataset.agenticAnimation = lightningStyle.animationName;
       document.body.dataset.agenticColor = lightningStyle.color;
       lightningProbe.remove();
+
+      const liveThinkingProbe = document.createElement("span");
+      document.body.appendChild(liveThinkingProbe);
+      setShimmerText(liveThinkingProbe, "Thinking…", true);
+      const liveThinkingChar = liveThinkingProbe.querySelector(".shine-ch");
+      const liveThinkingStyle = liveThinkingChar ? getComputedStyle(liveThinkingChar) : null;
+      document.body.dataset.liveThinkingClass = liveThinkingChar?.className || "";
+      document.body.dataset.liveThinkingAnimation = liveThinkingStyle?.animationName || "";
+      document.body.dataset.liveThinkingColor = liveThinkingStyle?.color || "";
+      liveThinkingProbe.remove();
 
       const chipProbe = document.createElement("button");
       chipProbe.className = "chip chip-cap chip-cap-agentic";

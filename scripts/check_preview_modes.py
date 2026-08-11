@@ -33,7 +33,60 @@ def main() -> None:
         assert body.get_attribute("data-tool-animation") == "lightningToolSpawnBlue"
         assert body.get_attribute("data-agentic-animation") == "lightningFadeInOutBlue"
         assert body.get_attribute("data-agentic-color") == "rgb(85, 185, 255)"
+        assert "shine-blue" in (body.get_attribute("data-live-thinking-class") or "")
+        assert body.get_attribute("data-live-thinking-animation") == "lightningFadeInOutBlue"
+        assert body.get_attribute("data-live-thinking-color") == "rgb(85, 185, 255)"
         assert body.get_attribute("data-agentic-chip-animation") == "lightningChipFadeBlue"
+
+        # Appearance is a live, persisted global preference—not just a color
+        # override on the switch itself. Exercise all three button modes and
+        # leave the harness in the default Dark mode for the remaining checks.
+        root = page.locator("html")
+        appearance = page.get_by_role("group", name="Appearance mode")
+        assert appearance.is_visible()
+        dark_mode = page.get_by_role("button", name="Use Dark appearance")
+        light_mode = page.get_by_role("button", name="Use Light appearance")
+        gray_mode = page.get_by_role("button", name="Use Gray appearance")
+        assert root.get_attribute("data-appearance") == "dark"
+        assert dark_mode.get_attribute("aria-pressed") == "true"
+
+        light_mode.click()
+        assert root.get_attribute("data-appearance") == "light"
+        assert root.evaluate("element => getComputedStyle(element).colorScheme") == "light"
+        assert root.evaluate("element => getComputedStyle(element).getPropertyValue('--canvas').trim()") == "#f4f7fb"
+        assert light_mode.get_attribute("aria-pressed") == "true"
+
+        gray_mode.click()
+        assert root.get_attribute("data-appearance") == "gray"
+        assert root.evaluate("element => getComputedStyle(element).colorScheme") == "dark"
+        assert root.evaluate("element => getComputedStyle(element).getPropertyValue('--canvas').trim()") == "#2a2d32"
+        assert page.evaluate("() => localStorage.getItem('ai-forge:appearance')") == "gray"
+
+        # Reload confirms the preference is restored before the interactive
+        # app module has a chance to render, avoiding a bright/dark flash.
+        page.reload()
+        page.wait_for_load_state("networkidle")
+        assert root.get_attribute("data-appearance") == "gray"
+        assert gray_mode.get_attribute("aria-pressed") == "true"
+
+        dark_mode.click()
+        assert root.get_attribute("data-appearance") == "dark"
+        assert dark_mode.get_attribute("aria-pressed") == "true"
+
+        # The desktop must keep its deliberately subtle thinking effects on
+        # when Windows reports reduced motion. This matches the app's existing
+        # reduced-motion handling for the working-dot wave.
+        reduced_page = browser.new_page(viewport={"width": 1440, "height": 1000})
+        reduced_page.emulate_media(reduced_motion="reduce")
+        reduced_page.goto("http://127.0.0.1:1420/preview-harness.html")
+        reduced_page.wait_for_load_state("networkidle")
+        reduced_body = reduced_page.locator("body")
+        assert reduced_body.get_attribute("data-agentic-animation") == "lightningFadeInOutBlue"
+        assert reduced_body.get_attribute("data-agentic-color") == "rgb(85, 185, 255)"
+        assert "shine-blue" in (reduced_body.get_attribute("data-live-thinking-class") or "")
+        assert reduced_body.get_attribute("data-live-thinking-animation") == "lightningFadeInOutBlue"
+        assert reduced_body.get_attribute("data-live-thinking-color") == "rgb(85, 185, 255)"
+        reduced_page.close()
 
         android = page.get_by_role("button", name="Toggle Android device preview")
         software = page.get_by_role("button", name="Toggle software window preview")

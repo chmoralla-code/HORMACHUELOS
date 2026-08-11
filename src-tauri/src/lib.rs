@@ -1204,6 +1204,17 @@ fn ensure_computer_fx_overlay(app: &AppHandle) {
 
 pub fn run() {
     tauri::Builder::default()
+        // Keep this first: Tauri's single-instance guard must initialize before
+        // other plugins can start work in a duplicate process.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                // A repeat launch should feel like reopening the app, even when
+                // the original window is minimized or temporarily hidden.
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(state::AppState::new())

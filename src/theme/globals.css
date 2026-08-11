@@ -20,9 +20,9 @@ pre, code, textarea, input, .msg-body, .console-body, .viewer-content { user-sel
 
 ::-webkit-scrollbar { width: 9px; height: 9px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #30352d; border: 2px solid transparent; background-clip: padding-box; border-radius: 9px; }
-::-webkit-scrollbar-thumb:hover { background: #444a40; border: 2px solid transparent; background-clip: padding-box; }
-::selection { background: rgba(255, 180, 84, 0.28); color: var(--text); }
+::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border: 2px solid transparent; background-clip: padding-box; border-radius: 9px; }
+::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); border: 2px solid transparent; background-clip: padding-box; }
+::selection { background: var(--selection); color: var(--text); }
 
 button, input, textarea, select {
   font: inherit;
@@ -86,7 +86,7 @@ select:focus-visible,
   transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease), color var(--dur) var(--ease);
 }
 .btn:hover { background: var(--elevated); color: var(--text); border-color: var(--border-strong); }
-.btn.primary { background: var(--ember); color: #211506; border-color: var(--ember); }
+.btn.primary { background: var(--ember); color: var(--on-accent); border-color: var(--ember); }
 .btn.primary:hover { background: var(--ember-strong); border-color: var(--ember-strong); }
 .btn.danger { color: var(--danger); }
 .btn.danger:hover { background: rgba(255, 120, 108, 0.09); border-color: rgba(255, 120, 108, 0.3); }
@@ -152,7 +152,7 @@ select, select option { background: var(--raised); color: var(--text); }
     animation-duration: 0.9s !important;
     animation-iteration-count: infinite !important;
   }
-  /* Letter-by-letter shine — keep looping under reduced motion */
+  /* Letter-by-letter blue shine — keep looping under reduced motion */
   .thinking-wrap:not(.thinking-done) .thinking-toggle-row .thinking-simple-label,
   .thinking-wrap:not(.thinking-done) .thinking-simple-label,
   .tool-batch-wrap.is-running .tool-batch-label,
@@ -173,14 +173,18 @@ select, select option { background: var(--raised); color: var(--text); }
   .tool-batch-wrap.is-running .shine-ch,
   .tool-card.pending .shine-ch,
   .thinking-running .shine-ch,
+  .shine-ch.shine-blue,
   .shine-ch.shine-red,
   .activity-shimmer.shine-red .shine-ch {
-    animation-name: letterShineRed !important;
-    animation-duration: 1.25s !important;
+    animation-name: lightningFadeInOutBlue !important;
+    animation-duration: 1.05s !important;
     animation-timing-function: ease-in-out !important;
     animation-iteration-count: infinite !important;
-    color: #c44a44 !important;
+    color: var(--live-blue) !important;
     -webkit-text-fill-color: currentColor !important;
+  }
+  .activity-shimmer.shine-blue .shine-ch {
+    animation-name: lightningFadeInOutBlue !important;
   }
   .activity-shimmer.shine-red,
   .thinking-wrap:not(.thinking-done) .thinking-simple-label.shine-red,

@@ -3,8 +3,25 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="color-scheme" content="dark" />
+    <meta name="color-scheme" content="dark light" />
     <meta name="theme-color" content="#1e1e1e" />
+    <script>
+      (() => {
+        try {
+          const saved = localStorage.getItem("ai-forge:appearance");
+          const appearance = ["light", "dark", "gray"].includes(saved) ? saved : "dark";
+          const root = document.documentElement;
+          root.dataset.appearance = appearance;
+          root.style.colorScheme = appearance === "light" ? "light" : "dark";
+          document.querySelector('meta[name="theme-color"]')?.setAttribute(
+            "content",
+            appearance === "light" ? "#f4f7fb" : appearance === "gray" ? "#2a2d32" : "#1e1e1e",
+          );
+        } catch {
+          // A storage-restricted webview still renders the safe dark default.
+        }
+      })();
+    </script>
     <title>Hormachuelos</title>
     <link rel="stylesheet" href="/theme/tokens.css" />
     <link rel="stylesheet" href="/theme/globals.css" />
@@ -31,6 +48,7 @@
           </button>
           <!-- Project path lives in the left sandwich drawer -->
           <div class="h-project" id="header-project" hidden aria-hidden="true"></div>
+          <div id="appearance-control"></div>
           <div class="workspace-menu-anchor" id="workspace-menu-anchor">
             <button
               type="button"
