@@ -2360,3 +2360,234 @@ button, input, select, textarea {
     transform: none;
   }
 }
+/* Download edition chooser */
+.prose.download-chooser {
+  max-width: 980px;
+  margin-top: 48px;
+}
+
+.download-chooser-intro {
+  max-width: 760px;
+  margin-bottom: 26px;
+}
+
+.download-chooser-intro .eyebrow {
+  margin-bottom: 14px;
+}
+
+.download-chooser-subtitle {
+  margin: 0;
+  max-width: 720px;
+  color: var(--text-2);
+  font-size: 1.02rem !important;
+}
+
+.download-editions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.download-edition {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 26px;
+  overflow: hidden;
+}
+
+.download-edition::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 2px;
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.download-edition.is-optimized {
+  border-color: rgba(125, 185, 255, 0.34);
+  background:
+    radial-gradient(circle at 100% 0%, rgba(90, 165, 255, 0.1), transparent 42%),
+    var(--bg-1);
+}
+
+.download-edition.is-optimized::before {
+  background: linear-gradient(90deg, #6bbcff, #9fe7ff);
+}
+
+.download-edition-kicker {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 28px;
+}
+
+.download-option-label,
+.download-edition-status {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.06em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.download-option-label {
+  padding: 7px 9px;
+  color: var(--text);
+  background: var(--bg-2);
+}
+
+.download-edition-status {
+  padding: 7px 9px;
+  color: var(--text-2);
+}
+
+.download-edition-status.optimized {
+  border-color: rgba(125, 185, 255, 0.35);
+  color: #a9ddff;
+  background: rgba(80, 155, 255, 0.08);
+}
+
+.download-edition h2 {
+  margin: 22px 0 9px;
+  font-size: 1.35rem;
+  letter-spacing: -0.03em;
+}
+
+.download-edition .download-edition-copy {
+  color: var(--text-2);
+  font-size: 0.93rem;
+}
+
+.download-edition .download-edition-meta {
+  margin-top: 17px;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.download-edition-points {
+  margin: 20px 0 24px;
+  padding-left: 20px !important;
+  color: var(--text-2);
+}
+
+.download-edition-points li {
+  font-size: 0.86rem;
+}
+
+.download-edition-points li + li {
+  margin-top: 7px;
+}
+
+.download-edition-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+  margin-top: auto;
+}
+
+.download-edition-actions .btn {
+  flex: 1 1 170px;
+}
+
+.download-edition-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 15px;
+}
+
+.download-edition-link {
+  color: var(--text-2);
+  font-size: 0.8rem;
+  text-decoration: underline;
+  text-decoration-color: rgba(255, 255, 255, 0.28);
+  text-underline-offset: 4px;
+}
+
+.download-edition-link:hover {
+  text-decoration-color: currentColor;
+}
+
+.download-separation-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-top: 16px;
+  padding: 15px 17px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.download-separation-note p {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 0.86rem;
+}
+
+.download-separation-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.7rem;
+}
+
+.download-install-note {
+  margin-top: 32px;
+  padding-top: 24px;
+  border-top: 1px solid var(--line);
+}
+
+.download-install-note h2 {
+  margin: 0 0 10px;
+  font-size: 1rem;
+}
+
+.download-install-note ol {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.download-install-note li + li {
+  margin-top: 5px;
+}
+
+@media (max-width: 760px) {
+  .download-editions {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 520px) {
+  .prose.download-chooser {
+    margin-top: 32px;
+  }
+
+  .download-edition {
+    padding: 21px 18px;
+  }
+
+  .download-edition-kicker {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .download-edition-actions .btn {
+    width: 100%;
+    flex-basis: 100%;
+  }
+}
