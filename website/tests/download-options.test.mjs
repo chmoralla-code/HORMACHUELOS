@@ -17,10 +17,12 @@ test("download chooser pins both verified release tracks", async () => {
   assert.ok(app.includes("HORMACHUELOS/releases/download/v0.1.76"));
   assert.ok(app.includes("Hormachuelos_0.1.76_x64_en-US.msi"));
   assert.ok(app.includes("Hormachuelos_0.1.76_x64-setup.exe"));
-  assert.ok(app.includes("HORMACHUELOS-OPTIMIZED/releases/download/v1.2.6-1"));
-  assert.ok(app.includes("Hormachuelos_Optimized_1.2.6-1_x64.msi"));
-  assert.ok(app.includes("Hormachuelos_Optimized_1.2.6-1_x64-setup.exe"));
+  assert.ok(app.includes("HORMACHUELOS-OPTIMIZED/releases/download/v1.2.7-1"));
+  assert.ok(app.includes("Hormachuelos_Optimized_1.2.7-1_x64.msi"));
+  assert.ok(app.includes("Hormachuelos_Optimized_1.2.7-1_x64-setup.exe"));
   assert.match(app, /Ask Max retries silent replies/);
+  assert.match(app, /Project-locked Preview reuses localhost only when the canonical project, working directory, command fingerprint, port, live PID, and process identity all match/);
+  assert.match(app, /Computer Use stays bound to the exact session, project, and AI run that started it/);
   assert.match(app, /Preview Computer Use can open and switch tabs/);
   assert.match(app, /reliably scroll pages, tables, and nested panels/);
   assert.match(app, /Native date, time, select, and other form controls/);

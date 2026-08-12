@@ -41,21 +41,21 @@ const DESKTOP_DOWNLOADS = {
 
 /** FPS-optimized desktop installer files, published as a separate app. */
 const OPTIMIZED_RELEASE_DOWNLOAD_BASE =
-  "https://github.com/chmoralla-code/HORMACHUELOS-OPTIMIZED/releases/download/v1.2.6-1";
+  "https://github.com/chmoralla-code/HORMACHUELOS-OPTIMIZED/releases/download/v1.2.7-1";
 
 const OPTIMIZED_DOWNLOADS = {
-  version: "1.2.6-1",
+  version: "1.2.7-1",
   details: "https://chmoralla-code.github.io/HORMACHUELOS-OPTIMIZED/",
   windows: {
     msi: {
       label: "Optimized installer (MSI)",
-      href: `${OPTIMIZED_RELEASE_DOWNLOAD_BASE}/Hormachuelos_Optimized_1.2.6-1_x64.msi`,
-      file: "Hormachuelos_Optimized_1.2.6-1_x64.msi",
+      href: `${OPTIMIZED_RELEASE_DOWNLOAD_BASE}/Hormachuelos_Optimized_1.2.7-1_x64.msi`,
+      file: "Hormachuelos_Optimized_1.2.7-1_x64.msi",
     },
     setup: {
       label: "Optimized setup (EXE)",
-      href: `${OPTIMIZED_RELEASE_DOWNLOAD_BASE}/Hormachuelos_Optimized_1.2.6-1_x64-setup.exe`,
-      file: "Hormachuelos_Optimized_1.2.6-1_x64-setup.exe",
+      href: `${OPTIMIZED_RELEASE_DOWNLOAD_BASE}/Hormachuelos_Optimized_1.2.7-1_x64-setup.exe`,
+      file: "Hormachuelos_Optimized_1.2.7-1_x64-setup.exe",
     },
   },
 };
@@ -2807,6 +2807,8 @@ function renderDownload() {
           <ul class="download-edition-points">
             <li>Matches the Standard edition's AI model lineup</li>
             <li>Ask Max retries silent replies and organizes the final answer</li>
+            <li>Project-locked Preview reuses localhost only when the canonical project, working directory, command fingerprint, port, live PID, and process identity all match</li>
+            <li>Computer Use stays bound to the exact session, project, and AI run that started it</li>
             <li>Preview Computer Use can open and switch tabs, then reliably scroll pages, tables, and nested panels</li>
             <li>Native date, time, select, and other form controls now support direct values plus pass/fail evidence checks</li>
             <li>Cinematic target-aware AI cursor with hover frames, press feedback, motion beads, shockwaves, and edge-safe labels</li>
