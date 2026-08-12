@@ -41,21 +41,21 @@ const DESKTOP_DOWNLOADS = {
 
 /** FPS-optimized desktop installer files, published as a separate app. */
 const OPTIMIZED_RELEASE_DOWNLOAD_BASE =
-  "https://github.com/chmoralla-code/HORMACHUELOS-OPTIMIZED/releases/download/v1.0.2";
+  "https://github.com/chmoralla-code/HORMACHUELOS-OPTIMIZED/releases/download/v1.2.0-1";
 
 const OPTIMIZED_DOWNLOADS = {
-  version: "1.0.2",
+  version: "1.2.0-1",
   details: "https://chmoralla-code.github.io/HORMACHUELOS-OPTIMIZED/",
   windows: {
     msi: {
       label: "Optimized installer (MSI)",
-      href: `${OPTIMIZED_RELEASE_DOWNLOAD_BASE}/Hormachuelos_Optimized_1.0.2_x64.msi`,
-      file: "Hormachuelos_Optimized_1.0.2_x64.msi",
+      href: `${OPTIMIZED_RELEASE_DOWNLOAD_BASE}/Hormachuelos_Optimized_1.2.0-1_x64.msi`,
+      file: "Hormachuelos_Optimized_1.2.0-1_x64.msi",
     },
     setup: {
       label: "Optimized setup (EXE)",
-      href: `${OPTIMIZED_RELEASE_DOWNLOAD_BASE}/Hormachuelos_Optimized_1.0.2_x64-setup.exe`,
-      file: "Hormachuelos_Optimized_1.0.2_x64-setup.exe",
+      href: `${OPTIMIZED_RELEASE_DOWNLOAD_BASE}/Hormachuelos_Optimized_1.2.0-1_x64-setup.exe`,
+      file: "Hormachuelos_Optimized_1.2.0-1_x64-setup.exe",
     },
   },
 };
@@ -2799,15 +2799,16 @@ function renderDownload() {
         <article class="card download-edition is-optimized" aria-labelledby="optimized-edition-title">
           <div class="download-edition-kicker">
             <span class="download-option-label">Option 2</span>
-            <span class="download-edition-status optimized">FPS Optimized</span>
+            <span class="download-edition-status optimized">FPS Optimized · New beta</span>
           </div>
           <h2 id="optimized-edition-title">Hormachuelos Optimized</h2>
-          <p class="download-edition-copy">A separate Hormachuelos build tuned to reduce interface rendering overhead and deliver smoother motion and responsiveness.</p>
+          <p class="download-edition-copy">A separate, smoother Hormachuelos build with Ask Max reliability and Preview-only Computer Use that you control from the Preview menu.</p>
           <p class="download-edition-meta mono">v${optimized.version} · 64-bit Windows · Separate app</p>
           <ul class="download-edition-points">
             <li>Matches the Standard edition's AI model lineup</li>
-            <li>Performance-focused interface and effects profile</li>
-            <li>Independent installation and update channel</li>
+            <li>Ask Max retries silent replies and organizes the final answer</li>
+            <li>Preview Computer Use offers Off, Auto, and On</li>
+            <li>Performance-focused interface and independent update channel</li>
           </ul>
           <div class="download-edition-actions">
             <a class="btn btn-primary" id="optimized-msi" href="${optimized.windows.msi.href}" download="${optimized.windows.msi.file}">${escapeHtml(optimized.windows.msi.label)}</a>
