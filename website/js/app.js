@@ -41,21 +41,21 @@ const DESKTOP_DOWNLOADS = {
 
 /** FPS-optimized desktop installer files, published as a separate app. */
 const OPTIMIZED_RELEASE_DOWNLOAD_BASE =
-  "https://github.com/chmoralla-code/HORMACHUELOS-OPTIMIZED/releases/download/v1.2.5-1";
+  "https://github.com/chmoralla-code/HORMACHUELOS-OPTIMIZED/releases/download/v1.2.6-1";
 
 const OPTIMIZED_DOWNLOADS = {
-  version: "1.2.5-1",
+  version: "1.2.6-1",
   details: "https://chmoralla-code.github.io/HORMACHUELOS-OPTIMIZED/",
   windows: {
     msi: {
       label: "Optimized installer (MSI)",
-      href: `${OPTIMIZED_RELEASE_DOWNLOAD_BASE}/Hormachuelos_Optimized_1.2.5-1_x64.msi`,
-      file: "Hormachuelos_Optimized_1.2.5-1_x64.msi",
+      href: `${OPTIMIZED_RELEASE_DOWNLOAD_BASE}/Hormachuelos_Optimized_1.2.6-1_x64.msi`,
+      file: "Hormachuelos_Optimized_1.2.6-1_x64.msi",
     },
     setup: {
       label: "Optimized setup (EXE)",
-      href: `${OPTIMIZED_RELEASE_DOWNLOAD_BASE}/Hormachuelos_Optimized_1.2.5-1_x64-setup.exe`,
-      file: "Hormachuelos_Optimized_1.2.5-1_x64-setup.exe",
+      href: `${OPTIMIZED_RELEASE_DOWNLOAD_BASE}/Hormachuelos_Optimized_1.2.6-1_x64-setup.exe`,
+      file: "Hormachuelos_Optimized_1.2.6-1_x64-setup.exe",
     },
   },
 };
@@ -2810,6 +2810,7 @@ function renderDownload() {
             <li>Preview Computer Use can open and switch tabs, then reliably scroll pages, tables, and nested panels</li>
             <li>Native date, time, select, and other form controls now support direct values plus pass/fail evidence checks</li>
             <li>Cinematic target-aware AI cursor with hover frames, press feedback, motion beads, shockwaves, and edge-safe labels</li>
+            <li>Animated black-to-white Preview perimeter shows when Computer Use is active, then every cursor effect disappears when the AI finishes or stops</li>
             <li>Performance-focused interface and independent update channel</li>
           </ul>
           <div class="download-edition-actions">
