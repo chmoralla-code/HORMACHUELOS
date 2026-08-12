@@ -41,21 +41,21 @@ const DESKTOP_DOWNLOADS = {
 
 /** FPS-optimized desktop installer files, published as a separate app. */
 const OPTIMIZED_RELEASE_DOWNLOAD_BASE =
-  "https://github.com/chmoralla-code/HORMACHUELOS-OPTIMIZED/releases/download/v1.2.2-1";
+  "https://github.com/chmoralla-code/HORMACHUELOS-OPTIMIZED/releases/download/v1.2.3-1";
 
 const OPTIMIZED_DOWNLOADS = {
-  version: "1.2.2-1",
+  version: "1.2.3-1",
   details: "https://chmoralla-code.github.io/HORMACHUELOS-OPTIMIZED/",
   windows: {
     msi: {
       label: "Optimized installer (MSI)",
-      href: `${OPTIMIZED_RELEASE_DOWNLOAD_BASE}/Hormachuelos_Optimized_1.2.2-1_x64.msi`,
-      file: "Hormachuelos_Optimized_1.2.2-1_x64.msi",
+      href: `${OPTIMIZED_RELEASE_DOWNLOAD_BASE}/Hormachuelos_Optimized_1.2.3-1_x64.msi`,
+      file: "Hormachuelos_Optimized_1.2.3-1_x64.msi",
     },
     setup: {
       label: "Optimized setup (EXE)",
-      href: `${OPTIMIZED_RELEASE_DOWNLOAD_BASE}/Hormachuelos_Optimized_1.2.2-1_x64-setup.exe`,
-      file: "Hormachuelos_Optimized_1.2.2-1_x64-setup.exe",
+      href: `${OPTIMIZED_RELEASE_DOWNLOAD_BASE}/Hormachuelos_Optimized_1.2.3-1_x64-setup.exe`,
+      file: "Hormachuelos_Optimized_1.2.3-1_x64-setup.exe",
     },
   },
 };
@@ -2807,7 +2807,8 @@ function renderDownload() {
           <ul class="download-edition-points">
             <li>Matches the Standard edition's AI model lineup</li>
             <li>Ask Max retries silent replies and organizes the final answer</li>
-            <li>Preview Computer Use auto-controls localhost and 127.0.0.1 builds in the native Preview Browser</li>
+            <li>Preview Computer Use can open, navigate, and switch Preview tabs without losing the active page</li>
+            <li>Larger high-contrast AI cursor with halo, trail, and click feedback</li>
             <li>Performance-focused interface and independent update channel</li>
           </ul>
           <div class="download-edition-actions">
