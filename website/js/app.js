@@ -20,32 +20,52 @@ const ASSET_BASE =
  * The update API can still replace it with an admin-published asset URL.
  */
 const RELEASE_DOWNLOAD_BASE =
-  "https://github.com/chmoralla-code/HORMACHUELOS/releases/download/v0.1.67";
+  "https://github.com/chmoralla-code/HORMACHUELOS/releases/download/v0.1.76";
 
 /** Desktop installer files for the current production release. */
 const DESKTOP_DOWNLOADS = {
-  version: "0.1.67",
+  version: "0.1.76",
   windows: {
     msi: {
       label: "Windows installer (MSI)",
-      href: `${RELEASE_DOWNLOAD_BASE}/Hormachuelos_0.1.67_x64_en-US.msi`,
-      file: "Hormachuelos_0.1.67_x64_en-US.msi",
+      href: `${RELEASE_DOWNLOAD_BASE}/Hormachuelos_0.1.76_x64_en-US.msi`,
+      file: "Hormachuelos_0.1.76_x64_en-US.msi",
     },
     setup: {
       label: "Windows setup (EXE)",
-      href: `${RELEASE_DOWNLOAD_BASE}/Hormachuelos_0.1.67_x64-setup.exe`,
-      file: "Hormachuelos_0.1.67_x64-setup.exe",
+      href: `${RELEASE_DOWNLOAD_BASE}/Hormachuelos_0.1.76_x64-setup.exe`,
+      file: "Hormachuelos_0.1.76_x64-setup.exe",
     },
   },
 };
 
+/** FPS-optimized desktop installer files, published as a separate app. */
+const OPTIMIZED_RELEASE_DOWNLOAD_BASE =
+  "https://github.com/chmoralla-code/HORMACHUELOS-OPTIMIZED/releases/download/v1.0.2";
+
+const OPTIMIZED_DOWNLOADS = {
+  version: "1.0.2",
+  details: "https://chmoralla-code.github.io/HORMACHUELOS-OPTIMIZED/",
+  windows: {
+    msi: {
+      label: "Optimized installer (MSI)",
+      href: `${OPTIMIZED_RELEASE_DOWNLOAD_BASE}/Hormachuelos_Optimized_1.0.2_x64.msi`,
+      file: "Hormachuelos_Optimized_1.0.2_x64.msi",
+    },
+    setup: {
+      label: "Optimized setup (EXE)",
+      href: `${OPTIMIZED_RELEASE_DOWNLOAD_BASE}/Hormachuelos_Optimized_1.0.2_x64-setup.exe`,
+      file: "Hormachuelos_Optimized_1.0.2_x64-setup.exe",
+    },
+  },
+};
 function primaryDownloadHref() {
   return DESKTOP_DOWNLOADS.windows.msi.href;
 }
 
 function renderDownloadButton(extraClass = "btn-lg") {
   const cls = extraClass ? ` ${extraClass}` : "";
-  return `<a class="btn${cls}" href="${primaryDownloadHref()}" download="${DESKTOP_DOWNLOADS.windows.msi.file}">Download</a>`;
+  return `<a class="btn${cls}" href="#/download">Download</a>`;
 }
 
 function renderDownloadButtons(extraClass = "") {
@@ -2744,37 +2764,91 @@ function renderSuccess() {
 
 function renderDownload() {
   const { version, windows } = DESKTOP_DOWNLOADS;
+  const optimized = OPTIMIZED_DOWNLOADS;
   const wrap = page(`
-    <div class="prose container">
-      <h1>Download Hormachuelos</h1>
-      <p id="dl-lead">Install the desktop AI agent on Windows. Loading latest build…</p>
-      <div class="card" style="margin:20px 0">
-        <h3 style="margin-top:0">Windows</h3>
-        <p class="muted small">After install, open Hormachuelos — it opens this website so you can <strong>log in or sign up</strong>, then the app signs in automatically.</p>
-        <div id="dl-actions" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:16px">
-          <a class="btn btn-primary" id="dl-msi" href="${windows.msi.href}">${escapeHtml(windows.msi.label)}</a>
-          <a class="btn" id="dl-exe" href="${windows.setup.href}">${escapeHtml(windows.setup.label)}</a>
-          <a class="btn btn-ghost" href="#/update">What's new / Update</a>
-        </div>
-        <ol class="muted small" style="margin:16px 0 0;padding-left:18px;line-height:1.55">
-          <li>Download &amp; install</li>
-          <li>Open the app → browser opens for login/signup</li>
-          <li>Return to the app — you're signed in automatically</li>
+    <div class="prose container download-chooser">
+      <div class="download-chooser-intro">
+        <div class="eyebrow"><span class="dot"></span> Windows desktop editions</div>
+        <h1>Choose your Hormachuelos build</h1>
+        <p class="download-chooser-subtitle">Pick the original Standard app or the separate FPS Optimized app. Both editions use the same AI model lineup and can be installed side by side.</p>
+      </div>
+
+      <div class="download-editions" aria-label="Hormachuelos download options">
+        <article class="card download-edition" aria-labelledby="standard-edition-title">
+          <div class="download-edition-kicker">
+            <span class="download-option-label">Option 1</span>
+            <span class="download-edition-status">Original · Standard</span>
+          </div>
+          <h2 id="standard-edition-title">Hormachuelos Standard</h2>
+          <p class="download-edition-copy">The existing, non-optimized Hormachuelos release. Choose this edition to stay on the original desktop experience and update track.</p>
+          <p class="download-edition-meta mono" id="standard-edition-meta">v${version} · 64-bit Windows</p>
+          <ul class="download-edition-points">
+            <li>Original visual effects and rendering profile</li>
+            <li>Existing Hormachuelos update channel</li>
+            <li>Best when you want the current standard experience</li>
+          </ul>
+          <div class="download-edition-actions">
+            <a class="btn btn-primary" id="standard-msi" href="${windows.msi.href}" download="${windows.msi.file}">${escapeHtml(windows.msi.label)}</a>
+            <a class="btn" id="standard-exe" href="${windows.setup.href}" download="${windows.setup.file}">${escapeHtml(windows.setup.label)}</a>
+          </div>
+          <div class="download-edition-links">
+            <a class="download-edition-link" href="#/update">What's new in Standard</a>
+          </div>
+        </article>
+
+        <article class="card download-edition is-optimized" aria-labelledby="optimized-edition-title">
+          <div class="download-edition-kicker">
+            <span class="download-option-label">Option 2</span>
+            <span class="download-edition-status optimized">FPS Optimized</span>
+          </div>
+          <h2 id="optimized-edition-title">Hormachuelos Optimized</h2>
+          <p class="download-edition-copy">A separate Hormachuelos build tuned to reduce interface rendering overhead and deliver smoother motion and responsiveness.</p>
+          <p class="download-edition-meta mono">v${optimized.version} · 64-bit Windows · Separate app</p>
+          <ul class="download-edition-points">
+            <li>Matches the Standard edition's AI model lineup</li>
+            <li>Performance-focused interface and effects profile</li>
+            <li>Independent installation and update channel</li>
+          </ul>
+          <div class="download-edition-actions">
+            <a class="btn btn-primary" id="optimized-msi" href="${optimized.windows.msi.href}" download="${optimized.windows.msi.file}">${escapeHtml(optimized.windows.msi.label)}</a>
+            <a class="btn" id="optimized-exe" href="${optimized.windows.setup.href}" download="${optimized.windows.setup.file}">${escapeHtml(optimized.windows.setup.label)}</a>
+          </div>
+          <div class="download-edition-links">
+            <a class="download-edition-link" href="${optimized.details}" target="_blank" rel="noopener noreferrer">Optimized edition details ↗</a>
+          </div>
+        </article>
+      </div>
+
+      <aside class="download-separation-note" aria-label="Installation note">
+        <span class="download-separation-icon" aria-hidden="true">i</span>
+        <p><strong>Separate installs:</strong> installing the Optimized edition does not replace Standard. Each edition keeps its own app identity, settings, and update track.</p>
+      </aside>
+
+      <div class="download-install-note">
+        <h2>After installation</h2>
+        <ol>
+          <li>Open the edition you installed.</li>
+          <li>Your browser opens so you can log in or sign up.</li>
+          <li>Return to the desktop app — it signs in automatically.</li>
         </ol>
       </div>
     </div>
   `);
+
   (async () => {
     try {
-      const data = await fetch("/api/update").then((r) => r.json());
+      const response = await fetch("/api/update");
+      if (!response.ok) throw new Error(`Update request failed (${response.status})`);
+      const data = await response.json();
       const latest = data.latest;
       if (!latest) return;
-      const lead = wrap.querySelector("#dl-lead");
-      if (lead) {
-        lead.textContent = `Latest: v${latest.version}${latest.title ? ` · ${latest.title}` : ""} · 64-bit Windows`;
+
+      const meta = wrap.querySelector("#standard-edition-meta");
+      if (meta) {
+        meta.textContent = `v${latest.version}${latest.title ? ` · ${latest.title}` : ""} · 64-bit Windows`;
       }
-      const msi = wrap.querySelector("#dl-msi");
-      const exe = wrap.querySelector("#dl-exe");
+      const msi = wrap.querySelector("#standard-msi");
+      const exe = wrap.querySelector("#standard-exe");
       if (msi && latest.msiUrl) {
         msi.href = latest.msiUrl;
         msi.textContent = `Windows installer (MSI) v${latest.version}`;
@@ -2784,10 +2858,11 @@ function renderDownload() {
         exe.textContent = `Windows setup (EXE) v${latest.version}`;
       }
     } catch {
-      const lead = wrap.querySelector("#dl-lead");
-      if (lead) lead.textContent = `Install the desktop AI agent on Windows. v${version} · 64-bit.`;
+      const meta = wrap.querySelector("#standard-edition-meta");
+      if (meta) meta.textContent = `v${version} · 64-bit Windows`;
     }
   })();
+
   return wrap;
 }
 

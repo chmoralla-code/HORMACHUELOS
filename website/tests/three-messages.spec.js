@@ -42,6 +42,7 @@ async function installMock(page) {
       command_timeout_secs: 60,
       auto_approve: true,
       permission_mode: "auto",
+      flavour_enabled: true,
     };
 
     const defaultLicense = {
@@ -282,6 +283,7 @@ async function installMock(page) {
             return { ...settings };
           case "save_settings":
             Object.assign(settings, args.settings || {});
+            window.__HORMA_SAVED_SETTINGS__ = { ...settings };
             return null;
           case "has_api_key":
             return true;
@@ -330,6 +332,7 @@ async function installMock(page) {
             return String(args.path || "");
           case "agent_run":
             window.__HORMA_LAST_AGENT_PROMPT__ = args.prompt;
+            window.__HORMA_LAST_USER_REQUEST__ = args.userRequest;
             window.__HORMA_LAST_AGENT_PROJECT_ROOT__ = args.projectRoot;
             await simulateAgent(args.prompt, args.sessionId);
             return null;
@@ -600,6 +603,36 @@ test("creates and uses a Quick session without asking for a folder", async ({ pa
   expect(fatal, fatal.join("\n")).toEqual([]);
 });
 
+test("Flavour memory is visible in chat controls and can be disabled", async ({ page }) => {
+  await installMock(page);
+  await page.route("https://hormachuelos.vercel.app/api/update?*", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ updateAvailable: false, forceUpdate: false, currentVersion: "0.1.5", latest: null }),
+    }),
+  );
+  await page.route("https://hormachuelos.vercel.app/api/auth/me", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ ok: true, user: { email: "flavour-test@example.com", plan: "pro" } }),
+    }),
+  );
+
+  await page.goto(APP, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Add modes and attachments" }).click();
+  const flavour = page.getByRole("menuitem", { name: "Flavour memory — On" });
+  await expect(flavour).toBeVisible();
+  await flavour.click();
+  await expect
+    .poll(() => page.evaluate(() => window.__HORMA_SAVED_SETTINGS__?.flavour_enabled))
+    .toBe(false);
+
+  await page.getByRole("button", { name: "Add modes and attachments" }).click();
+  await expect(page.getByRole("menuitem", { name: "Flavour memory — Off" })).toBeVisible();
+});
+
 test("send three messages and get mock agent replies", async ({ page }) => {
   const consoleErrors = [];
   page.on("pageerror", (e) => consoleErrors.push("page:" + e.message));
@@ -693,6 +726,9 @@ test("send three messages and get mock agent replies", async ({ page }) => {
     // Wait for mock agent text
     await expect(page.locator("#chat")).toContainText("Mock agent reply", { timeout: 10000 });
     await expect(page.locator("#chat")).toContainText(msg.slice(0, 20), { timeout: 5000 });
+    // Flavour receives the user's clean request separately from the hidden
+    // project mission wrapper used by the provider prompt.
+    await expect.poll(() => page.evaluate(() => window.__HORMA_LAST_USER_REQUEST__)).toBe(msg);
 
     // Wait for run to finish (send button not in stop mode)
     await page.waitForTimeout(400);
