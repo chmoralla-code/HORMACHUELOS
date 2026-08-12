@@ -16,11 +16,11 @@ test("download chooser pins both verified release tracks", async () => {
   const app = await readFile(appUrl, "utf8");
   assert.ok(app.includes("HORMACHUELOS/releases/download/v0.1.76/Hormachuelos_0.1.76_x64_en-US.msi"));
   assert.ok(app.includes("HORMACHUELOS/releases/download/v0.1.76/Hormachuelos_0.1.76_x64-setup.exe"));
-  assert.ok(app.includes("HORMACHUELOS-OPTIMIZED/releases/download/v1.2.1-1"));
-  assert.ok(app.includes("Hormachuelos_Optimized_1.2.1-1_x64.msi"));
-  assert.ok(app.includes("Hormachuelos_Optimized_1.2.1-1_x64-setup.exe"));
+  assert.ok(app.includes("HORMACHUELOS-OPTIMIZED/releases/download/v1.2.2-1"));
+  assert.ok(app.includes("Hormachuelos_Optimized_1.2.2-1_x64.msi"));
+  assert.ok(app.includes("Hormachuelos_Optimized_1.2.2-1_x64-setup.exe"));
   assert.match(app, /Ask Max retries silent replies/);
-  assert.match(app, /Preview Computer Use can observe, click, type, scroll, and debug in Ask mode/);
+  assert.match(app, /Preview Computer Use auto-controls localhost and 127\.0\.0\.1 builds/);
   assert.match(app, /FPS Optimized · New beta/);
   assert.match(app, /Separate installs:/);
 });
