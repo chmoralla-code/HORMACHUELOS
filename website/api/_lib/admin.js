@@ -1,10 +1,13 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { planBudget, normalizePlan } from "./plans.js";
 import {
+  getAccountById,
   getLicenseByKey,
   insertLicense,
   listAccounts,
   listLicenses,
+  resetAllLicenseUsage,
+  resetLicenseUsageForAccount,
   updateAccount,
   updateLicense,
 } from "./supabase.js";
@@ -229,4 +232,29 @@ export async function updateAdminUser(id, patch) {
 
   const updated = await updateAccount(account.id, accountPatch);
   return mapUser(updated || { ...account, ...accountPatch }, license);
+}
+
+async function licenseForAccount(account) {
+  return (
+    (account.license_key && (await getLicenseByKey(account.license_key))) ||
+    null
+  );
+}
+
+export async function resetAdminUserUsage(id) {
+  const account = await getAccountById(id);
+  if (!account) {
+    throw Object.assign(new Error("User not found"), { status: 404 });
+  }
+  const updatedLicenses = await resetLicenseUsageForAccount(account);
+  const license =
+    updatedLicenses.find((row) => row.key && row.key === account.license_key) ||
+    updatedLicenses[0] ||
+    (await licenseForAccount(account));
+  return mapUser(account, license);
+}
+
+export async function resetAllAdminUsage() {
+  const reset = await resetAllLicenseUsage();
+  return { reset };
 }

@@ -143,6 +143,57 @@ export async function listLicenses() {
   return Array.isArray(rows) ? rows : [];
 }
 
+function licenseUsageResetBody() {
+  return { tokens_used: 0, updated_at: new Date().toISOString() };
+}
+
+async function patchLicenses(query) {
+  const rows = await sb(`licenses?${query}`, {
+    method: "PATCH",
+    body: licenseUsageResetBody(),
+  });
+  return Array.isArray(rows) ? rows : [];
+}
+
+/** Zero hosted token usage for every license matching a key and/or email. */
+export async function resetLicenseUsageForAccount(account) {
+  const seen = new Set();
+  const updated = [];
+  const key = String(account?.license_key || "").trim();
+  const email = String(account?.email || "").trim().toLowerCase();
+  if (key) {
+    for (const row of await patchLicenses(`key=eq.${encodeURIComponent(key)}`)) {
+      if (row?.id && !seen.has(row.id)) {
+        seen.add(row.id);
+        updated.push(row);
+      }
+    }
+  }
+  if (email) {
+    for (const row of await patchLicenses(`email=eq.${encodeURIComponent(email)}`)) {
+      if (row?.id && !seen.has(row.id)) {
+        seen.add(row.id);
+        updated.push(row);
+      }
+    }
+  }
+  return updated;
+}
+
+/** Zero hosted token usage on every license that still has a used counter. */
+export async function resetAllLicenseUsage() {
+  const seen = new Set();
+  for (let i = 0; i < 50; i += 1) {
+    const rows = await patchLicenses("tokens_used=neq.0");
+    if (!rows.length) break;
+    for (const row of rows) {
+      if (row?.id) seen.add(row.id);
+    }
+    if (rows.length < 1000) break;
+  }
+  return seen.size;
+}
+
 export async function insertEmailVerification(row) {
   const rows = await sb("email_verifications", { method: "POST", body: row });
   return Array.isArray(rows) ? rows[0] : rows;

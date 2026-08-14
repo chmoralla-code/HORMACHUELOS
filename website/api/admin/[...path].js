@@ -5,6 +5,8 @@ import {
   checkAdminCredentials,
   issueAdminToken,
   listAdminUsers,
+  resetAdminUserUsage,
+  resetAllAdminUsage,
   updateAdminUser,
 } from "../_lib/admin.js";
 import {
@@ -80,6 +82,22 @@ export default async function handler(req, res) {
       if (req.method === "GET") {
         const users = await listAdminUsers();
         return json(res, 200, { ok: true, users }, req);
+      }
+
+      if (req.method === "POST") {
+        const body = await readJson(req);
+        const userAction = String(body.action || "").trim().toLowerCase();
+        if (userAction === "reset-all-usage") {
+          const result = await resetAllAdminUsage();
+          return json(res, 200, { ok: true, ...result }, req);
+        }
+        if (userAction === "reset-usage") {
+          const id = body.id || body.userId;
+          if (!id) return json(res, 400, { error: "Missing user id" }, req);
+          const user = await resetAdminUserUsage(id);
+          return json(res, 200, { ok: true, user }, req);
+        }
+        return json(res, 400, { error: "User action must be reset-usage or reset-all-usage." }, req);
       }
 
       if (req.method === "PATCH") {

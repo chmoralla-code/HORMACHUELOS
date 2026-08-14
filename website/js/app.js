@@ -39,6 +39,14 @@ const DESKTOP_DOWNLOADS = {
   },
 };
 
+/** Independent Hormachuelos Optimized build with opt-in Desktop mode. */
+const DESKTOP_MODE_DOWNLOAD = {
+  version: "1.2.11-1",
+  label: "Desktop mode",
+  href: "https://github.com/chmoralla-code/HORMACHUELOS-OPTIMIZED/releases/download/v1.2.11-1/Hormachuelos_Optimized_1.2.11-1_x64-setup.exe",
+  file: "Hormachuelos_Optimized_1.2.11-1_x64-setup.exe",
+};
+
 function primaryDownloadHref() {
   return DESKTOP_DOWNLOADS.windows.msi.href;
 }
@@ -48,14 +56,19 @@ function renderDownloadButton(extraClass = "btn-lg") {
   return `<a class="btn${cls}" href="${primaryDownloadHref()}" download="${DESKTOP_DOWNLOADS.windows.msi.file}">Download</a>`;
 }
 
+function renderDesktopModeDownloadButton(extraClass = "btn-lg") {
+  const cls = extraClass ? ` ${extraClass}` : "";
+  return `<a class="btn${cls}" href="${DESKTOP_MODE_DOWNLOAD.href}" download="${DESKTOP_MODE_DOWNLOAD.file}">Desktop mode</a>`;
+}
+
 function renderDownloadButtons(extraClass = "") {
   const cls = extraClass ? ` ${extraClass}` : "";
   return `
     <a class="btn btn-primary btn-lg${cls}" href="${primaryDownloadHref()}" download="${DESKTOP_DOWNLOADS.windows.msi.file}">
       Download for Windows
     </a>
-    <a class="btn btn-lg${cls}" href="${DESKTOP_DOWNLOADS.windows.setup.href}" download="${DESKTOP_DOWNLOADS.windows.setup.file}">
-      Setup (.exe)
+    <a class="btn btn-lg${cls}" href="${DESKTOP_MODE_DOWNLOAD.href}" download="${DESKTOP_MODE_DOWNLOAD.file}">
+      Desktop mode
     </a>
   `;
 }
@@ -441,6 +454,35 @@ function escapeHtml(s) {
     .replace(/"/g, "&quot;");
 }
 
+const MODEL_ALIAS_PATTERN = "[a-zA-Z0-9][a-zA-Z0-9._\\/-]{0,100}";
+
+function suggestedModelAlias(displayName, fallback = "") {
+  const slug = String(displayName || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 101);
+  if (/^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,100}$/.test(slug) && slug !== "hormachuelos-provider-profile-v1") {
+    return slug;
+  }
+  const raw = String(fallback || "").trim();
+  if (/^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,100}$/.test(raw)) return raw;
+  return "";
+}
+
+function bindSuggestedAlias(nameInput, aliasInput) {
+  if (!nameInput || !aliasInput) return;
+  let aliasTouched = Boolean(aliasInput.value.trim());
+  aliasInput.addEventListener("input", () => {
+    aliasTouched = Boolean(aliasInput.value.trim());
+  });
+  nameInput.addEventListener("input", () => {
+    if (aliasTouched) return;
+    aliasInput.value = suggestedModelAlias(nameInput.value);
+  });
+}
+
 // ——— routing ———
 
 const routes = {
@@ -597,6 +639,8 @@ function renderHome() {
       <div class="hero-cta ix-reveal" data-delay="2">
         <a class="btn btn-primary btn-lg" href="#/pricing">View pricing</a>
         ${renderDownloadButton("btn-lg")}
+        ${renderDesktopModeDownloadButton("btn-lg")}
+        <p class="hero-download-note muted small">Desktop mode is Hormachuelos Optimized. Download stays the standard app.</p>
       </div>
       <div class="trust-row ix-reveal" data-delay="3">
         <button type="button" class="trust-chip" data-tip="Pay the exact amount then upload one clear receipt">GCash QR + proof review</button>
@@ -1440,6 +1484,9 @@ function renderAdmin() {
       };
 
       root.innerHTML = `
+        <div class="admin-users-toolbar">
+          <button type="button" class="btn btn-sm btn-danger" id="admin-reset-all-usage">Reset all usage</button>
+        </div>
         <div class="admin-table-wrap">
           <table class="admin-table admin-users-table">
             <thead>
@@ -1463,7 +1510,7 @@ function renderAdmin() {
                   if (plan && !planOptions.includes(plan)) planOptions.unshift(plan);
                   const allowedProviders = Array.isArray(u.allowedProviders) ? u.allowedProviders : [];
                   const allowedModels = u.allowedModels && typeof u.allowedModels === "object" ? u.allowedModels : {};
-                  return `<tr class="admin-user-row" data-id="${escapeHtml(u.id)}" data-restricted="${u.restricted ? "1" : "0"}" data-allowed-providers="${escapeHtml(JSON.stringify(allowedProviders))}" data-allowed-models="${escapeHtml(JSON.stringify(allowedModels))}">
+                  return `<tr class="admin-user-row" data-id="${escapeHtml(u.id)}" data-email="${escapeHtml(u.email || "")}" data-restricted="${u.restricted ? "1" : "0"}" data-allowed-providers="${escapeHtml(JSON.stringify(allowedProviders))}" data-allowed-models="${escapeHtml(JSON.stringify(allowedModels))}">
                     <td>
                       <div class="admin-user">
                         <strong>${escapeHtml(u.name || "—")}</strong>
@@ -1494,7 +1541,12 @@ function renderAdmin() {
                     <td>
                       <button type="button" class="btn btn-sm admin-access-toggle">${escapeHtml(accessSummary(u))}</button>
                     </td>
-                    <td><button type="button" class="btn btn-sm btn-primary admin-save">Save</button></td>
+                    <td>
+                      <div class="admin-user-actions">
+                        <button type="button" class="btn btn-sm btn-primary admin-save">Save</button>
+                        <button type="button" class="btn btn-sm btn-danger admin-reset-usage">Reset usage</button>
+                      </div>
+                    </td>
                   </tr>
                   <tr class="admin-access-panel" data-id="${escapeHtml(u.id)}" hidden>
                     <td colspan="9">
@@ -1530,7 +1582,7 @@ function renderAdmin() {
             </tbody>
           </table>
         </div>
-        <p class="muted small" style="margin-top:12px">${users.length} user${users.length === 1 ? "" : "s"} · edits apply to website account + hosted license usage · AI access controls the hosted catalog and chat proxy.</p>`;
+        <p class="muted small" style="margin-top:12px">${users.length} user${users.length === 1 ? "" : "s"} · edits apply to website account + hosted license usage · Reset usage sets tokens used to 0 without changing plan or budget · AI access controls the hosted catalog and chat proxy.</p>`;
 
       const renderModelsForRow = (userRow, panel) => {
         const modelsHost = panel.querySelector(".admin-access-models");
@@ -1711,6 +1763,60 @@ function renderAdmin() {
             btn.textContent = "Save";
           }
         });
+
+        tr.querySelector(".admin-reset-usage")?.addEventListener("click", async () => {
+          const btn = tr.querySelector(".admin-reset-usage");
+          const email = tr.getAttribute("data-email") || "this user";
+          if (!window.confirm(`Reset usage for ${email}? Tokens used will go back to 0. Plan and token budget stay the same.`)) {
+            return;
+          }
+          btn.disabled = true;
+          btn.textContent = "Resetting…";
+          try {
+            const data = await apiAdmin("/api/admin/users", {
+              method: "POST",
+              body: { action: "reset-usage", id },
+            });
+            const usedInput = tr.querySelector(".admin-used");
+            if (usedInput) usedInput.value = String(Number(data.user?.tokensUsed) || 0);
+            toast(`Usage reset for ${email}`);
+            btn.textContent = "Reset";
+            setTimeout(() => {
+              btn.disabled = false;
+              btn.textContent = "Reset usage";
+            }, 900);
+          } catch (ex) {
+            toast(String(ex.message || ex));
+            btn.disabled = false;
+            btn.textContent = "Reset usage";
+          }
+        });
+      });
+
+      root.querySelector("#admin-reset-all-usage")?.addEventListener("click", async () => {
+        const btn = root.querySelector("#admin-reset-all-usage");
+        if (
+          !window.confirm(
+            "Reset usage for every user? This sets tokens used to 0 for all hosted licenses. Plans and token budgets stay the same.",
+          )
+        ) {
+          return;
+        }
+        btn.disabled = true;
+        btn.textContent = "Resetting…";
+        try {
+          const data = await apiAdmin("/api/admin/users", {
+            method: "POST",
+            body: { action: "reset-all-usage" },
+          });
+          const count = Number(data.reset) || 0;
+          toast(count ? `Reset usage on ${count} license${count === 1 ? "" : "s"}` : "All usage already at 0");
+          await paintUsers();
+        } catch (ex) {
+          toast(String(ex.message || ex));
+          btn.disabled = false;
+          btn.textContent = "Reset all usage";
+        }
       });
     } catch (ex) {
       if (String(ex.message || "").toLowerCase().includes("admin")) {
@@ -1819,7 +1925,7 @@ function renderAdmin() {
   }
 
   async function paintModels() {
-    root.innerHTML = `<p class="muted">Loading provider registry…</p>`;
+    root.innerHTML = `<p class="muted">Loading models…</p>`;
     try {
       const data = await apiAdmin("/api/admin/providers");
       const providers = Array.isArray(data.providers) ? data.providers : [];
@@ -1842,79 +1948,101 @@ function renderAdmin() {
         const keyStatus = isVirtual
           ? (model.note || "Uses the HORMACHUELOS NEW MODELS key")
           : model.keyConfigured
-            ? "Route-specific key saved"
+            ? "This model has its own key"
             : provider.keyConfigured
-              ? "Uses the provider default key"
-              : "No key configured";
-        return `<div class="admin-model-row${isVirtual ? " is-virtual" : ""}" data-model-id="${escapeHtml(model.id)}" data-provider-id="${escapeHtml(provider.providerId)}" data-virtual="${isVirtual ? "1" : "0"}">
-          <div class="admin-model-row-head">
-            <strong>${escapeHtml(model.displayName || model.alias)}</strong>
-            <span class="admin-state ${model.active ? "is-active" : "is-paused"}">${model.active ? "Active" : "Paused"}</span>
-            ${isVirtual ? `<span class="admin-state is-virtual">Vision route</span>` : ""}
+              ? "Uses the provider key"
+              : "No key saved yet";
+        const shownLabel = model.active ? "Shown in apps" : "Hidden";
+        return `<div class="admin-model-item${isVirtual ? " is-virtual" : ""}" data-model-id="${escapeHtml(model.id)}" data-provider-id="${escapeHtml(provider.providerId)}" data-virtual="${isVirtual ? "1" : "0"}">
+          <div class="admin-model-item-bar">
+            <div class="admin-model-item-copy">
+              <strong>${escapeHtml(model.displayName || model.alias)}</strong>
+              <p class="muted small">${isVirtual ? "Built-in Vision route" : `Provider ID: <span class="mono">${escapeHtml(model.upstreamModel || "—")}</span>`}</p>
+            </div>
+            <div class="admin-model-item-tools">
+              <span class="admin-state ${model.active ? "is-active" : "is-paused"}">${shownLabel}</span>
+              ${isVirtual ? `<span class="admin-state is-virtual">Vision</span>` : ""}
+              ${isVirtual ? "" : `<button type="button" class="btn btn-sm admin-model-edit">Edit</button>
+              <button type="button" class="btn btn-sm btn-danger admin-model-delete">Remove</button>`}
+            </div>
           </div>
-          <div class="admin-model-grid">
-            <div class="field"><label>Model alias shown in app</label><input class="field admin-model-alias mono" value="${escapeHtml(model.alias)}" maxlength="81" pattern="[a-z0-9][a-z0-9._-]*" required ${isVirtual ? "readonly" : ""} /></div>
-            <div class="field"><label>Model display name</label><input class="field admin-model-name" value="${escapeHtml(model.displayName)}" maxlength="120" required ${isVirtual ? "readonly" : ""} /></div>
-            <div class="field"><label>Upstream model ID</label><input class="field admin-model-upstream mono" value="${escapeHtml(model.upstreamModel)}" maxlength="200" required ${isVirtual ? "readonly" : ""} /></div>
-            <div class="field"><label>Endpoint override <span class="muted">(optional)</span></label><input class="field admin-model-base mono" type="url" value="${escapeHtml(model.baseUrl || "")}" maxlength="400" placeholder="${inheritedEndpoint ? "Uses provider endpoint" : "https://provider.example/v1"}" ${isVirtual ? "readonly" : ""} /><p class="muted small">${isVirtual ? escapeHtml(model.note || "Managed Vision route") : inheritedEndpoint ? "Inherited from provider" : "This model overrides the provider endpoint"}</p></div>
-            <div class="field admin-key-field"><label>Route API key override <span class="muted">(optional)</span></label><input class="field admin-model-key" type="password" autocomplete="new-password" ${isVirtual ? "disabled" : ""} placeholder="${isVirtual ? "Uses HORMACHUELOS NEW MODELS key" : model.keyConfigured ? "•••••••• (leave blank to keep)" : "Use provider key"}" /><p class="muted small">${escapeHtml(keyStatus)}</p></div>
-            <label class="admin-active admin-toggle-field"><input type="checkbox" class="admin-model-active" ${model.active ? "checked" : ""} ${isVirtual ? "disabled" : ""} /> Model active</label>
-          </div>
-          <div class="admin-row-actions">
-            ${isVirtual
-              ? `<p class="muted small" style="margin:0">Managed automatically. Enable Vision by configuring the HORMACHUELOS NEW MODELS provider key.</p>`
-              : `<button type="button" class="btn btn-sm btn-primary admin-model-save">Save alias</button>
-            <button type="button" class="btn btn-sm admin-model-clear" ${model.keyConfigured ? "" : "disabled"}>Clear route key</button>
-            <button type="button" class="btn btn-sm danger admin-model-delete">Delete alias</button>`}
-          </div>
+          ${isVirtual
+            ? `<p class="admin-model-note">Managed automatically. Turn Vision on by saving the HORMACHUELOS NEW MODELS provider key.</p>`
+            : `<div class="admin-model-item-editor" hidden>
+            <div class="admin-model-grid">
+              <div class="field"><label>Name in the apps</label><input class="field admin-model-name" value="${escapeHtml(model.displayName)}" maxlength="120" required /><p class="muted small">Shown in Hormachuelos and Hormachuelos Optimized</p></div>
+              <div class="field"><label>Provider's model ID</label><input class="field admin-model-upstream mono" value="${escapeHtml(model.upstreamModel)}" maxlength="200" required /><p class="muted small">The ID from the provider dashboard</p></div>
+            </div>
+            <details class="admin-more-options">
+              <summary>More options</summary>
+              <div class="admin-model-grid">
+                <div class="field"><label>App ID</label><input class="field admin-model-alias mono" value="${escapeHtml(model.alias)}" maxlength="101" pattern="${MODEL_ALIAS_PATTERN}" required /><p class="muted small">Internal ID both apps use. Leave this unless you need a specific value.</p></div>
+                <div class="field"><label>Different endpoint <span class="muted">(optional)</span></label><input class="field admin-model-base mono" type="url" value="${escapeHtml(model.baseUrl || "")}" maxlength="400" placeholder="${inheritedEndpoint ? "Uses the provider endpoint" : "https://provider.example/v1"}" /><p class="muted small">${inheritedEndpoint ? "Uses the provider endpoint" : "This model uses its own endpoint"}</p></div>
+                <div class="field admin-key-field"><label>Different API key <span class="muted">(optional)</span></label><input class="field admin-model-key" type="password" autocomplete="new-password" placeholder="${model.keyConfigured ? "•••••••• (leave blank to keep)" : "Uses the provider key"}" /><p class="muted small">${escapeHtml(keyStatus)}</p></div>
+                <label class="admin-active admin-toggle-field"><input type="checkbox" class="admin-model-active" ${model.active ? "checked" : ""} /> Show in both apps</label>
+              </div>
+            </details>
+            <div class="admin-row-actions">
+              <button type="button" class="btn btn-sm btn-primary admin-model-save">Save changes</button>
+              <button type="button" class="btn btn-sm admin-model-clear" ${model.keyConfigured ? "" : "disabled"}>Clear this model's key</button>
+            </div>
+          </div>`}
         </div>`;
       };
 
-      const addModelForm = (provider) => `<details class="admin-add-model">
-        <summary>Add a model alias to this provider</summary>
-        <form class="admin-model-add-form" data-provider-id="${escapeHtml(provider.providerId)}">
+      const addModelForm = (provider) => `<form class="admin-model-add-form" data-provider-id="${escapeHtml(provider.providerId)}">
+        <div class="admin-model-add-head">
+          <h4>Add a model</h4>
+          <p class="muted small">People will see it in Hormachuelos and Hormachuelos Optimized after they reopen Settings.</p>
+        </div>
+        <div class="admin-model-add-simple">
+          <div class="field"><label>Name in the apps</label><input class="field new-model-name" required maxlength="120" placeholder="e.g. GPT 5.6 Sol" /></div>
+          <div class="field"><label>Provider's model ID</label><input class="field new-model-upstream mono" required maxlength="200" placeholder="e.g. grok-4.5" /></div>
+          <button type="submit" class="btn btn-primary">Add model</button>
+        </div>
+        <details class="admin-more-options">
+          <summary>More options</summary>
           <div class="admin-model-grid">
-            <div class="field"><label>Model alias shown in app</label><input class="field new-model-alias mono" required maxlength="81" placeholder="my-model-fast" pattern="[a-z0-9][a-z0-9._-]*" /></div>
-            <div class="field"><label>Model display name</label><input class="field new-model-name" required maxlength="120" placeholder="My Model Fast" /></div>
-            <div class="field"><label>Upstream model ID</label><input class="field new-model-upstream mono" required maxlength="200" placeholder="grok-4.5" /></div>
-            <div class="field"><label>Endpoint override <span class="muted">(optional)</span></label><input class="field new-model-base mono" type="url" maxlength="400" placeholder="Uses provider endpoint" /></div>
-            <div class="field admin-key-field"><label>Route API key override <span class="muted">(optional)</span></label><input class="field new-model-key" type="password" autocomplete="new-password" placeholder="Uses provider key" /></div>
-            <label class="admin-active admin-toggle-field"><input type="checkbox" class="new-model-active" checked /> Model active</label>
+            <div class="field"><label>App ID <span class="muted">(optional)</span></label><input class="field new-model-alias mono" maxlength="101" pattern="${MODEL_ALIAS_PATTERN}" placeholder="Created from the name" /><p class="muted small">Leave blank unless you need a specific ID.</p></div>
+            <div class="field"><label>Different endpoint <span class="muted">(optional)</span></label><input class="field new-model-base mono" type="url" maxlength="400" placeholder="Uses the provider endpoint" /></div>
+            <div class="field admin-key-field"><label>Different API key <span class="muted">(optional)</span></label><input class="field new-model-key" type="password" autocomplete="new-password" placeholder="Uses the provider key" /></div>
+            <label class="admin-active admin-toggle-field"><input type="checkbox" class="new-model-active" checked /> Show in both apps right away</label>
           </div>
-          <div class="admin-row-actions"><button type="submit" class="btn btn-sm btn-primary">Add model alias</button></div>
-        </form>
-      </details>`;
+        </details>
+      </form>`;
 
       const providerCards = providers.map((provider) => {
         const models = (modelsByProvider.get(provider.providerId) || [])
           .slice()
           .sort((left, right) => String(left.displayName).localeCompare(String(right.displayName)));
-        const keyStatus = provider.keyConfigured ? "Default key configured" : "No default key";
-        const modelSummary = `${models.length} model alias${models.length === 1 ? "" : "es"}`;
+        const keyStatus = provider.keyConfigured ? "Default key is saved" : "No default key yet";
+        const modelSummary = `${models.length} model${models.length === 1 ? "" : "s"}`;
         return `<article class="admin-provider-card" data-provider-id="${escapeHtml(provider.providerId)}" data-profile-id="${escapeHtml(provider.id || "")}" data-profile-configured="${provider.profileConfigured ? "true" : "false"}" data-model-count="${String(models.length)}">
           <header class="admin-provider-head">
             <div>
-              <p class="admin-eyebrow">Provider configuration</p>
               <h3>${escapeHtml(provider.displayName)}</h3>
-              <p class="muted small mono">${escapeHtml(provider.providerId)}</p>
+              <p class="muted small">${escapeHtml(modelSummary)}</p>
             </div>
-            <div class="admin-provider-status"><span class="admin-state ${provider.active ? "is-active" : "is-paused"}">${provider.active ? "Active" : "Paused"}</span><span class="muted small">${escapeHtml(modelSummary)}</span></div>
+            <div class="admin-provider-status"><span class="admin-state ${provider.active ? "is-active" : "is-paused"}">${provider.active ? "On" : "Off"}</span></div>
           </header>
-          <div class="admin-provider-grid">
-            <div class="field"><label>Provider ID</label><input class="field mono admin-provider-id" value="${escapeHtml(provider.providerId)}" readonly aria-readonly="true" /><p class="muted small">Stable technical ID</p></div>
-            <div class="field"><label>Provider alias shown in app</label><input class="field admin-provider-name" value="${escapeHtml(provider.displayName)}" maxlength="120" required /></div>
-            <div class="field admin-provider-endpoint"><label>Default HTTPS endpoint</label><input class="field mono admin-provider-base" type="url" value="${escapeHtml(provider.baseUrl)}" maxlength="400" required /><p class="muted small">OpenAI-compatible chat-completions endpoint</p></div>
-            <div class="field admin-key-field"><label>Default server API key</label><input class="field admin-provider-key" type="password" autocomplete="new-password" placeholder="${provider.keyConfigured ? "•••••••• (leave blank to keep)" : "Paste a provider key"}" /><p class="muted small">${keyStatus}. It applies to aliases without a route-specific override.</p></div>
-            <label class="admin-active admin-toggle-field"><input type="checkbox" class="admin-provider-active" ${provider.active ? "checked" : ""} /> Provider active</label>
-          </div>
-          <div class="admin-provider-actions">
-            <button type="button" class="btn btn-sm btn-primary admin-provider-save">${provider.profileConfigured ? "Save provider" : "Configure provider"}</button>
-            <button type="button" class="btn btn-sm admin-provider-clear" ${provider.keyConfigured ? "" : "disabled"}>Clear default key</button>
-            ${provider.profileConfigured && models.length === 0 ? `<button type="button" class="btn btn-sm danger admin-provider-delete">Remove provider</button>` : ""}
-          </div>
+          <details class="admin-provider-setup">
+            <summary>Provider settings</summary>
+            <div class="admin-provider-grid">
+              <div class="field"><label>Provider ID</label><input class="field mono admin-provider-id" value="${escapeHtml(provider.providerId)}" readonly aria-readonly="true" /><p class="muted small">Stable technical ID</p></div>
+              <div class="field"><label>Name in the apps</label><input class="field admin-provider-name" value="${escapeHtml(provider.displayName)}" maxlength="120" required /></div>
+              <div class="field admin-provider-endpoint"><label>HTTPS endpoint</label><input class="field mono admin-provider-base" type="url" value="${escapeHtml(provider.baseUrl)}" maxlength="400" required /><p class="muted small">OpenAI-compatible chat endpoint</p></div>
+              <div class="field admin-key-field"><label>Default API key</label><input class="field admin-provider-key" type="password" autocomplete="new-password" placeholder="${provider.keyConfigured ? "•••••••• (leave blank to keep)" : "Paste a provider key"}" /><p class="muted small">${escapeHtml(keyStatus)}. Used unless a model has its own key.</p></div>
+              <label class="admin-active admin-toggle-field"><input type="checkbox" class="admin-provider-active" ${provider.active ? "checked" : ""} /> Provider on</label>
+            </div>
+            <div class="admin-provider-actions">
+              <button type="button" class="btn btn-sm btn-primary admin-provider-save">Save provider</button>
+              <button type="button" class="btn btn-sm admin-provider-clear" ${provider.keyConfigured ? "" : "disabled"}>Clear default key</button>
+              ${provider.profileConfigured && models.length === 0 ? `<button type="button" class="btn btn-sm btn-danger admin-provider-delete">Remove provider</button>` : ""}
+            </div>
+          </details>
           <section class="admin-model-section">
-            <div class="admin-model-section-head"><div><p class="admin-eyebrow">Model aliases</p><h4>Models available under ${escapeHtml(provider.displayName)}</h4></div><span class="muted small">${escapeHtml(modelSummary)}</span></div>
-            ${models.length ? `<div class="admin-model-list">${models.map((model) => modelRow(model, provider)).join("")}</div>` : `<div class="admin-empty-models">No model aliases yet. Configure the provider, then add the first alias below.</div>`}
+            <div class="admin-model-section-head"><h4>Models in ${escapeHtml(provider.displayName)}</h4></div>
+            ${models.length ? `<div class="admin-model-list">${models.map((model) => modelRow(model, provider)).join("")}</div>` : `<div class="admin-empty-models">No models yet. Add the first one below.</div>`}
             ${addModelForm(provider)}
           </section>
         </article>`;
@@ -1923,26 +2051,32 @@ function renderAdmin() {
       root.innerHTML = `
         <section class="admin-provider-intro card">
           <div>
-            <p class="admin-eyebrow">Secure provider registry</p>
-            <h2>Provider keys, names, and model aliases</h2>
-            <p class="muted">Every API key is write-only and encrypted before it reaches storage. Set a provider default once, override an individual model only when that model needs a different credential, and control the names clients see in the desktop picker.</p>
+            <p class="admin-eyebrow">Models</p>
+            <h2>Add or remove models</h2>
+            <p class="muted">These names show up in <strong>Hormachuelos</strong> and <strong>Hormachuelos Optimized</strong>. After you add or remove a model, ask people to reopen Settings so the list refreshes.</p>
           </div>
-          <div class="admin-security-note"><span aria-hidden="true">◆</span><p><strong>Keys never leave the server.</strong> The dashboard only reports whether a key is configured; it never displays the saved value.</p></div>
+          <div class="admin-security-note"><span aria-hidden="true">◆</span><p><strong>Keys stay on the server.</strong> This page never shows a saved key, only whether one is stored.</p></div>
         </section>
         ${storageWarning}
-        <section class="admin-add-provider-card card">
-          <div class="admin-model-section-head"><div><p class="admin-eyebrow">Create provider</p><h3>Add a custom hosted provider</h3></div><span class="muted small">Use an OpenAI-compatible endpoint</span></div>
+        <details class="admin-add-provider-card card">
+          <summary>
+            <span>
+              <span class="admin-eyebrow">Optional</span>
+              <strong>Add a custom provider</strong>
+              <span class="muted small">Only if you need a new OpenAI-compatible endpoint</span>
+            </span>
+          </summary>
           <form id="admin-provider-new-form">
             <div class="admin-provider-grid">
               <div class="field"><label>Provider ID</label><input class="field mono" id="new-provider-id" required maxlength="49" placeholder="my-provider" pattern="[a-z][a-z0-9_-]*" /><p class="muted small">Lowercase letters, numbers, dashes, or underscores</p></div>
-              <div class="field"><label>Provider alias shown in app</label><input class="field" id="new-provider-name" required maxlength="120" placeholder="My Provider" /></div>
-              <div class="field admin-provider-endpoint"><label>Default HTTPS endpoint</label><input class="field mono" id="new-provider-base" required type="url" maxlength="400" placeholder="https://provider.example/v1" /></div>
-              <div class="field admin-key-field"><label>Default server API key</label><input class="field" id="new-provider-key" type="password" autocomplete="new-password" placeholder="Paste a provider key" /><p class="muted small">You can add the provider first and save the key later.</p></div>
-              <label class="admin-active admin-toggle-field"><input type="checkbox" id="new-provider-active" checked /> Provider active</label>
+              <div class="field"><label>Name in the apps</label><input class="field" id="new-provider-name" required maxlength="120" placeholder="My Provider" /></div>
+              <div class="field admin-provider-endpoint"><label>HTTPS endpoint</label><input class="field mono" id="new-provider-base" required type="url" maxlength="400" placeholder="https://provider.example/v1" /></div>
+              <div class="field admin-key-field"><label>Default API key</label><input class="field" id="new-provider-key" type="password" autocomplete="new-password" placeholder="Paste a provider key" /><p class="muted small">You can add the provider first and save the key later.</p></div>
+              <label class="admin-active admin-toggle-field"><input type="checkbox" id="new-provider-active" checked /> Provider on</label>
             </div>
             <div class="admin-row-actions"><button class="btn btn-primary" type="submit">Add provider</button></div>
           </form>
-        </section>
+        </details>
         <div class="admin-provider-list">${providerCards}</div>`;
 
       const providerFields = (card) => ({
@@ -1973,11 +2107,11 @@ function renderAdmin() {
           } catch (ex) {
             toast(String(ex.message || ex));
             save.disabled = false;
-            save.textContent = card.getAttribute("data-profile-configured") === "true" ? "Save provider" : "Configure provider";
+            save.textContent = "Save provider";
           }
         });
         clear?.addEventListener("click", async () => {
-          if (!confirm("Clear this provider's default API key? Aliases with a route-specific key will continue to work.")) return;
+          if (!confirm("Clear this provider's default API key? Models with their own key will keep working.")) return;
           clear.disabled = true;
           try {
             await apiAdmin("/api/admin/providers", {
@@ -1993,7 +2127,7 @@ function renderAdmin() {
         });
         remove?.addEventListener("click", async () => {
           const providerName = card.querySelector(".admin-provider-name").value.trim() || "this provider";
-          if (!confirm(`Remove ${providerName}? It has no model aliases, so this only removes its saved provider configuration.`)) return;
+          if (!confirm(`Remove ${providerName}? It has no models, so this only removes its saved provider settings.`)) return;
           remove.disabled = true;
           try {
             await apiAdmin("/api/admin/providers", {
@@ -2019,11 +2153,19 @@ function renderAdmin() {
         active: row.querySelector(".admin-model-active").checked,
       });
 
-      root.querySelectorAll(".admin-model-row").forEach((row) => {
+      root.querySelectorAll(".admin-model-item").forEach((row) => {
         if (row.getAttribute("data-virtual") === "1") return;
         const save = row.querySelector(".admin-model-save");
         const clear = row.querySelector(".admin-model-clear");
         const remove = row.querySelector(".admin-model-delete");
+        const edit = row.querySelector(".admin-model-edit");
+        const editor = row.querySelector(".admin-model-item-editor");
+        edit?.addEventListener("click", () => {
+          if (!editor) return;
+          editor.hidden = !editor.hidden;
+          edit.textContent = editor.hidden ? "Edit" : "Close";
+          if (!editor.hidden) editor.querySelector(".admin-model-name")?.focus();
+        });
         save?.addEventListener("click", async () => {
           const key = row.querySelector(".admin-model-key").value.trim();
           save.disabled = true;
@@ -2032,23 +2174,23 @@ function renderAdmin() {
             const body = modelFields(row);
             if (key) body.apiKey = key;
             await apiAdmin("/api/admin/models", { method: "PATCH", body });
-            toast("Model alias saved");
+            toast("Model saved for both apps");
             await paintAdmin("models");
           } catch (ex) {
             toast(String(ex.message || ex));
             save.disabled = false;
-            save.textContent = "Save alias";
+            save.textContent = "Save changes";
           }
         });
         clear?.addEventListener("click", async () => {
-          if (!confirm("Clear this route-specific API key? The model will use the provider default key if one is configured.")) return;
+          if (!confirm("Clear this model's own API key? It will use the provider key if one is saved.")) return;
           clear.disabled = true;
           try {
             await apiAdmin("/api/admin/models", {
               method: "PATCH",
               body: { ...modelFields(row), clearApiKey: true },
             });
-            toast("Route key cleared");
+            toast("Model key cleared");
             await paintAdmin("models");
           } catch (ex) {
             toast(String(ex.message || ex));
@@ -2056,15 +2198,17 @@ function renderAdmin() {
           }
         });
         remove?.addEventListener("click", async () => {
-          const modelName = row.querySelector(".admin-model-name").value.trim() || "this model alias";
-          if (!confirm(`Delete ${modelName}? It will no longer appear in the desktop app.`)) return;
+          const modelName = row.querySelector(".admin-model-name")?.value?.trim()
+            || row.querySelector(".admin-model-item-copy strong")?.textContent?.trim()
+            || "this model";
+          if (!confirm(`Remove ${modelName} from Hormachuelos and Hormachuelos Optimized? People will stop seeing it after they reopen Settings.`)) return;
           remove.disabled = true;
           try {
             await apiAdmin("/api/admin/models", {
               method: "DELETE",
               body: { id: row.getAttribute("data-model-id") },
             });
-            toast("Model alias deleted");
+            toast(`${modelName} removed from both apps`);
             await paintAdmin("models");
           } catch (ex) {
             toast(String(ex.message || ex));
@@ -2074,29 +2218,32 @@ function renderAdmin() {
       });
 
       root.querySelectorAll(".admin-model-add-form").forEach((form) => {
+        bindSuggestedAlias(form.querySelector(".new-model-name"), form.querySelector(".new-model-alias"));
         form.addEventListener("submit", async (event) => {
           event.preventDefault();
           const btn = form.querySelector('button[type="submit"]');
           btn.disabled = true;
           btn.textContent = "Adding…";
           try {
+            const displayName = form.querySelector(".new-model-name").value.trim();
+            const upstreamModel = form.querySelector(".new-model-upstream").value.trim();
             const key = form.querySelector(".new-model-key").value.trim();
             const body = {
               providerId: form.getAttribute("data-provider-id"),
-              alias: form.querySelector(".new-model-alias").value.trim(),
-              displayName: form.querySelector(".new-model-name").value.trim(),
-              upstreamModel: form.querySelector(".new-model-upstream").value.trim(),
+              alias: form.querySelector(".new-model-alias").value.trim() || suggestedModelAlias(displayName, upstreamModel),
+              displayName,
+              upstreamModel,
               baseUrl: form.querySelector(".new-model-base").value.trim(),
               active: form.querySelector(".new-model-active").checked,
             };
             if (key) body.apiKey = key;
             await apiAdmin("/api/admin/models", { method: "POST", body });
-            toast("Model alias added");
+            toast(`${displayName} added for both apps`);
             await paintAdmin("models");
           } catch (ex) {
             toast(String(ex.message || ex));
             btn.disabled = false;
-            btn.textContent = "Add model alias";
+            btn.textContent = "Add model";
           }
         });
       });
@@ -2753,9 +2900,11 @@ function renderDownload() {
         <p class="muted small">After install, open Hormachuelos — it opens this website so you can <strong>log in or sign up</strong>, then the app signs in automatically.</p>
         <div id="dl-actions" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:16px">
           <a class="btn btn-primary" id="dl-msi" href="${windows.msi.href}">${escapeHtml(windows.msi.label)}</a>
-          <a class="btn" id="dl-exe" href="${windows.setup.href}">${escapeHtml(windows.setup.label)}</a>
+          <a class="btn" id="dl-desktop-mode" href="${DESKTOP_MODE_DOWNLOAD.href}" download="${DESKTOP_MODE_DOWNLOAD.file}">Desktop mode</a>
+          <a class="btn btn-ghost" id="dl-exe" href="${windows.setup.href}">${escapeHtml(windows.setup.label)}</a>
           <a class="btn btn-ghost" href="#/update">What's new / Update</a>
         </div>
+        <p class="muted small" style="margin:12px 0 0">Desktop mode installs Hormachuelos Optimized. It does not replace the standard Windows installer.</p>
         <ol class="muted small" style="margin:16px 0 0;padding-left:18px;line-height:1.55">
           <li>Download &amp; install</li>
           <li>Open the app → browser opens for login/signup</li>
