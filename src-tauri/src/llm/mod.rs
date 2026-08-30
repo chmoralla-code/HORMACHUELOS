@@ -145,6 +145,7 @@ pub fn provider_default_base_url(provider: &str) -> Option<&'static str> {
         "pollinations" => Some("https://gen.pollinations.ai/v1"),
         "deepseek" => Some("https://api.deepseek.com"),
         "glm" => Some("https://opencode.ai/zen/v1"),
+        "opencode" => Some("https://opencode.ai/zen/v1"),
         "openai" => Some("https://api.openai.com/v1"),
         "cursor" => Some("https://api.cursor.com/v1"),
         "xai" => Some(crate::config::XAI_API_BASE_URL),
@@ -243,6 +244,9 @@ pub fn build_provider_with_effort(
             openai::OpenAi::new(&key, base, model, &prov).with_reasoning_effort(model_effort),
         )),
         "glm" => Ok(Box::new(
+            openai::OpenAi::new(&key, base, model, &prov).with_reasoning_effort(model_effort),
+        )),
+        "opencode" => Ok(Box::new(
             openai::OpenAi::new(&key, base, model, &prov).with_reasoning_effort(model_effort),
         )),
         other if crate::config::is_custom_hosted_provider_alias(other) => {

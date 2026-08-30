@@ -13,6 +13,7 @@ const BUILTIN_PROVIDER_IDS: &[&str] = &[
     "deepseek",
     "openrouter",
     "glm",
+    "opencode",
     "openai",
     "cursor",
     "xai",
