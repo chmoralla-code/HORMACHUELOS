@@ -36,6 +36,7 @@ export const BUILTIN_HOSTED_PROVIDERS = Object.freeze([
   "deepseek",
   "openrouter",
   "glm",
+  "opencode",
   "pollinations",
   "anthropic",
   "gemini",
@@ -68,7 +69,8 @@ const PROVIDER_DEFAULTS = Object.freeze({
   openai: { displayName: "OpenAI", baseUrl: "https://api.openai.com/v1" },
   deepseek: { displayName: "DeepSeek", baseUrl: "https://api.deepseek.com/v1" },
   openrouter: { displayName: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1" },
-  glm: { displayName: "OpenCode", baseUrl: "https://open.bigmodel.cn/api/paas/v4" },
+  glm: { displayName: "OpenCode", baseUrl: "https://opencode.ai/zen/v1" },
+  opencode: { displayName: "OpenCode Zen", baseUrl: "https://opencode.ai/zen/v1" },
   pollinations: { displayName: "Pollinations", baseUrl: "https://gen.pollinations.ai/v1" },
   // These hosted routes need an OpenAI-compatible upstream proxy. The default
   // points at the existing OpenRouter-compatible path, but an administrator
@@ -155,12 +157,41 @@ function normalizeAlias(value) {
   return alias;
 }
 
+function slugModelAlias(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 101);
+}
+
+function isUsableModelAlias(value) {
+  const alias = String(value || "").trim();
+  return ALIAS_RE.test(alias) && alias.toLowerCase() !== PROVIDER_PROFILE_ALIAS;
+}
+
+/** Public app ID for a model. Prefers an explicit alias, then a name slug. */
+export function suggestedModelAlias(displayName, fallback = "") {
+  const candidates = [slugModelAlias(displayName), String(fallback || "").trim(), slugModelAlias(fallback)];
+  return candidates.find((candidate) => isUsableModelAlias(candidate)) || "";
+}
+
 export function isHostedProviderProfileRow(row) {
   return String(row?.alias || "").trim().toLowerCase() === PROVIDER_PROFILE_ALIAS;
 }
 
 function normalizeConfig(body) {
-  const alias = normalizeAlias(body.alias);
+  const display_name = inputText(body.displayName || body.display_name, "Display name", 120);
+  const upstream_model = inputText(body.upstreamModel || body.upstream_model, "Upstream model", 200);
+  const requestedAlias = String(body.alias || "").trim();
+  const aliasSource = requestedAlias || suggestedModelAlias(display_name, upstream_model);
+  if (!aliasSource) {
+    throw Object.assign(new Error("Give the model a name so we can create an app ID."), {
+      status: 400,
+    });
+  }
+  const alias = normalizeAlias(aliasSource);
   if (alias === PROVIDER_PROFILE_ALIAS) {
     throw Object.assign(new Error("That model alias is reserved for a provider profile."), {
       status: 400,
@@ -169,8 +200,8 @@ function normalizeConfig(body) {
   return {
     provider_id: normalizeProvider(body.providerId || body.provider_id),
     alias,
-    display_name: inputText(body.displayName || body.display_name, "Display name", 120),
-    upstream_model: inputText(body.upstreamModel || body.upstream_model, "Upstream model", 200),
+    display_name,
+    upstream_model,
     // A model can inherit the provider profile endpoint. Existing records keep
     // their own endpoint and therefore continue to work unchanged.
     base_url: optionalHostedBaseUrl(body.baseUrl || body.base_url),
@@ -297,6 +328,7 @@ export function hostedProviderDisplayName(providerId) {
     deepseek: "DeepSeek",
     openrouter: "OpenRouter",
     glm: "OpenCode",
+    opencode: "OpenCode Zen",
     pollinations: "Pollinations",
     anthropic: "Anthropic",
     gemini: "Gemini",
