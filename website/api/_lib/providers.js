@@ -36,8 +36,12 @@ const PROVIDERS = {
     },
   },
   glm: {
-    base: "https://open.bigmodel.cn/api/paas/v4",
-    env: ["GLM_API_KEY", "ZHIPU_API_KEY"],
+    base: "https://opencode.ai/zen/v1",
+    env: ["OPENCODE_API_KEY", "OPENCODE_ZEN_API_KEY", "GLM_API_KEY", "ZHIPU_API_KEY"],
+  },
+  opencode: {
+    base: "https://opencode.ai/zen/v1",
+    env: ["OPENCODE_API_KEY", "OPENCODE_ZEN_API_KEY", "ZEN_API_KEY"],
   },
   pollinations: {
     base: "https://gen.pollinations.ai/v1",
