@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.76";
-const BUILTIN_MSI_SHA256 = "99939990038fc4e9ccfb67b787c15e24c25eb734c4e7a731b058111342288f71";
-const BUILTIN_EXE_SHA256 = "2584a08d6dfcbb2422b36b79b3d9b92dd084eec1bd17338296e6aff1726bd6ec";
-const BUILTIN_RELEASE_NOTES = "Fixes the in-app updater stopping with a session storage unavailable or full error. Update preflight now copies active and pending sessions directly into the host-owned native recovery backup without requiring another WebView storage write. After relaunch, fresher backed-up sessions are merged safely, and the backup is retained whenever WebView storage remains unavailable so recovery can retry. This is an optional update and does not interrupt active sessions.";
+const BUILTIN_RELEASE_VERSION = "0.1.80";
+const BUILTIN_MSI_SHA256 = "e5e82e46cd63b2657fe035e420743f308165a9c3051051c3494767f263d86e50";
+const BUILTIN_EXE_SHA256 = "d6c19b14168627483d0ee6192e8bf5ad7e70107a65a75e9748751cb73e66f5b5";
+const BUILTIN_RELEASE_NOTES = "Restores the missing v0.1.68-v0.1.76 desktop feature line - Source Lens, native preview browser tabs, Flavour Memory, appearance modes, preview toolbar cleanup, faster AI execution with safer rollback, and updater storage recovery - plus Muse Spark 1.2 (Free) over the OpenCode Zen Responses API.";
 
 // A visual-preference update must never interrupt an active desktop task.
 // The release is discoverable through the update flow, but stays optional.

@@ -17,5 +17,5 @@
 !/website/.env.example
 
 # Keep exactly the two current installers available for download
-!/website/downloads/Hormachuelos_0.1.76_x64_en-US.msi
-!/website/downloads/Hormachuelos_0.1.76_x64-setup.exe
+!/website/downloads/Hormachuelos_0.1.80_x64_en-US.msi
+!/website/downloads/Hormachuelos_0.1.80_x64-setup.exe
