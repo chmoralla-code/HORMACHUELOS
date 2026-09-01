@@ -33,19 +33,24 @@ export function hostOf(baseUrl) {
 
 /** True when this upstream model id must use the Responses API. */
 export function modelNeedsResponsesApi(upstreamModel) {
-  const id = String(upstreamModel || "").trim().toLowerCase();
+  const id = String(upstreamModel || "")
+    .trim()
+    .toLowerCase();
   return RESPONSES_API_MODEL_PREFIXES.some((prefix) => id.startsWith(prefix));
 }
 
 /** True when the upstream base URL points at a Responses-first host. */
 export function hostSupportsResponsesApi(baseUrl) {
   const host = hostOf(baseUrl);
-  return RESPONSES_API_HOSTS.some((candidate) => host === candidate || host.endsWith(`.${candidate}`));
+  return RESPONSES_API_HOSTS.some(
+    (candidate) => host === candidate || host.endsWith(`.${candidate}`),
+  );
 }
 
 /** Resolve the API mode for a route. "responses" | "chat" */
 export function upstreamApiMode(baseUrl, upstreamModel) {
-  return modelNeedsResponsesApi(upstreamModel) && hostSupportsResponsesApi(baseUrl)
+  return modelNeedsResponsesApi(upstreamModel) &&
+    hostSupportsResponsesApi(baseUrl)
     ? "responses"
     : "chat";
 }
@@ -63,7 +68,14 @@ export function responsesUrl(baseUrl) {
  * - `tools` are flattened (`{"type":"function","function":{...}}` →
  *   `{"type":"function","name":...,"parameters":...}`).
  */
-export function buildResponsesRequest({ model, messages, tools, maxTokens, temperature, stream }) {
+export function buildResponsesRequest({
+  model,
+  messages,
+  tools,
+  maxTokens,
+  temperature,
+  stream,
+}) {
   const input = [];
   const instructions = [];
   for (const message of Array.isArray(messages) ? messages : []) {
@@ -74,8 +86,11 @@ export function buildResponsesRequest({ model, messages, tools, maxTokens, tempe
       continue;
     }
     if (role === "assistant") {
-      if (text.trim()) input.push({ type: "message", role: "assistant", content: text });
-      for (const call of Array.isArray(message?.tool_calls) ? message.tool_calls : []) {
+      if (text.trim())
+        input.push({ type: "message", role: "assistant", content: text });
+      for (const call of Array.isArray(message?.tool_calls)
+        ? message.tool_calls
+        : []) {
         let args = call?.function?.arguments;
         if (typeof args !== "string") args = JSON.stringify(args ?? {});
         input.push({
@@ -148,7 +163,10 @@ export function responsesItemToDelta(item) {
   if (item.type === "message" && item.role === "assistant") {
     const content = Array.isArray(item.content)
       ? item.content
-          .filter((part) => part?.type === "output_text" && typeof part.text === "string")
+          .filter(
+            (part) =>
+              part?.type === "output_text" && typeof part.text === "string",
+          )
           .map((part) => part.text)
           .join("")
       : typeof item.content === "string"
@@ -158,7 +176,10 @@ export function responsesItemToDelta(item) {
   }
   if (item.type === "reasoning") {
     const summary = Array.isArray(item.summary)
-      ? item.summary.filter((part) => typeof part?.text === "string").map((part) => part.text).join("")
+      ? item.summary
+          .filter((part) => typeof part?.text === "string")
+          .map((part) => part.text)
+          .join("")
       : "";
     return summary ? { reasoning: summary } : null;
   }
@@ -170,7 +191,10 @@ export function responsesItemToDelta(item) {
         type: "function",
         function: {
           name: String(item.name || ""),
-          arguments: typeof item.arguments === "string" ? item.arguments : JSON.stringify(item.arguments ?? {}),
+          arguments:
+            typeof item.arguments === "string"
+              ? item.arguments
+              : JSON.stringify(item.arguments ?? {}),
         },
       },
     };
@@ -251,7 +275,10 @@ export async function relayResponsesStream({ reader, model = "", onSse }) {
       if (text) emitDelta({ content: text });
       return;
     }
-    if (type === "response.reasoning_summary_text.delta" || type === "response.reasoning_text.delta") {
+    if (
+      type === "response.reasoning_summary_text.delta" ||
+      type === "response.reasoning_text.delta"
+    ) {
       const text = String(event.delta || "");
       if (text) emitDelta({ reasoning_content: text });
       return;
@@ -266,13 +293,19 @@ export async function relayResponsesStream({ reader, model = "", onSse }) {
       if (delta?.toolCall) emitDelta({ tool_calls: [delta.toolCall] });
       return;
     }
-    if (type === "response.failed" || type === "response.incomplete" || type === "error") {
+    if (
+      type === "response.failed" ||
+      type === "response.incomplete" ||
+      type === "error"
+    ) {
       const message =
         event.response?.error?.message ||
         event.error?.message ||
         (typeof event.error === "string" ? event.error : "") ||
         "Responses upstream error";
-      emitPayload({ error: { message: String(message), type: "responses_error" } });
+      emitPayload({
+        error: { message: String(message), type: "responses_error" },
+      });
       return;
     }
     if (type === "response.completed") {
@@ -307,8 +340,13 @@ export async function relayResponsesStream({ reader, model = "", onSse }) {
 /**
  * One-shot (non-streaming) Responses API JSON → Chat Completions response.
  */
-export function responsesToChatCompletion(responsePayload, { requestedModel = "" } = {}) {
-  const output = Array.isArray(responsePayload?.output) ? responsePayload.output : [];
+export function responsesToChatCompletion(
+  responsePayload,
+  { requestedModel = "" } = {},
+) {
+  const output = Array.isArray(responsePayload?.output)
+    ? responsePayload.output
+    : [];
   let text = "";
   const toolCalls = [];
   for (const item of output) {
@@ -336,7 +374,9 @@ export function responsesToChatCompletion(responsePayload, { requestedModel = ""
           content: text || null,
           ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
         },
-        finish_reason: toolCalls.length ? "tool_calls" : responsesStatusToFinishReason(responsePayload?.status),
+        finish_reason: toolCalls.length
+          ? "tool_calls"
+          : responsesStatusToFinishReason(responsePayload?.status),
       },
     ],
     usage: { total_tokens: usageRaw },

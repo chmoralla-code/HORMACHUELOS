@@ -50,3 +50,9 @@ website/videos/tmp-ad/
 *.log
 
 .vercel
+.env*
+!.env.example
+.tmp/
+ASDASD/
+_vid1_bug/
+_vid2_codex/

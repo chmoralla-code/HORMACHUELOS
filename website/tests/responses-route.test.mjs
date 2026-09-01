@@ -28,13 +28,22 @@ test("Muse Spark ids route to the Responses API on OpenCode Zen only", () => {
   assert.equal(modelNeedsResponsesApi(""), false);
 
   assert.equal(
-    upstreamApiMode("https://opencode.ai/zen/v1", "muse-spark-1.2-contributor-free"),
+    upstreamApiMode(
+      "https://opencode.ai/zen/v1",
+      "muse-spark-1.2-contributor-free",
+    ),
     "responses",
   );
-  assert.equal(upstreamApiMode("https://opencode.ai/zen/v1", "deepseek-v4-flash-free"), "chat");
+  assert.equal(
+    upstreamApiMode("https://opencode.ai/zen/v1", "deepseek-v4-flash-free"),
+    "chat",
+  );
   // Unknown hosts keep the plain chat-completions route.
   assert.equal(
-    upstreamApiMode("https://api.example.com/v1", "muse-spark-1.2-contributor-free"),
+    upstreamApiMode(
+      "https://api.example.com/v1",
+      "muse-spark-1.2-contributor-free",
+    ),
     "chat",
   );
 });
@@ -88,14 +97,19 @@ test("buildResponsesRequest maps tools, system text, and tool-loop history", () 
   ]);
   assert.deepEqual(body.input, [
     { type: "message", role: "user", content: "Make a game." },
-    { type: "function_call", call_id: "call_1", name: "list_dir", arguments: '{"path":"."}' },
+    {
+      type: "function_call",
+      call_id: "call_1",
+      name: "list_dir",
+      arguments: '{"path":"."}',
+    },
     { type: "function_call_output", call_id: "call_1", output: "src" },
   ]);
 });
 
 test("relayResponsesStream converts Responses SSE into chat-completion chunks", async () => {
   const sse = [
-    'event: response.created',
+    "event: response.created",
     'data: {"type":"response.created","response":{"model":"muse-spark-1.2-free"}}',
     "",
     'data: {"type":"response.output_text.delta","delta":"Hi"}',
@@ -115,7 +129,9 @@ test("relayResponsesStream converts Responses SSE into chat-completion chunks", 
   });
 
   assert.equal(usage, 15);
-  const chunks = lines.map((line) => JSON.parse(line.replace(/^data:\s*/, "").trim()));
+  const chunks = lines.map((line) =>
+    JSON.parse(line.replace(/^data:\s*/, "").trim()),
+  );
   assert.equal(chunks[0].choices[0].delta.content, "Hi");
   assert.deepEqual(chunks[1].choices[0].delta.tool_calls, [
     {
@@ -151,7 +167,9 @@ test("relayResponsesStream does not duplicate text when the gateway echoes the c
     model: "muse-spark-1.2-free",
     onSse: (line) => lines.push(line),
   });
-  const chunks = lines.map((line) => JSON.parse(line.replace(/^data:\s*/, "").trim()));
+  const chunks = lines.map((line) =>
+    JSON.parse(line.replace(/^data:\s*/, "").trim()),
+  );
   const text = chunks.map((c) => c.choices?.[0]?.delta?.content || "").join("");
   assert.equal(text, "1\n2\nDONE");
 });
@@ -159,7 +177,9 @@ test("relayResponsesStream does not duplicate text when the gateway echoes the c
 test("relayResponsesStream surfaces upstream failures as error payloads", async () => {
   const lines = [];
   await relayResponsesStream({
-    reader: streamReader(['data: {"type":"response.failed","response":{"error":{"message":"quota"}}}\n\n']),
+    reader: streamReader([
+      'data: {"type":"response.failed","response":{"error":{"message":"quota"}}}\n\n',
+    ]),
     model: "muse-spark-1.2-free",
     onSse: (line) => lines.push(line),
   });
@@ -174,7 +194,11 @@ test("responsesToChatCompletion builds a chat-completion from one-shot JSON", ()
       model: "muse-spark-1.2-free",
       status: "completed",
       output: [
-        { type: "message", role: "assistant", content: [{ type: "output_text", text: "Done." }] },
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "Done." }],
+        },
         {
           type: "function_call",
           call_id: "call_2",
@@ -191,7 +215,11 @@ test("responsesToChatCompletion builds a chat-completion from one-shot JSON", ()
   assert.equal(completion.choices[0].message.content, "Done.");
   assert.equal(completion.choices[0].finish_reason, "tool_calls");
   assert.deepEqual(completion.choices[0].message.tool_calls, [
-    { id: "call_2", type: "function", function: { name: "list_dir", arguments: '{"path":"."}' } },
+    {
+      id: "call_2",
+      type: "function",
+      function: { name: "list_dir", arguments: '{"path":"."}' },
+    },
   ]);
   assert.equal(responsesUsageTotal(completion.usage), 12);
 });
