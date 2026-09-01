@@ -14,6 +14,13 @@ import { billableTokens } from "../_lib/plans.js";
 import { resolveHostedModel, resolveUpstream, isCommandCodeUpstream, resolveHormachuelosV4Route, HORMACHUELOS_V4_ALIAS, HORMACHUELOS_V4_DISPLAY_NAME } from "../_lib/providers.js";
 import { COMMANDCODE_PROVIDER, publicHostedProviderCatalog } from "../_lib/hosted-model-configs.js";
 import {
+  buildResponsesRequest,
+  relayResponsesStream,
+  responsesToChatCompletion,
+  responsesUrl,
+  upstreamApiMode,
+} from "../_lib/responses-proxy.js";
+import {
   buildCommandCodeRequest,
   commandCodeGenerateUrl,
   commandCodeHeaders,
@@ -447,6 +454,38 @@ async function handleChat(req, res) {
         isCommandCodeRoute: true,
       };
     }
+    // OpenCode Zen (and similar gateways) serve some models — Muse Spark —
+    // only through the OpenAI Responses API. The /chat/completions path
+    // returns 500 (or a text-only reply that never calls tools) for them.
+    const useResponsesRoute =
+      upstreamApiMode(route.baseUrl, route.upstreamModel) === "responses";
+    if (useResponsesRoute) {
+      const responsesBody = buildResponsesRequest({
+        model: route.upstreamModel,
+        messages: forwardBody.messages,
+        tools: forwardBody.tools,
+        maxTokens: forwardBody.max_tokens || forwardBody.max_completion_tokens,
+        temperature: forwardBody.temperature,
+        stream,
+      });
+      const response = await fetch(responsesUrl(route.baseUrl), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${route.apiKey}`,
+          ...upstream.headers,
+          ...route.headers,
+        },
+        body: JSON.stringify(responsesBody),
+      });
+      return {
+        response,
+        errorText: response.ok ? "" : await response.text(),
+        route,
+        isCommandCodeRoute: false,
+        isResponsesRoute: true,
+      };
+    }
     const routeBody = { ...forwardBody, model: route.upstreamModel };
     const response = await fetch(`${route.baseUrl}/chat/completions`, {
       method: "POST",
@@ -463,6 +502,7 @@ async function handleChat(req, res) {
       errorText: response.ok ? "" : await response.text(),
       route,
       isCommandCodeRoute: false,
+      isResponsesRoute: false,
     };
   }
 
@@ -561,7 +601,13 @@ async function handleChat(req, res) {
     }
     const text = upstreamRes.ok ? await upstreamRes.text() : upstreamAttempt.errorText;
     let data;
-    try {
+    if (upstreamAttempt.isResponsesRoute && upstreamRes.ok) {
+      try {
+        data = responsesToChatCompletion(JSON.parse(text), { requestedModel: model });
+      } catch {
+        return json(res, 502, { error: "Upstream returned non-JSON", detail: text.slice(0, 400) }, req);
+      }
+    } else try {
       data = JSON.parse(text);
     } catch {
       return json(
@@ -631,6 +677,18 @@ async function handleChat(req, res) {
   if (upstreamAttempt.isCommandCodeRoute) {
     const usageRaw = await relayCommandCodeStream({
       reader: upstreamRes.body.getReader(),
+      onSse: (line) => res.write(line),
+    });
+    await recordUsage(license, providerHint, model, usageRaw || 800);
+    return res.end();
+  }
+
+  // Responses-API upstreams stream OpenAI Responses events; translate them
+  // into Chat Completions SSE so the desktop parser stays unchanged.
+  if (upstreamAttempt.isResponsesRoute) {
+    const usageRaw = await relayResponsesStream({
+      reader: upstreamRes.body.getReader(),
+      model,
       onSse: (line) => res.write(line),
     });
     await recordUsage(license, providerHint, model, usageRaw || 800);
