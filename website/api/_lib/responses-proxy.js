@@ -257,10 +257,12 @@ export async function relayResponsesStream({ reader, model = "", onSse }) {
       return;
     }
     if (type === "response.output_item.done") {
-      // Some gateways only announce tool calls via the completed item.
+      // Completed items forward tool calls only: assistant text and reasoning
+      // already streamed through their own delta events, and re-emitting the
+      // finished item would duplicate every character the client received.
+      // (Verified against zen: output_item.done follows the full
+      // output_text.delta sequence with the complete message.)
       const delta = responsesItemToDelta(event.item);
-      if (delta?.content) emitDelta({ content: delta.content });
-      if (delta?.reasoning) emitDelta({ reasoning_content: delta.reasoning });
       if (delta?.toolCall) emitDelta({ tool_calls: [delta.toolCall] });
       return;
     }

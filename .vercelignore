@@ -1,0 +1,21 @@
+# Deploy only the website/ subtree — the Vercel project's Root Directory is "website".
+/*
+!/website
+
+# Non-deployable content inside website/ (mirrors website/.vercelignore)
+/website/node_modules
+/website/downloads
+/website/videos
+/website/scripts
+/website/tests
+/website/test-results
+/website/playwright.config.js
+/website/README.md
+/website/.vercel
+/website/.env
+/website/.env.*
+!/website/.env.example
+
+# Keep exactly the two current installers available for download
+!/website/downloads/Hormachuelos_0.1.76_x64_en-US.msi
+!/website/downloads/Hormachuelos_0.1.76_x64-setup.exe
