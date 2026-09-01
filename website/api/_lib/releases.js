@@ -24,10 +24,10 @@ export function publicRelease(row) {
   };
 }
 
-const BUILTIN_RELEASE_VERSION = "0.1.76";
-const BUILTIN_MSI_SHA256 = "99939990038fc4e9ccfb67b787c15e24c25eb734c4e7a731b058111342288f71";
-const BUILTIN_EXE_SHA256 = "2584a08d6dfcbb2422b36b79b3d9b92dd084eec1bd17338296e6aff1726bd6ec";
-const BUILTIN_RELEASE_NOTES = "Fixes the in-app updater stopping with a session storage unavailable or full error. Update preflight now copies active and pending sessions directly into the host-owned native recovery backup without requiring another WebView storage write. After relaunch, fresher backed-up sessions are merged safely, and the backup is retained whenever WebView storage remains unavailable so recovery can retry. This is an optional update and does not interrupt active sessions.";
+const BUILTIN_RELEASE_VERSION = "0.1.78";
+const BUILTIN_MSI_SHA256 = "2c5fddde572be0b083829a755e61fe4c820dee997866a18581f7e8feb845ccdd";
+const BUILTIN_EXE_SHA256 = "aa9f117a24966aadb63a1b476ef7a1e509ffa8aef213cb6e0ce462db516f4e64";
+const BUILTIN_RELEASE_NOTES = "Muse Spark 1.2 (Free) hosted model via OpenCode Zen - full agent tool-calling, streaming, and duplicated-reply / stalled-agent fixes.";
 
 // A visual-preference update must never interrupt an active desktop task.
 // The release is discoverable through the update flow, but stays optional.
