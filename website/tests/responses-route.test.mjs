@@ -130,6 +130,32 @@ test("relayResponsesStream converts Responses SSE into chat-completion chunks", 
   assert.equal(final.usage.total_tokens, 15);
 });
 
+test("relayResponsesStream does not duplicate text when the gateway echoes the completed item", async () => {
+  // zen's actual event order: incremental output_text.delta chunks, then
+  // output_item.done carrying the WHOLE message again, then completed.
+  const sse = [
+    'data: {"type":"response.output_text.delta","delta":"1\\n2\\n"}',
+    "",
+    'data: {"type":"response.output_text.delta","delta":"DONE"}',
+    "",
+    'data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"1\\n2\\nDONE"}]}}',
+    "",
+    'data: {"type":"response.completed","response":{"status":"completed","usage":{"total_tokens":42}}}',
+    "",
+    "data: [DONE]",
+    "",
+  ].join("\n");
+  const lines = [];
+  await relayResponsesStream({
+    reader: streamReader([sse]),
+    model: "muse-spark-1.2-free",
+    onSse: (line) => lines.push(line),
+  });
+  const chunks = lines.map((line) => JSON.parse(line.replace(/^data:\s*/, "").trim()));
+  const text = chunks.map((c) => c.choices?.[0]?.delta?.content || "").join("");
+  assert.equal(text, "1\n2\nDONE");
+});
+
 test("relayResponsesStream surfaces upstream failures as error payloads", async () => {
   const lines = [];
   await relayResponsesStream({
