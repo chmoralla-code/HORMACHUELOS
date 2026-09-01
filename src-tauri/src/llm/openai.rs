@@ -90,6 +90,7 @@ fn build_request_body(
     let supports_reasoning_effort = is_xai_grok
         || provider_kind.eq_ignore_ascii_case("deepseek")
         || provider_kind.eq_ignore_ascii_case("glm")
+        || provider_kind.eq_ignore_ascii_case("opencode")
         || provider_kind.eq_ignore_ascii_case("openrouter")
         || provider_kind.eq_ignore_ascii_case("commandcode")
         || provider_kind.eq_ignore_ascii_case("hormachuelos_free")
@@ -112,6 +113,124 @@ fn build_request_body(
     if !tools.is_empty() {
         body["tools"] = Value::Array(tools.to_vec());
         body["tool_choice"] = json!("auto");
+    }
+    body
+}
+
+/// Models served only through the OpenAI Responses API. OpenCode Zen's Muse
+/// Spark family (including the free Contributor tier) rejects
+/// `/chat/completions` with HTTP 500 — or worse for agents, replies with text
+/// only and never emits tool calls, so the run appears to announce work and
+/// then stall. Those ids must go through `POST {base}/responses`.
+fn uses_responses_api(provider_kind: &str, model: &str) -> bool {
+    let normalized = model.trim().to_ascii_lowercase();
+    normalized.starts_with("muse-spark")
+        && (provider_kind.eq_ignore_ascii_case("opencode")
+            || provider_kind.eq_ignore_ascii_case("glm"))
+}
+
+/// Build an OpenAI Responses API request body from the shared chat shapes.
+/// System messages become top-level `instructions`; assistant tool calls
+/// become `function_call` items and tool results become
+/// `function_call_output` items so multi-turn tool loops replay correctly.
+fn build_responses_request_body(
+    model: &str,
+    messages: &[ChatMessage],
+    tools: &[Value],
+    reasoning_effort: Option<&str>,
+) -> Value {
+    let mut input: Vec<Value> = Vec::new();
+    let mut instructions: Vec<String> = Vec::new();
+    for message in messages {
+        let role = message.role.as_str();
+        let content = match &message.content {
+            Value::String(text) => text.clone(),
+            Value::Null => String::new(),
+            other => other.to_string(),
+        };
+        match role {
+            "system" | "developer" => {
+                if !content.trim().is_empty() {
+                    instructions.push(content);
+                }
+            }
+            "assistant" => {
+                if !content.trim().is_empty() {
+                    input.push(json!({
+                        "type": "message",
+                        "role": "assistant",
+                        "content": content,
+                    }));
+                }
+                if let Some(calls) = &message.tool_calls {
+                    for call in calls {
+                        input.push(json!({
+                            "type": "function_call",
+                            "call_id": call.id,
+                            "name": call.name,
+                            "arguments": serde_json::to_string(&call.arguments)
+                                .unwrap_or_else(|_| "{}".to_string()),
+                        }));
+                    }
+                }
+            }
+            "tool" => {
+                input.push(json!({
+                    "type": "function_call_output",
+                    "call_id": message
+                        .tool_call_id
+                        .clone()
+                        .unwrap_or_else(|| "tool".to_string()),
+                    "output": content,
+                }));
+            }
+            _ => {
+                input.push(json!({
+                    "type": "message",
+                    "role": "user",
+                    "content": content,
+                }));
+            }
+        }
+    }
+    let mut body = json!({
+        "model": model,
+        "input": input,
+        "stream": true,
+        "store": false,
+    });
+    if !instructions.is_empty() {
+        body["instructions"] = json!(instructions.join("\n\n"));
+    }
+    if !tools.is_empty() {
+        let responses_tools: Vec<Value> = tools
+            .iter()
+            .filter(|tool| tool.get("type").and_then(Value::as_str) == Some("function"))
+            .filter_map(|tool| {
+                let function = tool.get("function")?;
+                let name = function.get("name").and_then(Value::as_str)?;
+                Some(json!({
+                    "type": "function",
+                    "name": name,
+                    "description": function
+                        .get("description")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                    "parameters": function
+                        .get("parameters")
+                        .cloned()
+                        .unwrap_or(json!({ "type": "object", "properties": {} })),
+                }))
+            })
+            .collect();
+        if !responses_tools.is_empty() {
+            body["tools"] = Value::Array(responses_tools);
+        }
+    }
+    if let Some(effort) = reasoning_effort {
+        body["reasoning"] = json!({
+            "effort": normalized_reasoning_effort("opencode", Some(effort))
+        });
     }
     body
 }
@@ -352,6 +471,87 @@ fn parse_response(text: &str) -> Result<LlmResponse> {
         stop_reason,
         usage_tokens,
     })
+}
+
+/// Parse a one-shot (non-streaming) OpenAI Responses API object. Some
+/// gateways ignore `stream: true` and answer with a single JSON body.
+fn parse_responses_object(text: &str) -> Result<LlmResponse> {
+    let value: Value = serde_json::from_str(text)
+        .map_err(|_| anyhow!("invalid_response: The provider returned malformed JSON."))?;
+    if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("Responses upstream error");
+        return Err(anyhow!("invalid_response: {message}"));
+    }
+    let mut text_out = String::new();
+    let mut tool_calls: Vec<Value> = Vec::new();
+    if let Some(output) = value.get("output").and_then(Value::as_array) {
+        for item in output {
+            match item.get("type").and_then(Value::as_str) {
+                Some("message") => {
+                    text_out.push_str(
+                        &item
+                            .get("content")
+                            .and_then(Value::as_array)
+                            .map(|parts| {
+                                parts
+                                    .iter()
+                                    .filter(|part| {
+                                        part.get("type").and_then(Value::as_str)
+                                            == Some("output_text")
+                                    })
+                                    .filter_map(|part| part.get("text").and_then(Value::as_str))
+                                    .collect::<Vec<_>>()
+                                    .join("")
+                            })
+                            .unwrap_or_default(),
+                    );
+                }
+                Some("function_call") => {
+                    if item
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .is_empty()
+                    {
+                        continue;
+                    }
+                    tool_calls.push(json!({
+                        "id": item.get("call_id").and_then(Value::as_str).unwrap_or("call"),
+                        "type": "function",
+                        "function": {
+                            "name": item.get("name").and_then(Value::as_str).unwrap_or(""),
+                            "arguments": item.get("arguments").cloned().unwrap_or(Value::Null),
+                        }
+                    }));
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut chat = json!({
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": if text_out.is_empty() { Value::Null } else { json!(text_out) },
+            },
+            "finish_reason": if tool_calls.is_empty() { "stop" } else { "tool_calls" },
+        }]
+    });
+    if !tool_calls.is_empty() {
+        chat["choices"][0]["message"]["tool_calls"] = Value::Array(tool_calls);
+    }
+    if let Some(usage) = value.get("usage").filter(|usage| usage.is_object()) {
+        chat["usage"] = json!({
+            "total_tokens": usage
+                .get("total_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+        });
+    }
+    parse_response(&chat.to_string())
 }
 
 #[derive(Default)]
@@ -892,6 +1092,143 @@ fn escape_raw_control_chars_in_json_strings(raw: &str) -> String {
     out
 }
 
+/// Translate one OpenAI Responses API SSE event into a Chat Completions
+/// chunk the StreamAccumulator already understands.
+fn responses_event_to_chunk(event: &Value) -> Option<Value> {
+    match event.get("type").and_then(Value::as_str)? {
+        "response.output_text.delta" => {
+            let text = event.get("delta").and_then(Value::as_str)?;
+            (!text.is_empty()).then(|| {
+                json!({
+                    "choices": [{
+                        "index": 0,
+                        "delta": { "content": text },
+                        "finish_reason": Value::Null,
+                    }]
+                })
+            })
+        }
+        "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+            let text = event.get("delta").and_then(Value::as_str)?;
+            (!text.is_empty()).then(|| {
+                json!({
+                    "choices": [{
+                        "index": 0,
+                        "delta": { "reasoning_content": text },
+                        "finish_reason": Value::Null,
+                    }]
+                })
+            })
+        }
+        // Completed output items forward tool calls only: assistant text
+        // already streamed through response.output_text.delta, and re-emitting
+        // the finished message would duplicate every streamed character.
+        // (Verified against zen: output_item.done follows the full
+        // output_text.delta sequence with the complete message.)
+        "response.output_item.done" => {
+            let item = event.get("item")?;
+            match item.get("type").and_then(Value::as_str)? {
+                "function_call" => {
+                    let name = item.get("name").and_then(Value::as_str)?;
+                    if name.is_empty() {
+                        return None;
+                    }
+                    let arguments = item.get("arguments").cloned().unwrap_or(Value::Null);
+                    Some(json!({
+                        "choices": [{
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [{
+                                    "index": 0,
+                                    "id": item
+                                        .get("call_id")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("call"),
+                                    "type": "function",
+                                    "function": {
+                                        "name": name,
+                                        "arguments": match arguments {
+                                            Value::String(raw) => raw,
+                                            value => value.to_string(),
+                                        },
+                                    },
+                                }]
+                            },
+                            "finish_reason": Value::Null,
+                        }]
+                    }))
+                }
+                _ => None,
+            }
+        }
+        "response.completed" => {
+            let response = event.get("response")?;
+            let finish_reason = match response.get("status").and_then(Value::as_str) {
+                Some("incomplete") => "length",
+                _ => "stop",
+            };
+            let usage = response.get("usage").cloned().unwrap_or(Value::Null);
+            let mut chunk = json!({
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": finish_reason,
+                }]
+            });
+            if usage.is_object() {
+                chunk["usage"] = json!({
+                    "total_tokens": usage
+                        .get("total_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0)
+                });
+            }
+            Some(chunk)
+        }
+        "response.failed" | "response.incomplete" | "error" => {
+            let message = event
+                .pointer("/response/error/message")
+                .or_else(|| event.pointer("/error/message"))
+                .and_then(Value::as_str)
+                .or_else(|| event.get("error").and_then(Value::as_str))
+                .unwrap_or("Responses upstream error");
+            Some(json!({
+                "error": { "message": message, "type": "responses_error" }
+            }))
+        }
+        _ => None,
+    }
+}
+
+/// Parse one SSE line from a Responses API stream. Only the `data:` payloads
+/// carry typed events; `event:` lines are redundant and skipped.
+fn apply_responses_sse_line(
+    line: &str,
+    accumulator: &mut StreamAccumulator,
+    on_reasoning: Option<&ReasoningSink>,
+    on_content: Option<&ContentSink>,
+    on_tool_call: Option<&ToolCallSink>,
+) -> Result<()> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with(':') || line.starts_with("event:") {
+        return Ok(());
+    }
+    let data = line.strip_prefix("data:").map(str::trim).unwrap_or(line);
+    if data.is_empty() {
+        return Ok(());
+    }
+    if data == "[DONE]" {
+        accumulator.saw_done = true;
+        return Ok(());
+    }
+    let event: Value = serde_json::from_str(data)
+        .map_err(|_| anyhow!("invalid_response: The provider streamed malformed JSON."))?;
+    if let Some(chunk) = responses_event_to_chunk(&event) {
+        accumulator.apply(&chunk, on_reasoning, on_content, on_tool_call);
+    }
+    Ok(())
+}
+
 fn apply_sse_line(
     line: &str,
     accumulator: &mut StreamAccumulator,
@@ -1050,6 +1387,13 @@ impl OpenAi {
             || self.provider_kind.eq_ignore_ascii_case("hormachuelos_free")
             || self.base_url.contains("hormachuelos.vercel.app")
     }
+
+    /// True when this request must go to `{base}/responses` instead of
+    /// `{base}/chat/completions`. Hosted-proxy traffic keeps the
+    /// chat-completions path because the website proxy translates there.
+    fn uses_responses_endpoint(&self) -> bool {
+        uses_responses_api(&self.provider_kind, &self.model) && !self.is_hosted_proxy()
+    }
 }
 
 #[async_trait::async_trait]
@@ -1062,19 +1406,53 @@ impl LlmProvider for OpenAi {
         on_content: Option<ContentSink>,
         on_tool_call: Option<ToolCallSink>,
     ) -> Result<LlmResponse> {
-        let mut body = build_request_body(
-            &self.model,
-            messages,
-            tools,
-            &self.provider_kind,
-            self.reasoning_effort.as_deref(),
-        );
-        body["stream"] = Value::Bool(true);
+        // OpenCode Zen serves the Muse Spark family only through the OpenAI
+        // Responses API; `/chat/completions` answers with 500 — or worse for
+        // agents, a text-only reply that never emits tool calls. Route those
+        // models to the Responses endpoint when talking to Zen directly. The
+        // hosted proxy keeps the chat-completions path: the website proxy
+        // performs the same translation server-side.
+        let use_responses_api = self.uses_responses_endpoint();
+        let body = if use_responses_api {
+            build_responses_request_body(
+                &self.model,
+                messages,
+                tools,
+                self.reasoning_effort.as_deref(),
+            )
+        } else {
+            let mut body = build_request_body(
+                &self.model,
+                messages,
+                tools,
+                &self.provider_kind,
+                self.reasoning_effort.as_deref(),
+            );
+            body["stream"] = Value::Bool(true);
+            body
+        };
+        let apply_line: fn(
+            &str,
+            &mut StreamAccumulator,
+            Option<&ReasoningSink>,
+            Option<&ContentSink>,
+            Option<&ToolCallSink>,
+        ) -> Result<()> = if use_responses_api {
+            apply_responses_sse_line
+        } else {
+            apply_sse_line
+        };
 
         for attempt in 0..5 {
-            let mut request = self
-                .client
-                .post(format!("{}/chat/completions", self.base_url));
+            let mut request = self.client.post(format!(
+                "{}/{}",
+                self.base_url,
+                if use_responses_api {
+                    "responses"
+                } else {
+                    "chat/completions"
+                }
+            ));
             if !self.skip_auth() {
                 request = request.bearer_auth(&self.api_key);
             }
@@ -1127,7 +1505,7 @@ impl LlmProvider for OpenAi {
                 while let Some(newline) = pending.find('\n') {
                     let line = pending[..newline].trim_end_matches('\r').to_string();
                     pending.drain(..=newline);
-                    apply_sse_line(
+                    apply_line(
                         &line,
                         &mut accumulator,
                         on_reasoning.as_ref(),
@@ -1137,7 +1515,7 @@ impl LlmProvider for OpenAi {
                 }
             }
             if !pending.trim().is_empty() {
-                apply_sse_line(
+                apply_line(
                     &pending,
                     &mut accumulator,
                     on_reasoning.as_ref(),
@@ -1159,7 +1537,11 @@ impl LlmProvider for OpenAi {
                         usage_tokens: 0,
                     });
                 }
-                let parsed = parse_response(body)?;
+                let parsed = if use_responses_api {
+                    parse_responses_object(body)?
+                } else {
+                    parse_response(body)?
+                };
                 if let (Some(reasoning), Some(sink)) =
                     (parsed.reasoning_content.as_deref(), on_reasoning.as_ref())
                 {
@@ -1185,6 +1567,197 @@ impl LlmProvider for OpenAi {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn muse_spark_routes_to_the_responses_api_and_other_models_do_not() {
+        assert!(uses_responses_api(
+            "opencode",
+            "muse-spark-1.2-contributor-free"
+        ));
+        assert!(uses_responses_api("opencode", "Muse-Spark-1.2-Free"));
+        assert!(uses_responses_api("glm", "muse-spark-1.2"));
+        assert!(!uses_responses_api("opencode", "grok-code-fast-1"));
+        assert!(!uses_responses_api("openai", "muse-spark-1.2"));
+        assert!(!uses_responses_api("opencode", ""));
+    }
+
+    #[test]
+    fn hosted_proxy_traffic_never_switches_to_the_responses_endpoint() {
+        // Paid plans route through the website proxy, which translates to the
+        // Responses API server-side; the desktop must keep using
+        // /chat/completions there.
+        let hosted = OpenAi::new(
+            "HORMA-test-license",
+            Some("https://hormachuelos.vercel.app/api/v1"),
+            "muse-spark-1.2-contributor-free",
+            "opencode",
+        );
+        assert!(!hosted.uses_responses_endpoint());
+
+        // A BYOK key pointed straight at OpenCode Zen must use /responses.
+        let direct = OpenAi::new(
+            "zen-example-key",
+            Some("https://opencode.ai/zen/v1"),
+            "muse-spark-1.2-contributor-free",
+            "opencode",
+        );
+        assert!(direct.uses_responses_endpoint());
+    }
+
+    #[test]
+    fn builds_responses_body_with_instructions_tools_and_tool_replay() {
+        let messages = vec![
+            ChatMessage {
+                role: "system".into(),
+                content: json!("You are helpful."),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+                reasoning_content: None,
+            },
+            ChatMessage::user("Make a game."),
+            ChatMessage {
+                role: "assistant".into(),
+                content: Value::Null,
+                tool_calls: Some(vec![ToolCall {
+                    id: "call_1".into(),
+                    name: "list_dir".into(),
+                    arguments: json!({ "path": "." }),
+                }]),
+                tool_call_id: None,
+                name: None,
+                reasoning_content: None,
+            },
+            ChatMessage {
+                role: "tool".into(),
+                content: json!("src, dist"),
+                tool_calls: None,
+                tool_call_id: Some("call_1".into()),
+                name: Some("list_dir".into()),
+                reasoning_content: None,
+            },
+        ];
+        let tools = vec![json!({
+            "type": "function",
+            "function": {
+                "name": "list_dir",
+                "description": "List a directory",
+                "parameters": { "type": "object", "properties": {} },
+            }
+        })];
+        let body = build_responses_request_body(
+            "muse-spark-1.2-contributor-free",
+            &messages,
+            &tools,
+            Some("high"),
+        );
+
+        assert_eq!(body["model"], "muse-spark-1.2-contributor-free");
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["store"], false);
+        assert_eq!(body["instructions"], "You are helpful.");
+        assert_eq!(body["reasoning"]["effort"], "high");
+        assert_eq!(
+            body["tools"][0],
+            json!({
+                "type": "function",
+                "name": "list_dir",
+                "description": "List a directory",
+                "parameters": { "type": "object", "properties": {} },
+            })
+        );
+        let input = body["input"].as_array().unwrap();
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[1]["type"], "function_call");
+        assert_eq!(input[1]["call_id"], "call_1");
+        assert_eq!(input[1]["arguments"], "{\"path\":\".\"}");
+        assert_eq!(input[2]["type"], "function_call_output");
+        assert_eq!(input[2]["call_id"], "call_1");
+        assert_eq!(input[2]["output"], "src, dist");
+    }
+
+    #[test]
+    fn responses_stream_accumulates_text_and_tool_calls() {
+        let lines = [
+            "data: {\"type\":\"response.created\",\"response\":{\"model\":\"muse-spark-1.2-contributor-free\"}}",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Building\"}",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\" now.\"}",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_9\",\"name\":\"list_dir\",\"arguments\":\"{\\\"path\\\":\\\".\\\"}\"}}",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"total_tokens\":321}}}",
+        ];
+        let mut accumulator = StreamAccumulator::default();
+        for line in lines {
+            apply_responses_sse_line(line, &mut accumulator, None, None, None).unwrap();
+        }
+        accumulator.flush_tool_previews(None);
+        let response = accumulator.into_response().unwrap();
+
+        assert_eq!(response.text.as_deref(), Some("Building now."));
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].id, "call_9");
+        assert_eq!(response.tool_calls[0].name, "list_dir");
+        assert_eq!(response.tool_calls[0].arguments["path"], ".");
+        assert_eq!(response.stop_reason, "stop");
+        assert_eq!(response.usage_tokens, 321);
+    }
+
+    #[test]
+    fn responses_stream_does_not_replay_completed_message_text() {
+        // zen echoes the finished message as output_item.done AFTER the
+        // incremental output_text.delta events; the text must not double.
+        let lines = [
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"One \"}",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"two.\"}",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"One two.\"}]}}",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"total_tokens\":7}}}",
+        ];
+        let mut accumulator = StreamAccumulator::default();
+        for line in lines {
+            apply_responses_sse_line(line, &mut accumulator, None, None, None).unwrap();
+        }
+        let response = accumulator.into_response().unwrap();
+        assert_eq!(response.text.as_deref(), Some("One two."));
+        assert_eq!(response.usage_tokens, 7);
+    }
+
+    #[test]
+    fn responses_stream_failures_surface_as_error_chunks() {
+        let mut accumulator = StreamAccumulator::default();
+        apply_responses_sse_line(
+            "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"quota exceeded\"}}}",
+            &mut accumulator,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        // The error chunk carries no choices, so the stream never registers as
+        // seen and the run loop treats it as a resumable interruption.
+        assert!(!accumulator.saw_event);
+    }
+
+    #[test]
+    fn parses_one_shot_responses_object() {
+        let body = r#"{
+            "id": "resp_1",
+            "object": "response",
+            "status": "completed",
+            "model": "muse-spark-1.2-contributor-free",
+            "output": [
+                {"type": "reasoning", "summary": [{"type": "summary_text", "text": "thinking"}]},
+                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Working on it."}]},
+                {"type": "function_call", "call_id": "call_5", "name": "read_file", "arguments": "{\"path\":\"a.ts\"}"}
+            ],
+            "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+        }"#;
+        let response = parse_responses_object(body).unwrap();
+
+        assert_eq!(response.text.as_deref(), Some("Working on it."));
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].name, "read_file");
+        assert_eq!(response.stop_reason, "tool_calls");
+        assert_eq!(response.usage_tokens, 15);
+    }
 
     #[test]
     fn encodes_tool_calls_for_a_second_openai_compatible_turn() {
