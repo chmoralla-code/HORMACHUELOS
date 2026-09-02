@@ -87,7 +87,12 @@ export const PROVIDERS: ProviderDef[] = [
     keyRequired: false,
     // The signed-in desktop refreshes this catalog from the hosted service.
     // These are safe offline fallbacks, not credentials.
-    models: ["hormachuelos-v1", "hormachuelos-v2", "hormachuelos-v3", "hormachuelos-v4"],
+    models: [
+      "hormachuelos-v1",
+      "hormachuelos-v2",
+      "hormachuelos-v3",
+      "hormachuelos-v4",
+    ],
   },
   {
     id: "ollama",
@@ -254,8 +259,12 @@ function hostedModelNameKey(providerId: string, modelId: string): string {
 }
 
 function isHostedProviderAlias(value: string): boolean {
-  const id = String(value || "").trim().toLowerCase();
-  return /^[a-z][a-z0-9_-]{0,48}$/.test(id) && id !== "cursor" && id !== "ollama";
+  const id = String(value || "")
+    .trim()
+    .toLowerCase();
+  return (
+    /^[a-z][a-z0-9_-]{0,48}$/.test(id) && id !== "cursor" && id !== "ollama"
+  );
 }
 
 function uniqueModels(models: readonly string[]): string[] {
@@ -263,11 +272,12 @@ function uniqueModels(models: readonly string[]): string[] {
 }
 
 function fallbackHostedProvider(id: string): ProviderDef {
-  const label = id
-    .split(/[-_]+/)
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ") || "Hosted provider";
+  const label =
+    id
+      .split(/[-_]+/)
+      .filter(Boolean)
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(" ") || "Hosted provider";
   return {
     id,
     label,
@@ -282,16 +292,24 @@ function fallbackHostedProvider(id: string): ProviderDef {
   };
 }
 
-function providerFromHostedCatalog(entry: HostedProviderCatalogEntry): ProviderDef | null {
-  const id = String(entry?.id || "").trim().toLowerCase();
+function providerFromHostedCatalog(
+  entry: HostedProviderCatalogEntry,
+): ProviderDef | null {
+  const id = String(entry?.id || "")
+    .trim()
+    .toLowerCase();
   if (!isHostedProviderAlias(id)) return null;
   const label = String(entry?.label || "").trim();
-  if (!label || label.length > 120 || /[\u0000-\u001f\u007f]/.test(label)) return null;
+  if (!label || label.length > 120 || /[\u0000-\u001f\u007f]/.test(label))
+    return null;
   const models = uniqueModels(
     Array.isArray(entry.models)
       ? entry.models
           .map((model) => String(model?.id || "").trim())
-          .filter((model) => model.length <= 200 && !/[\u0000-\u001f\u007f]/.test(model))
+          .filter(
+            (model) =>
+              model.length <= 200 && !/[\u0000-\u001f\u007f]/.test(model),
+          )
       : [],
   );
   if (!models.length) return null;
@@ -320,7 +338,10 @@ function providerFromHostedCatalog(entry: HostedProviderCatalogEntry): ProviderD
     // Keep intentionally hidden built-ins out of the picker (xAI, OpenCode).
     hidden: Boolean(builtin.hidden),
     hostedManaged: true,
-    defaultModel: id === "openrouter" ? "openrouter/free" : (approvedModels[0] || builtin.defaultModel),
+    defaultModel:
+      id === "openrouter"
+        ? "openrouter/free"
+        : approvedModels[0] || builtin.defaultModel,
     defaultBaseUrl: HOSTED_PROXY_BASE_URL,
     keyUrl: "",
     keyRequired: false,
@@ -348,12 +369,16 @@ function rebuildProviderCatalog() {
     return;
   }
 
-  const providers = BUILTIN_PROVIDERS.map((provider) => managed.get(provider.id) || {
-    ...provider,
-    models: [...provider.models],
-  });
+  const providers = BUILTIN_PROVIDERS.map(
+    (provider) =>
+      managed.get(provider.id) || {
+        ...provider,
+        models: [...provider.models],
+      },
+  );
   for (const provider of managed.values()) {
-    if (!BUILTIN_PROVIDERS.some((builtin) => builtin.id === provider.id)) providers.push(provider);
+    if (!BUILTIN_PROVIDERS.some((builtin) => builtin.id === provider.id))
+      providers.push(provider);
   }
   PROVIDERS.splice(0, PROVIDERS.length, ...providers);
 }
@@ -372,13 +397,17 @@ export function setHostedProviderCatalog(
     // When restricted, trust the server model list exactly. Otherwise keep the
     // previous filter that drops unknown labels while preserving known aliases.
     const models = entry.models
-      .map((model) => ({ id: String(model?.id || "").trim(), label: String(model?.label || "").trim() }))
-      .filter((model) =>
-        model.id.length > 0 &&
-        model.label.length > 0 &&
-        model.label.length <= 120 &&
-        !/[\u0000-\u001f\u007f]/.test(model.label) &&
-        (hostedCatalogRestricted || provider.models.includes(model.id)),
+      .map((model) => ({
+        id: String(model?.id || "").trim(),
+        label: String(model?.label || "").trim(),
+      }))
+      .filter(
+        (model) =>
+          model.id.length > 0 &&
+          model.label.length > 0 &&
+          model.label.length <= 120 &&
+          !/[\u0000-\u001f\u007f]/.test(model.label) &&
+          (hostedCatalogRestricted || provider.models.includes(model.id)),
       );
     if (!models.length) continue;
     HOSTED_PROVIDER_CATALOG.set(provider.id, {
@@ -387,14 +416,19 @@ export function setHostedProviderCatalog(
       models,
     });
     for (const model of models) {
-      HOSTED_MODEL_DISPLAY_NAMES.set(hostedModelNameKey(provider.id, model.id), model.label);
+      HOSTED_MODEL_DISPLAY_NAMES.set(
+        hostedModelNameKey(provider.id, model.id),
+        model.label,
+      );
     }
   }
   rebuildProviderCatalog();
 }
 
 /** Fetch current administrator-managed aliases without ever receiving API keys. */
-export async function refreshHostedProviderCatalog(): Promise<HostedProviderCatalogEntry[]> {
+export async function refreshHostedProviderCatalog(): Promise<
+  HostedProviderCatalogEntry[]
+> {
   const raw = await api.listHostedProviderCatalog();
   const payload = Array.isArray(raw)
     ? { data: raw, restricted: false }
@@ -465,7 +499,11 @@ const MODEL_DISPLAY_NAMES: Record<string, string> = {
 
 /** Allowed OpenRouter model — Free Models Router only. */
 export function isOpenRouterFreeModel(modelId: string): boolean {
-  return String(modelId || "").trim().toLowerCase() === "openrouter/free";
+  return (
+    String(modelId || "")
+      .trim()
+      .toLowerCase() === "openrouter/free"
+  );
 }
 
 /** Providers routed through the Cursor local SDK (not chat-completions). */
@@ -505,7 +543,10 @@ export function usesReasoningEffort(providerId: string): boolean {
 }
 
 export function hasStaticModelCatalog(providerId: string): boolean {
-  return STATIC_MODEL_PROVIDER_IDS.has(providerId) || Boolean(getProviderMeta(providerId)?.hostedManaged);
+  return (
+    STATIC_MODEL_PROVIDER_IDS.has(providerId) ||
+    Boolean(getProviderMeta(providerId)?.hostedManaged)
+  );
 }
 
 /**
@@ -514,7 +555,10 @@ export function hasStaticModelCatalog(providerId: string): boolean {
  * catalog must never make a locally supported alias disappear from the
  * desktop picker.
  */
-export function mergeProviderModelCatalog(providerId: string, models: readonly string[]): string[] {
+export function mergeProviderModelCatalog(
+  providerId: string,
+  models: readonly string[],
+): string[] {
   const hosted = HOSTED_PROVIDER_CATALOG.get(providerId);
   if (hostedCatalogRestricted && hosted?.models?.length) {
     return uniqueModels(hosted.models.map((model) => model.id));
@@ -524,9 +568,13 @@ export function mergeProviderModelCatalog(providerId: string, models: readonly s
     providerId === "hormachuelos_free" ||
     providerId === "openrouter" ||
     meta?.hostedManaged
-      ? meta?.models ?? []
+      ? (meta?.models ?? [])
       : [];
-  return [...new Set([...configured, ...models].map((model) => model.trim()).filter(Boolean))];
+  return [
+    ...new Set(
+      [...configured, ...models].map((model) => model.trim()).filter(Boolean),
+    ),
+  ];
 }
 
 /**
@@ -561,7 +609,8 @@ export function normalizeEffort(value: string | null | undefined): EffortId {
   if (v === "low" || v === "light") return "light";
   if (v === "medium") return "medium";
   if (v === "high") return "high";
-  if (v === "xhigh" || v === "extra" || v === "extra-high" || v === "extrahigh") return "xhigh";
+  if (v === "xhigh" || v === "extra" || v === "extra-high" || v === "extrahigh")
+    return "xhigh";
   if (v === "ultra" || v === "max") return "ultra";
   return "high";
 }
@@ -574,13 +623,16 @@ export function normalizeEffortForProvider(
   const v = (value || "").trim().toLowerCase();
   if (providerId === "deepseek") {
     // DeepSeek accepts light/high/ultra (→ low/high/max upstream).
-    if (v === "medium" || v === "xhigh") return v === "medium" ? "light" : "ultra";
+    if (v === "medium" || v === "xhigh")
+      return v === "medium" ? "light" : "ultra";
   }
   return normalizeEffort(value);
 }
 
 /** Map UI effort → Cursor SDK effort param (low | medium | high). */
-export function toCursorEffort(value: string | null | undefined): "low" | "medium" | "high" {
+export function toCursorEffort(
+  value: string | null | undefined,
+): "low" | "medium" | "high" {
   switch (normalizeEffort(value)) {
     case "light":
       return "low";
@@ -600,7 +652,10 @@ export function isUltraEffort(value: string | null | undefined): boolean {
 }
 
 /** Resolve locally selected models to the provider that actually serves them. */
-export function backendForModel(modelId: string): { provider: string; baseUrl: string | null } {
+export function backendForModel(modelId: string): {
+  provider: string;
+  baseUrl: string | null;
+} {
   const id = (modelId || "").trim();
   if (/^hormachuelos-[a-z0-9._-]+$/i.test(id)) {
     return {
@@ -624,7 +679,9 @@ export function displayModelName(id: string, providerId?: string): string {
   const raw = (id || "").trim();
   if (!raw) return raw;
   if (providerId) {
-    const hostedName = HOSTED_MODEL_DISPLAY_NAMES.get(hostedModelNameKey(providerId, raw));
+    const hostedName = HOSTED_MODEL_DISPLAY_NAMES.get(
+      hostedModelNameKey(providerId, raw),
+    );
     if (hostedName) return hostedName;
   }
   if (
@@ -656,9 +713,10 @@ export function claudeCatalogModels(ollamaDiscovered: string[] = []): string[] {
     "glm-5.1:cloud",
     "glm-5.2:cloud",
   ];
-  const rest = (ollamaDiscovered.length
-    ? ollamaDiscovered
-    : getProviderMeta("ollama")?.models || []
+  const rest = (
+    ollamaDiscovered.length
+      ? ollamaDiscovered
+      : getProviderMeta("ollama")?.models || []
   ).filter((m) => !branded.includes(m) && !m.startsWith("deepseek-v4"));
   return [...branded, ...rest];
 }
@@ -670,14 +728,22 @@ const LEGACY_PROVIDER_BASE_URLS = [
 ];
 
 function isKnownProviderBaseUrl(value: string): boolean {
-  return PROVIDERS.some((provider) => provider.defaultBaseUrl === value)
-    || LEGACY_PROVIDER_BASE_URLS.includes(value);
+  return (
+    PROVIDERS.some((provider) => provider.defaultBaseUrl === value) ||
+    LEGACY_PROVIDER_BASE_URLS.includes(value)
+  );
 }
 
 export function getProviderMeta(id: string) {
-  const normalized = String(id || "").trim().toLowerCase();
-  return PROVIDERS.find((p) => p.id === normalized) ||
-    (isHostedProviderAlias(normalized) ? fallbackHostedProvider(normalized) : undefined);
+  const normalized = String(id || "")
+    .trim()
+    .toLowerCase();
+  return (
+    PROVIDERS.find((p) => p.id === normalized) ||
+    (isHostedProviderAlias(normalized)
+      ? fallbackHostedProvider(normalized)
+      : undefined)
+  );
 }
 
 /** Default settings matching the Rust Default impl. */
@@ -713,8 +779,15 @@ export async function getSettingsSafe(): Promise<Settings> {
 
 /** Normalize provider settings while preserving user-entered custom model IDs. */
 export function normalizeSettings(s: Settings): Settings {
-  s.provider = String(s.provider || "").trim().toLowerCase();
-  if (!s.permission_mode || !["plan", "auto", "ask", "research", "full", "multi_agent"].includes(s.permission_mode)) {
+  s.provider = String(s.provider || "")
+    .trim()
+    .toLowerCase();
+  if (
+    !s.permission_mode ||
+    !["plan", "auto", "ask", "research", "full", "multi_agent", "pi"].includes(
+      s.permission_mode,
+    )
+  ) {
     s.permission_mode = s.auto_approve ? "auto" : "plan";
   }
   if (s.permission_mode === "research") s.permission_mode = "ask";
@@ -728,6 +801,7 @@ export function normalizeSettings(s: Settings): Settings {
     ask: ["investigate", "brief"],
     full: ["autonomous", "max"],
     multi_agent: ["autonomous", "max"],
+    pi: ["pi"],
   };
   const allowed = capsByMode[s.permission_mode] || ["thinking"];
   if (!s.capability_mode || !allowed.includes(s.capability_mode)) {
@@ -783,7 +857,11 @@ export function normalizeSettings(s: Settings): Settings {
     if (!s.model.trim()) s.model = meta.defaultModel;
     s.base_url = meta.defaultBaseUrl;
   }
-  if (meta.hostedManaged && s.provider !== "hormachuelos_free" && s.provider !== "xai") {
+  if (
+    meta.hostedManaged &&
+    s.provider !== "hormachuelos_free" &&
+    s.provider !== "xai"
+  ) {
     if (!s.model.trim()) s.model = meta.defaultModel;
     s.base_url = meta.defaultBaseUrl;
   }
@@ -793,7 +871,10 @@ export function normalizeSettings(s: Settings): Settings {
   if (s.provider === "deepseek" && s.model === "deepseek-reasoner") {
     s.model = "deepseek-v4-pro";
   }
-  if (s.provider === "deepseek" && s.base_url === "https://api.deepseek.com/v1") {
+  if (
+    s.provider === "deepseek" &&
+    s.base_url === "https://api.deepseek.com/v1"
+  ) {
     s.base_url = meta.defaultBaseUrl;
   }
   if (s.provider === "glm") {
@@ -813,7 +894,10 @@ export function normalizeSettings(s: Settings): Settings {
     // Pin OpenRouter to Free Models Router only.
     s.model = meta.defaultModel;
   }
-  if (s.provider === "pollinations" && s.base_url === "https://text.pollinations.ai/openai") {
+  if (
+    s.provider === "pollinations" &&
+    s.base_url === "https://text.pollinations.ai/openai"
+  ) {
     s.base_url = meta.defaultBaseUrl;
   }
   if (s.provider === "cursor") {
@@ -848,13 +932,17 @@ export class SettingsModal {
       return;
     }
     if (event.key !== "Tab") return;
-    const dialog = this.root.querySelector<HTMLElement>("[role='dialog'],[role='alertdialog']");
+    const dialog = this.root.querySelector<HTMLElement>(
+      "[role='dialog'],[role='alertdialog']",
+    );
     if (!dialog) return;
     const focusable = Array.from(
       dialog.querySelectorAll<HTMLElement>(
         "button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex='-1'])",
       ),
-    ).filter((node) => !node.hidden && node.getAttribute("aria-hidden") !== "true");
+    ).filter(
+      (node) => !node.hidden && node.getAttribute("aria-hidden") !== "true",
+    );
     if (!focusable.length) {
       event.preventDefault();
       dialog.focus();
@@ -866,7 +954,10 @@ export class SettingsModal {
     if (event.shiftKey && (active === first || !dialog.contains(active))) {
       event.preventDefault();
       last.focus();
-    } else if (!event.shiftKey && (active === last || !dialog.contains(active))) {
+    } else if (
+      !event.shiftKey &&
+      (active === last || !dialog.contains(active))
+    ) {
       event.preventDefault();
       first.focus();
     }
@@ -928,7 +1019,10 @@ export class SettingsModal {
 
   private focusRequestedIntegration(): boolean {
     const requested = this.requestedIntegrationId;
-    if (!requested || !this.integrations.some((integration) => integration.id === requested)) {
+    if (
+      !requested ||
+      !this.integrations.some((integration) => integration.id === requested)
+    ) {
       return false;
     }
     window.requestAnimationFrame(() => {
@@ -947,11 +1041,17 @@ export class SettingsModal {
   private beginModalSession() {
     if (this.modalSessionActive) return;
     this.modalSessionActive = true;
-    this.previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    this.previousFocus =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
     const app = document.getElementById("app");
     this.inertSiblings = app
       ? Array.from(app.children)
-          .filter((node): node is HTMLElement => node instanceof HTMLElement && node !== this.root)
+          .filter(
+            (node): node is HTMLElement =>
+              node instanceof HTMLElement && node !== this.root,
+          )
           .map((node) => ({ node, wasInert: node.inert }))
       : [];
     for (const { node } of this.inertSiblings) node.inert = true;
@@ -969,7 +1069,10 @@ export class SettingsModal {
   }
 
   /** After a key is saved (or for keyless providers), pull the full model list from the API. */
-  private async discoverModels(providerId: string, opts?: { silent?: boolean; reRender?: boolean }) {
+  private async discoverModels(
+    providerId: string,
+    opts?: { silent?: boolean; reRender?: boolean },
+  ) {
     const provider = PROVIDERS.find((p) => p.id === providerId);
     if (!provider) return;
     // Branded integrations intentionally expose only their pinned model alias.
@@ -1010,7 +1113,8 @@ export class SettingsModal {
         }
       }
     } catch (error) {
-      this.modelDiscoveryMessages[providerId] = `Could not load models: ${String(error)}`;
+      this.modelDiscoveryMessages[providerId] =
+        `Could not load models: ${String(error)}`;
     }
     // Never rebuild the modal after the user closed it (async discovery race).
     if (!this.modalSessionActive) return;
@@ -1019,7 +1123,9 @@ export class SettingsModal {
 
   private async autoDiscoverAllReadyProviders() {
     if (!this.modalSessionActive) return;
-    const ready = PROVIDERS.filter((p) => !p.keyRequired || this.keyStates[p.id]);
+    const ready = PROVIDERS.filter(
+      (p) => !p.keyRequired || this.keyStates[p.id],
+    );
     // Prefer active provider first so the dropdown fills quickly
     const ordered = [
       ...ready.filter((p) => p.id === this.settings.provider),
@@ -1031,7 +1137,8 @@ export class SettingsModal {
       if (this.discoveredModels[p.id]?.length) continue;
       await this.discoverModels(p.id, {
         silent: p.id !== this.settings.provider,
-        reRender: p.id === this.settings.provider || p === ordered[ordered.length - 1],
+        reRender:
+          p.id === this.settings.provider || p === ordered[ordered.length - 1],
       });
     }
   }
@@ -1040,10 +1147,24 @@ export class SettingsModal {
     if (!this.modalSessionActive) return;
     clear(this.root);
     const overlay = el("div", { class: "modal-overlay" });
-    const modal = el("div", { class: "modal", role: "dialog", "aria-modal": "true", "aria-labelledby": "settings-error-title" });
+    const modal = el("div", {
+      class: "modal",
+      role: "dialog",
+      "aria-modal": "true",
+      "aria-labelledby": "settings-error-title",
+    });
     const head = el("div", { class: "modal-head" });
-    head.appendChild(el("div", { class: "modal-title", id: "settings-error-title" }, ["Settings"]));
-    const closeBtn = el("button", { class: "modal-close", type: "button", "aria-label": "Close settings", html: icon("close", 16) });
+    head.appendChild(
+      el("div", { class: "modal-title", id: "settings-error-title" }, [
+        "Settings",
+      ]),
+    );
+    const closeBtn = el("button", {
+      class: "modal-close",
+      type: "button",
+      "aria-label": "Close settings",
+      html: icon("close", 16),
+    });
     closeBtn.addEventListener("click", (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -1052,13 +1173,23 @@ export class SettingsModal {
     head.appendChild(closeBtn);
     modal.appendChild(head);
     const body = el("div", { class: "modal-body" });
-    body.appendChild(el("div", { class: "set-row" }, [
-      el("div", { class: "set-hint", style: "color:var(--err);padding:8px;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm)" }, [
-        `Could not load settings: ${msg}`,
+    body.appendChild(
+      el("div", { class: "set-row" }, [
+        el(
+          "div",
+          {
+            class: "set-hint",
+            style:
+              "color:var(--err);padding:8px;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm)",
+          },
+          [`Could not load settings: ${msg}`],
+        ),
       ]),
-    ]));
+    );
     const foot = el("div", { class: "modal-foot" });
-    const dismissBtn = el("button", { class: "btn primary", type: "button" }, ["Close"]);
+    const dismissBtn = el("button", { class: "btn primary", type: "button" }, [
+      "Close",
+    ]);
     dismissBtn.addEventListener("click", (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -1068,7 +1199,9 @@ export class SettingsModal {
     modal.appendChild(body);
     modal.appendChild(foot);
     overlay.appendChild(modal);
-    overlay.addEventListener("click", (e) => { if (e.target === overlay) this.close(); });
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) this.close();
+    });
     this.root.appendChild(overlay);
     (overlay as HTMLElement).style.pointerEvents = "auto";
     this.focusDefault(closeBtn);
@@ -1078,12 +1211,24 @@ export class SettingsModal {
     if (!this.modalSessionActive) return;
     clear(this.root);
     const overlay = el("div", { class: "modal-overlay" });
-    const modal = el("div", { class: "modal", role: "dialog", "aria-modal": "true", "aria-labelledby": "settings-title" });
+    const modal = el("div", {
+      class: "modal",
+      role: "dialog",
+      "aria-modal": "true",
+      "aria-labelledby": "settings-title",
+    });
 
     // Header
     const head = el("div", { class: "modal-head" });
-    head.appendChild(el("div", { class: "modal-title", id: "settings-title" }, ["Settings"]));
-    const closeBtn = el("button", { class: "modal-close", type: "button", "aria-label": "Close settings", html: icon("close", 16) });
+    head.appendChild(
+      el("div", { class: "modal-title", id: "settings-title" }, ["Settings"]),
+    );
+    const closeBtn = el("button", {
+      class: "modal-close",
+      type: "button",
+      "aria-label": "Close settings",
+      html: icon("close", 16),
+    });
     closeBtn.addEventListener("click", (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -1101,11 +1246,12 @@ export class SettingsModal {
     const uiProv = uiProviderId(this.settings.provider, this.settings.model);
     for (const p of visibleProviders()) {
       const card = el("button", {
-        class: "provider-card" + (p.id === uiProv ? " active" : ""), type: "button",
+        class: "provider-card" + (p.id === uiProv ? " active" : ""),
+        type: "button",
         "aria-pressed": String(p.id === uiProv),
       });
       card.innerHTML =
-        `<img class="provider-card-logo" src="${p.logoSrc}" alt="" width="22" height="22" draggable="false" />` +
+        `<img class="provider-card-logo" src="${escapeHtml(p.logoSrc)}" alt="" width="22" height="22" draggable="false" />` +
         `<div class="provider-card-meta"><span class="provider-card-name">${escapeHtml(p.label)}</span></div>`;
       card.addEventListener("click", () => {
         const wasSelectedProvider = this.settings.provider === p.id;
@@ -1120,7 +1266,8 @@ export class SettingsModal {
           }
         } else {
           const newBase = p.defaultBaseUrl.trim();
-          const wasDefault = !currentBase || isKnownProviderBaseUrl(currentBase);
+          const wasDefault =
+            !currentBase || isKnownProviderBaseUrl(currentBase);
           if (wasDefault) {
             this.settings.base_url = newBase || null;
           }
@@ -1130,7 +1277,10 @@ export class SettingsModal {
           this.settings.model = known[0];
         }
         this.render();
-        if (!this.discoveredModels[p.id]?.length && (!p.keyRequired || this.keyStates[p.id])) {
+        if (
+          !this.discoveredModels[p.id]?.length &&
+          (!p.keyRequired || this.keyStates[p.id])
+        ) {
           void this.discoverModels(p.id);
         }
       });
@@ -1138,133 +1288,177 @@ export class SettingsModal {
     }
     body.appendChild(cardsWrap);
 
-    body.appendChild(this.field("Active provider", () => {
-      const sel = el("select", { class: "field" }) as HTMLSelectElement;
-      for (const p of visibleProviders()) {
-        const opt = el("option", { value: p.id }, [p.label]);
-        if (p.id === uiProv) opt.setAttribute("selected", "selected");
-        sel.appendChild(opt);
-      }
-      sel.addEventListener("change", () => {
-        const p = visibleProviders().find((x) => x.id === sel.value)!;
-        this.settings.provider = sel.value;
-        this.settings.model = p.defaultModel;
-        if (p.id === "ollama") {
-          const backend = backendForModel(p.defaultModel);
-          this.settings.provider = backend.provider;
-          this.settings.base_url = backend.baseUrl;
-        } else {
-          const newBase = p.defaultBaseUrl.trim();
-          const currentBase = (this.settings.base_url || "").trim();
-          const wasDefault = !currentBase || isKnownProviderBaseUrl(currentBase);
-          if (wasDefault) {
-            this.settings.base_url = newBase || null;
-          }
-          const known = this.discoveredModels[p.id];
-          if (known?.length && !known.includes(this.settings.model)) {
-            this.settings.model = known[0];
-          }
-        }
-        this.render();
-        if (!this.discoveredModels[p.id]?.length && (!p.keyRequired || this.keyStates[p.id])) {
-          void this.discoverModels(p.id);
-        }
-      });
-      return sel;
-    }));
-
-    body.appendChild(this.field("Model", () => {
-      const uiId = uiProviderId(this.settings.provider, this.settings.model);
-      const catalogProvider = PROVIDERS.find((p) => p.id === uiId) || PROVIDERS[0];
-      const models = this.modelsFor(catalogProvider);
-      const sel = el("select", { class: "field" }) as HTMLSelectElement;
-      if (models.length === 0) {
-        const opt = el("option", { value: catalogProvider.defaultModel }, ["No models yet"]);
-        sel.appendChild(opt);
-        sel.disabled = true;
-      } else {
-        for (const m of models) {
-          const opt = el("option", { value: m }, [displayModelName(m, uiId)]);
-          if (m === this.settings.model) opt.setAttribute("selected", "selected");
+    body.appendChild(
+      this.field("Active provider", () => {
+        const sel = el("select", { class: "field" }) as HTMLSelectElement;
+        for (const p of visibleProviders()) {
+          const opt = el("option", { value: p.id }, [p.label]);
+          if (p.id === uiProv) opt.setAttribute("selected", "selected");
           sel.appendChild(opt);
         }
-        if (!models.includes(this.settings.model) && this.settings.model) {
-          const orphan = el("option", { value: this.settings.model }, [
-            displayModelName(this.settings.model, uiId),
-          ]);
-          orphan.setAttribute("selected", "selected");
-          sel.appendChild(orphan);
-        }
         sel.addEventListener("change", () => {
-          const m = sel.value;
-          this.settings.model = m;
-          if (uiId === "ollama") {
-            // A local Ollama model may share an id with another provider. Model
-            // selection must never change the selected provider or overwrite an
-            // explicitly configured Ollama host.
-            this.settings.provider = "ollama";
-            if (!this.settings.base_url?.trim()) {
-              this.settings.base_url = catalogProvider.defaultBaseUrl || null;
+          const p = visibleProviders().find((x) => x.id === sel.value)!;
+          this.settings.provider = sel.value;
+          this.settings.model = p.defaultModel;
+          if (p.id === "ollama") {
+            const backend = backendForModel(p.defaultModel);
+            this.settings.provider = backend.provider;
+            this.settings.base_url = backend.baseUrl;
+          } else {
+            const newBase = p.defaultBaseUrl.trim();
+            const currentBase = (this.settings.base_url || "").trim();
+            const wasDefault =
+              !currentBase || isKnownProviderBaseUrl(currentBase);
+            if (wasDefault) {
+              this.settings.base_url = newBase || null;
+            }
+            const known = this.discoveredModels[p.id];
+            if (known?.length && !known.includes(this.settings.model)) {
+              this.settings.model = known[0];
             }
           }
+          this.render();
+          if (
+            !this.discoveredModels[p.id]?.length &&
+            (!p.keyRequired || this.keyStates[p.id])
+          ) {
+            void this.discoverModels(p.id);
+          }
         });
-      }
-      return sel;
-    }));
+        return sel;
+      }),
+    );
 
-    const uiIdForKeys = uiProviderId(this.settings.provider, this.settings.model);
-    const discoveryProvider = PROVIDERS.find((provider) => provider.id === uiIdForKeys) || PROVIDERS[0];
+    body.appendChild(
+      this.field("Model", () => {
+        const uiId = uiProviderId(this.settings.provider, this.settings.model);
+        const catalogProvider =
+          PROVIDERS.find((p) => p.id === uiId) || PROVIDERS[0];
+        const models = this.modelsFor(catalogProvider);
+        const sel = el("select", { class: "field" }) as HTMLSelectElement;
+        if (models.length === 0) {
+          const opt = el("option", { value: catalogProvider.defaultModel }, [
+            "No models yet",
+          ]);
+          sel.appendChild(opt);
+          sel.disabled = true;
+        } else {
+          for (const m of models) {
+            const opt = el("option", { value: m }, [displayModelName(m, uiId)]);
+            if (m === this.settings.model)
+              opt.setAttribute("selected", "selected");
+            sel.appendChild(opt);
+          }
+          if (!models.includes(this.settings.model) && this.settings.model) {
+            const orphan = el("option", { value: this.settings.model }, [
+              displayModelName(this.settings.model, uiId),
+            ]);
+            orphan.setAttribute("selected", "selected");
+            sel.appendChild(orphan);
+          }
+          sel.addEventListener("change", () => {
+            const m = sel.value;
+            this.settings.model = m;
+            if (uiId === "ollama") {
+              // A local Ollama model may share an id with another provider. Model
+              // selection must never change the selected provider or overwrite an
+              // explicitly configured Ollama host.
+              this.settings.provider = "ollama";
+              if (!this.settings.base_url?.trim()) {
+                this.settings.base_url = catalogProvider.defaultBaseUrl || null;
+              }
+            }
+          });
+        }
+        return sel;
+      }),
+    );
+
+    const uiIdForKeys = uiProviderId(
+      this.settings.provider,
+      this.settings.model,
+    );
+    const discoveryProvider =
+      PROVIDERS.find((provider) => provider.id === uiIdForKeys) || PROVIDERS[0];
     const discoveryRow = el("div", { class: "set-row" });
-      const msg =
+    const msg =
       this.modelDiscoveryMessages[discoveryProvider.id] ||
       (uiIdForKeys === "hormachuelos_free"
         ? "Hormachuelos models are included for signed-in users. No provider key is stored on this computer."
         : uiIdForKeys === "openrouter"
-        ? "Free Models Router only. An active Hormachuelos plan uses the hosted OpenRouter key — a local key is optional."
-        : uiIdForKeys === "xai" && !this.keyStates[uiIdForKeys]
-        ? "Paste an xAI key for BYOK, or use a signed-in paid plan with hosted Grok enabled by your administrator."
-        : discoveryProvider.hostedManaged
-        ? "Model aliases are managed securely by your administrator and require an active hosted plan. No provider key is stored on this computer."
-        : uiIdForKeys === "glm"
-        ? "Free OpenCode models only. Get a key at opencode.ai/auth."
-        : uiIdForKeys === "ollama"
-        ? "Select a locally installed Ollama model above."
-        : discoveryProvider.keyRequired && !this.keyStates[discoveryProvider.id]
-          ? "Paste and save an API key — models load automatically from the provider."
-          : "Models load automatically from the provider after the key is saved.");
+          ? "Free Models Router only. An active Hormachuelos plan uses the hosted OpenRouter key — a local key is optional."
+          : uiIdForKeys === "xai" && !this.keyStates[uiIdForKeys]
+            ? "Paste an xAI key for BYOK, or use a signed-in paid plan with hosted Grok enabled by your administrator."
+            : discoveryProvider.hostedManaged
+              ? "Model aliases are managed securely by your administrator and require an active hosted plan. No provider key is stored on this computer."
+              : uiIdForKeys === "glm"
+                ? "Free OpenCode models only. Get a key at opencode.ai/auth."
+                : uiIdForKeys === "ollama"
+                  ? "Select a locally installed Ollama model above."
+                  : discoveryProvider.keyRequired &&
+                      !this.keyStates[discoveryProvider.id]
+                    ? "Paste and save an API key — models load automatically from the provider."
+                    : "Models load automatically from the provider after the key is saved.");
     discoveryRow.appendChild(el("div", { class: "set-hint" }, [msg]));
     body.appendChild(discoveryRow);
 
-    body.appendChild(this.field("Base URL (optional)", () => {
-      const activeProvider = PROVIDERS.find((provider) => provider.id === this.settings.provider)!;
-      const inp = el("input", { class: "field", type: "text", value: this.settings.base_url || "", placeholder: activeProvider.defaultBaseUrl }) as HTMLInputElement;
-      if (activeProvider.id === "hormachuelos_free" || activeProvider.hostedManaged) {
-        inp.readOnly = true;
-        inp.setAttribute("aria-readonly", "true");
-      }
-      inp.addEventListener("input", () => (this.settings.base_url = inp.value || null));
-      return inp;
-    }));
+    body.appendChild(
+      this.field("Base URL (optional)", () => {
+        const activeProvider = PROVIDERS.find(
+          (provider) => provider.id === this.settings.provider,
+        )!;
+        const inp = el("input", {
+          class: "field",
+          type: "text",
+          value: this.settings.base_url || "",
+          placeholder: activeProvider.defaultBaseUrl,
+        }) as HTMLInputElement;
+        if (
+          activeProvider.id === "hormachuelos_free" ||
+          activeProvider.hostedManaged
+        ) {
+          inp.readOnly = true;
+          inp.setAttribute("aria-readonly", "true");
+        }
+        inp.addEventListener(
+          "input",
+          () => (this.settings.base_url = inp.value || null),
+        );
+        return inp;
+      }),
+    );
 
     // API key
     body.appendChild(this.section("API Key"));
-    const activeProvider = PROVIDERS.find((p) => p.id === this.settings.provider)!;
+    const activeProvider = PROVIDERS.find(
+      (p) => p.id === this.settings.provider,
+    )!;
     const keyRow = el("div", { class: "set-row" });
-    const showKeyField = activeProvider.keyRequired || activeProvider.id === "openrouter";
+    const showKeyField =
+      activeProvider.keyRequired || activeProvider.id === "openrouter";
     if (showKeyField) {
       const keyLabel = el("label", { class: "label" });
       const providerKeyId = this.nextFieldId();
       keyLabel.setAttribute("for", providerKeyId);
       keyLabel.innerHTML =
-        `<img class="provider-card-logo sm" src="${activeProvider.logoSrc}" alt="" width="14" height="14" draggable="false" />` +
+        `<img class="provider-card-logo sm" src="${escapeHtml(activeProvider.logoSrc)}" alt="" width="14" height="14" draggable="false" />` +
         `&nbsp;${escapeHtml(activeProvider.label)} API key` +
         (activeProvider.id === "openrouter" ? " (optional)" : "");
       keyRow.appendChild(keyLabel);
       const inputRow = el("div", { class: "set-key-row" });
-      const keyInput = el("input", { id: providerKeyId, class: "field", type: "password", placeholder: "Paste API key", value: "", autocomplete: "off" }) as HTMLInputElement;
+      const keyInput = el("input", {
+        id: providerKeyId,
+        class: "field",
+        type: "password",
+        placeholder: "Paste API key",
+        value: "",
+        autocomplete: "off",
+      }) as HTMLInputElement;
       inputRow.appendChild(keyInput);
       const saveBtn = el("button", { class: "btn sm" }, ["Save key"]);
-      const statusEl = el("div", { class: `set-status ${this.keyStates[activeProvider.id] ? "set" : "unset"}` });
+      const statusEl = el("div", {
+        class: `set-status ${this.keyStates[activeProvider.id] ? "set" : "unset"}`,
+      });
       statusEl.textContent = this.keyStates[activeProvider.id]
         ? "Key saved in OS keychain"
         : activeProvider.id === "xai"
@@ -1282,7 +1476,8 @@ export class SettingsModal {
           await api.setApiKey(activeProvider.id, v);
           this.keyStates[activeProvider.id] = true;
           keyInput.value = "";
-          this.modelDiscoveryMessages[activeProvider.id] = "Key saved — loading models…";
+          this.modelDiscoveryMessages[activeProvider.id] =
+            "Key saved — loading models…";
           this.render();
           await this.discoverModels(activeProvider.id);
         } catch (error) {
@@ -1295,7 +1490,11 @@ export class SettingsModal {
       keyRow.appendChild(inputRow);
       keyRow.appendChild(statusEl);
       if (this.keyStates[activeProvider.id]) {
-        const testBtn = el("button", { class: "btn sm", style: "margin-top:6px; margin-right:6px" }, ["Test connection"]);
+        const testBtn = el(
+          "button",
+          { class: "btn sm", style: "margin-top:6px; margin-right:6px" },
+          ["Test connection"],
+        );
         testBtn.addEventListener("click", async () => {
           testBtn.setAttribute("disabled", "disabled");
           testBtn.textContent = "Testing…";
@@ -1318,7 +1517,11 @@ export class SettingsModal {
           }
         });
         keyRow.appendChild(testBtn);
-        const clearBtn2 = el("button", { class: "btn sm danger", style: "margin-top:6px" }, ["Clear key"]);
+        const clearBtn2 = el(
+          "button",
+          { class: "btn sm danger", style: "margin-top:6px" },
+          ["Clear key"],
+        );
         clearBtn2.addEventListener("click", async () => {
           await api.clearApiKey(activeProvider.id);
           this.keyStates[activeProvider.id] = false;
@@ -1327,108 +1530,202 @@ export class SettingsModal {
         keyRow.appendChild(clearBtn2);
       }
       if (activeProvider.keyUrl) {
-        keyRow.appendChild(el("div", { class: "set-hint" }, [
-          activeProvider.id === "openrouter"
-            ? `Optional BYOK at ${activeProvider.keyUrl}. With a Hormachuelos plan, Free Models Router works without a local key.`
-            : activeProvider.id === "cursor"
-              ? `Optional Cursor key at ${activeProvider.keyUrl}. With a Hormachuelos plan, OpenAI works without a local key (uses Hormachuelos v3).`
-              : `Get a key at ${activeProvider.keyUrl}`,
-        ]));
+        keyRow.appendChild(
+          el("div", { class: "set-hint" }, [
+            activeProvider.id === "openrouter"
+              ? `Optional BYOK at ${activeProvider.keyUrl}. With a Hormachuelos plan, Free Models Router works without a local key.`
+              : activeProvider.id === "cursor"
+                ? `Optional Cursor key at ${activeProvider.keyUrl}. With a Hormachuelos plan, OpenAI works without a local key (uses Hormachuelos v3).`
+                : `Get a key at ${activeProvider.keyUrl}`,
+          ]),
+        );
       }
     } else {
-      const note = el("div", { class: "set-hint", style: "padding:8px 10px;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--fg-2)" });
-      note.textContent = activeProvider.id === "hormachuelos_free"
-        ? "Included for signed-in Hormachuelos users. Model credentials are protected by the hosted service and are never bundled with the app."
-        : activeProvider.hostedManaged
-          ? "This provider and its model aliases are managed in the Hormachuelos admin dashboard. Its upstream key stays on the hosted service; sign in with an active hosted plan to use it."
-          : `${activeProvider.label} does not require an API key. Just pick a model and start building.`;
+      const note = el("div", {
+        class: "set-hint",
+        style:
+          "padding:8px 10px;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--fg-2)",
+      });
+      note.textContent =
+        activeProvider.id === "hormachuelos_free"
+          ? "Included for signed-in Hormachuelos users. Model credentials are protected by the hosted service and are never bundled with the app."
+          : activeProvider.hostedManaged
+            ? "This provider and its model aliases are managed in the Hormachuelos admin dashboard. Its upstream key stays on the hosted service; sign in with an active hosted plan to use it."
+            : `${activeProvider.label} does not require an API key. Just pick a model and start building.`;
       keyRow.appendChild(note);
     }
     body.appendChild(keyRow);
 
     // Agent behavior
     body.appendChild(this.section("Agent"));
-    body.appendChild(this.field("Command timeout (seconds)", () => {
-      const inp = el("input", { class: "field", type: "number", value: String(this.settings.command_timeout_secs), min: "5", max: "600" }) as HTMLInputElement;
-      inp.addEventListener("input", () => (this.settings.command_timeout_secs = parseInt(inp.value) || 120));
-      return inp;
-    }));
+    body.appendChild(
+      this.field("Command timeout (seconds)", () => {
+        const inp = el("input", {
+          class: "field",
+          type: "number",
+          value: String(this.settings.command_timeout_secs),
+          min: "5",
+          max: "600",
+        }) as HTMLInputElement;
+        inp.addEventListener(
+          "input",
+          () =>
+            (this.settings.command_timeout_secs = parseInt(inp.value) || 120),
+        );
+        return inp;
+      }),
+    );
 
-    body.appendChild(this.field("Smart Agent", () => {
-      const wrap = el("label", { class: "set-check", style: "display:flex;align-items:center;gap:8px;cursor:pointer" });
-      const inp = el("input", { type: "checkbox" }) as HTMLInputElement;
-      inp.checked = this.settings.smart_agent_enabled !== false;
-      inp.addEventListener("change", () => {
-        this.settings.smart_agent_enabled = inp.checked;
-      });
-      wrap.appendChild(inp);
-      wrap.appendChild(document.createTextNode("Keep task plans, automatic recovery, and a final verification check"));
-      return wrap;
-    }));
-    body.appendChild(el("div", { class: "set-hint", style: "margin-top:-6px;margin-bottom:12px" }, [
-      "For build, fix, app, website, software, APK, and release work: keeps the same session moving and checks evidence before the AI says it is done. It never changes your selected provider, model, or API key.",
-    ]));
+    body.appendChild(
+      this.field("Smart Agent", () => {
+        const wrap = el("label", {
+          class: "set-check",
+          style: "display:flex;align-items:center;gap:8px;cursor:pointer",
+        });
+        const inp = el("input", { type: "checkbox" }) as HTMLInputElement;
+        inp.checked = this.settings.smart_agent_enabled !== false;
+        inp.addEventListener("change", () => {
+          this.settings.smart_agent_enabled = inp.checked;
+        });
+        wrap.appendChild(inp);
+        wrap.appendChild(
+          document.createTextNode(
+            "Keep task plans, automatic recovery, and a final verification check",
+          ),
+        );
+        return wrap;
+      }),
+    );
+    body.appendChild(
+      el(
+        "div",
+        { class: "set-hint", style: "margin-top:-6px;margin-bottom:12px" },
+        [
+          "For build, fix, app, website, software, APK, and release work: keeps the same session moving and checks evidence before the AI says it is done. It never changes your selected provider, model, or API key.",
+        ],
+      ),
+    );
 
-    body.appendChild(this.field("Flavour memory", () => {
-      const wrap = el("label", { class: "set-check", style: "display:flex;align-items:center;gap:8px;cursor:pointer" });
-      const inp = el("input", { type: "checkbox" }) as HTMLInputElement;
-      inp.checked = this.settings.flavour_enabled !== false;
-      inp.addEventListener("change", () => {
-        this.settings.flavour_enabled = inp.checked;
-      });
-      wrap.appendChild(inp);
-      wrap.appendChild(document.createTextNode("Learn and recall project preferences throughout every AI run"));
-      return wrap;
-    }));
-    body.appendChild(el("div", { class: "set-hint", style: "margin-top:-6px;margin-bottom:12px" }, [
-      "Flavour recalls a small relevant digest before, during, and after work. Shareable preferences live in .hormachuelos/flavour.json; detailed working memory stays private per project and session. Credentials and full tool output are never saved.",
-    ]));
+    body.appendChild(
+      this.field("Flavour memory", () => {
+        const wrap = el("label", {
+          class: "set-check",
+          style: "display:flex;align-items:center;gap:8px;cursor:pointer",
+        });
+        const inp = el("input", { type: "checkbox" }) as HTMLInputElement;
+        inp.checked = this.settings.flavour_enabled !== false;
+        inp.addEventListener("change", () => {
+          this.settings.flavour_enabled = inp.checked;
+        });
+        wrap.appendChild(inp);
+        wrap.appendChild(
+          document.createTextNode(
+            "Learn and recall project preferences throughout every AI run",
+          ),
+        );
+        return wrap;
+      }),
+    );
+    body.appendChild(
+      el(
+        "div",
+        { class: "set-hint", style: "margin-top:-6px;margin-bottom:12px" },
+        [
+          "Flavour recalls a small relevant digest before, during, and after work. Shareable preferences live in .hormachuelos/flavour.json; detailed working memory stays private per project and session. Credentials and full tool output are never saved.",
+        ],
+      ),
+    );
 
-    body.appendChild(this.field("Permission mode", () => {
-      const sel = el("select", { class: "field" }) as HTMLSelectElement;
-      for (const [value, label] of [
-        ["plan", "Plan — refine request, suggest options, numbered plan, then execute with full permissions"],
-        ["auto", "Auto — build with defaults; confirm delete/kill/outside project"],
-        ["ask", "Ask — investigate code with evidence; reads free, writes need Approve"],
-        ["full", "Full — maximum autonomy, zero desktop prompts"],
-        ["multi_agent", "Multi-Agent — Ship permission; independent workspace checks run together"],
-      ] as const) {
-        const opt = el("option", { value }, [label]);
-        if ((this.settings.permission_mode || "plan") === value) opt.setAttribute("selected", "selected");
-        sel.appendChild(opt);
-      }
-      sel.addEventListener("change", () => {
-        this.settings.permission_mode = sel.value;
-        this.settings.auto_approve =
-          sel.value === "auto" || sel.value === "full" || sel.value === "multi_agent";
-      });
-      return sel;
-    }));
-    body.appendChild(el("div", { class: "set-hint", style: "margin-top:-6px;margin-bottom:12px" }, [
-      "Plan: improve brief, options, then execute with Ship-level permissions. Ask: explore & answer with evidence (reads free). Auto: implement in-project quickly. Full: no tool prompts. Multi-Agent: Ship-level access with safe independent workspace checks started together. Same switch sits next to the chat box.",
-    ]));
+    body.appendChild(
+      this.field("Permission mode", () => {
+        const sel = el("select", { class: "field" }) as HTMLSelectElement;
+        for (const [value, label] of [
+          [
+            "plan",
+            "Plan — refine request, suggest options, numbered plan, then execute with full permissions",
+          ],
+          [
+            "auto",
+            "Auto — build with defaults; confirm delete/kill/outside project",
+          ],
+          [
+            "ask",
+            "Ask — investigate code with evidence; reads free, writes need Approve",
+          ],
+          ["full", "Full — maximum autonomy, zero desktop prompts"],
+          [
+            "multi_agent",
+            "Multi-Agent — Ship permission; independent workspace checks run together",
+          ],
+        ] as const) {
+          const opt = el("option", { value }, [label]);
+          if ((this.settings.permission_mode || "plan") === value)
+            opt.setAttribute("selected", "selected");
+          sel.appendChild(opt);
+        }
+        sel.addEventListener("change", () => {
+          this.settings.permission_mode = sel.value;
+          this.settings.auto_approve =
+            sel.value === "auto" ||
+            sel.value === "full" ||
+            sel.value === "multi_agent";
+        });
+        return sel;
+      }),
+    );
+    body.appendChild(
+      el(
+        "div",
+        { class: "set-hint", style: "margin-top:-6px;margin-bottom:12px" },
+        [
+          "Plan: improve brief, options, then execute with Ship-level permissions. Ask: explore & answer with evidence (reads free). Auto: implement in-project quickly. Full: no tool prompts. Multi-Agent: Ship-level access with safe independent workspace checks started together. Same switch sits next to the chat box.",
+        ],
+      ),
+    );
 
     body.appendChild(this.renderComputerUsePanel());
 
-    body.appendChild(this.field("Taglish replies", () => {
-      const wrap = el("label", { class: "set-check", style: "display:flex;align-items:center;gap:8px;cursor:pointer" });
-      const inp = el("input", { type: "checkbox" }) as HTMLInputElement;
-      inp.checked = !!this.settings.taglish;
-      inp.addEventListener("change", () => {
-        this.settings.taglish = inp.checked;
-      });
-      wrap.appendChild(inp);
-      wrap.appendChild(document.createTextNode("Mix English + Filipino in agent replies"));
-      return wrap;
-    }));
-    body.appendChild(el("div", { class: "set-hint", style: "margin-top:-6px;margin-bottom:12px" }, [
-      "Built for PH freelancers and students. Technical terms stay in English.",
-    ]));
+    body.appendChild(
+      this.field("Taglish replies", () => {
+        const wrap = el("label", {
+          class: "set-check",
+          style: "display:flex;align-items:center;gap:8px;cursor:pointer",
+        });
+        const inp = el("input", { type: "checkbox" }) as HTMLInputElement;
+        inp.checked = !!this.settings.taglish;
+        inp.addEventListener("change", () => {
+          this.settings.taglish = inp.checked;
+        });
+        wrap.appendChild(inp);
+        wrap.appendChild(
+          document.createTextNode("Mix English + Filipino in agent replies"),
+        );
+        return wrap;
+      }),
+    );
+    body.appendChild(
+      el(
+        "div",
+        { class: "set-hint", style: "margin-top:-6px;margin-bottom:12px" },
+        [
+          "Built for PH freelancers and students. Technical terms stay in English.",
+        ],
+      ),
+    );
 
     // Subscription / GCash license
     body.appendChild(this.section("Subscription · GCash"));
     const licensePanel = el("div", { class: "set-license-panel" });
-    const licenseStatus = el("div", { class: "set-hint", style: "margin-bottom:8px", role: "status", "aria-live": "polite" }, ["Loading license…"]);
+    const licenseStatus = el(
+      "div",
+      {
+        class: "set-hint",
+        style: "margin-bottom:8px",
+        role: "status",
+        "aria-live": "polite",
+      },
+      ["Loading license…"],
+    );
     const licenseKeyRow = el("div", { class: "set-key-row" });
     const keyInput = el("input", {
       class: "field",
@@ -1437,13 +1734,22 @@ export class SettingsModal {
       autocomplete: "off",
       "aria-label": "License key",
     }) as HTMLInputElement;
-    const applyBtn = el("button", { class: "btn sm" }, ["Activate"]) as HTMLButtonElement;
-    const topUpBtn = el("button", { class: "btn sm primary" }, ["Mag-load (GCash)"]) as HTMLButtonElement;
+    const applyBtn = el("button", { class: "btn sm" }, [
+      "Activate",
+    ]) as HTMLButtonElement;
+    const topUpBtn = el("button", { class: "btn sm primary" }, [
+      "Mag-load (GCash)",
+    ]) as HTMLButtonElement;
     const paintLicense = async () => {
       try {
         const lic = await api.getLicenseStatus();
         const planPct = lic.tokenBudget
-          ? Math.max(0, Math.round(((lic.tokenBudget - lic.tokensUsed) / lic.tokenBudget) * 100))
+          ? Math.max(
+              0,
+              Math.round(
+                ((lic.tokenBudget - lic.tokensUsed) / lic.tokenBudget) * 100,
+              ),
+            )
           : 100;
         const u4 = Math.max(0, Number(lic.window4hUsed) || 0);
         const uw = Math.max(0, Number(lic.windowWeekUsed) || 0);
@@ -1453,7 +1759,23 @@ export class SettingsModal {
           ` · Recent activity: ${u4.toLocaleString()} tokens / 4h, ${uw.toLocaleString()} tokens / 7d` +
           " · Only the plan wallet controls access.";
         topUpBtn.onclick = () => {
-          window.open(lic.topUpUrl || "https://hormachuelos.com/#/pricing", "_blank", "noopener");
+          // Only open trusted hormachuelos origins; anything else falls back
+          // to the canonical pricing page via the validated Rust opener.
+          const requested = String(lic.topUpUrl || "").trim();
+          let target = "https://hormachuelos.com/#/pricing";
+          try {
+            const url = new URL(requested || target);
+            if (
+              url.protocol === "https:" &&
+              (url.hostname === "hormachuelos.vercel.app" ||
+                url.hostname === "hormachuelos.com")
+            ) {
+              target = url.toString();
+            }
+          } catch {
+            /* keep the safe fallback */
+          }
+          void api.openExternalUrl(target).catch(() => {});
         };
       } catch {
         licenseStatus.textContent = "License status unavailable.";
@@ -1476,32 +1798,42 @@ export class SettingsModal {
     licenseKeyRow.appendChild(applyBtn);
     licensePanel.appendChild(licenseStatus);
     licensePanel.appendChild(licenseKeyRow);
-    licensePanel.appendChild(el("div", { style: "margin-top:8px" }, [topUpBtn]));
+    licensePanel.appendChild(
+      el("div", { style: "margin-top:8px" }, [topUpBtn]),
+    );
     body.appendChild(licensePanel);
     void paintLicense();
 
     // Connected accounts — GitHub, Supabase, Vercel, …
     body.appendChild(this.section("Integrations"));
-    body.appendChild(el("div", { class: "set-hint", style: "margin-bottom:12px" }, [
-      "Connect GitHub, Supabase, Vercel, and more. Tokens stay in the OS keyring and are supplied only to the matching integration command.",
-    ]));
+    body.appendChild(
+      el("div", { class: "set-hint", style: "margin-bottom:12px" }, [
+        "Connect GitHub, Supabase, Vercel, and more. Tokens stay in the OS keyring and are supplied only to the matching integration command.",
+      ]),
+    );
     body.appendChild(this.renderIntegrationsPanel());
 
     modal.appendChild(body);
 
     // Footer
     const foot = el("div", { class: "modal-foot" });
-    const cancelBtn = el("button", { class: "btn", type: "button" }, ["Cancel"]);
+    const cancelBtn = el("button", { class: "btn", type: "button" }, [
+      "Cancel",
+    ]);
     cancelBtn.addEventListener("click", (e) => {
       e.preventDefault();
       e.stopPropagation();
       this.close();
     });
-    const saveAllBtn = el("button", { class: "btn primary", type: "button" }, ["Save"]);
+    const saveAllBtn = el("button", { class: "btn primary", type: "button" }, [
+      "Save",
+    ]);
     saveAllBtn.addEventListener("click", async (e) => {
       e.preventDefault();
       e.stopPropagation();
-      this.settings.permission_mode = (this.settings.permission_mode || "plan").toLowerCase();
+      this.settings.permission_mode = (
+        this.settings.permission_mode || "plan"
+      ).toLowerCase();
       this.settings.auto_approve =
         this.settings.permission_mode === "auto" ||
         this.settings.permission_mode === "full" ||
@@ -1530,16 +1862,21 @@ export class SettingsModal {
   }
 
   private section(label: string): HTMLElement {
-    return el("div", { class: "sb-section-label", style: "margin: 4px 0 10px; padding: 0" }, [label.toUpperCase()]);
+    return el(
+      "div",
+      { class: "sb-section-label", style: "margin: 4px 0 10px; padding: 0" },
+      [label.toUpperCase()],
+    );
   }
 
   private renderComputerUsePanel(): HTMLElement {
     const status = this.computerUseStatus;
     const supported = status?.supported ?? false;
     const enabled = supported && !!this.settings.computer_use_enabled;
-    const warningText = (isEnabled: boolean) => isEnabled
-      ? "Full desktop control is enabled with zero approval prompts. A live cursor + typing FX overlay follows every action. Emergency stop: Ctrl+Alt+Esc."
-      : "Computer use is off. Enable it to allow desktop actions. Emergency stop: Ctrl+Alt+Esc.";
+    const warningText = (isEnabled: boolean) =>
+      isEnabled
+        ? "Full desktop control is enabled with zero approval prompts. A live cursor + typing FX overlay follows every action. Emergency stop: Ctrl+Alt+Esc."
+        : "Computer use is off. Enable it to allow desktop actions. Emergency stop: Ctrl+Alt+Esc.";
     const panel = el("section", {
       class: "computer-use-panel",
       "aria-labelledby": "computer-use-title",
@@ -1548,10 +1885,14 @@ export class SettingsModal {
     const head = el("div", { class: "computer-use-head" });
     const titleWrap = el("div", { class: "computer-use-title-wrap" });
     titleWrap.appendChild(
-      el("div", { class: "computer-use-title", id: "computer-use-title" }, ["Computer use"]),
+      el("div", { class: "computer-use-title", id: "computer-use-title" }, [
+        "Computer use",
+      ]),
     );
     titleWrap.appendChild(
-      el("div", { class: "computer-use-subtitle" }, ["Windows desktop control for any provider"]),
+      el("div", { class: "computer-use-subtitle" }, [
+        "Windows desktop control for any provider",
+      ]),
     );
     head.appendChild(titleWrap);
 
@@ -1596,7 +1937,11 @@ export class SettingsModal {
     });
     toggle.appendChild(input);
     const toggleCopy = el("span", { class: "computer-use-toggle-copy" });
-    toggleCopy.appendChild(el("span", { class: "computer-use-toggle-label" }, ["Enable computer use"]));
+    toggleCopy.appendChild(
+      el("span", { class: "computer-use-toggle-label" }, [
+        "Enable computer use",
+      ]),
+    );
     toggleCopy.appendChild(
       el("span", { class: "computer-use-toggle-note" }, [
         supported
@@ -1619,13 +1964,16 @@ export class SettingsModal {
 
     const controls = el("div", { class: "computer-use-controls" });
     const shortcut = status?.emergencyShortcut || "Ctrl+Alt+Esc";
-    const emergencyText = status?.emergencyShortcutAvailable === false
-      ? `${shortcut} could not be registered. Use the pause button to stop desktop actions.`
-      : `Emergency stop: press ${shortcut} to pause desktop actions immediately.`;
+    const emergencyText =
+      status?.emergencyShortcutAvailable === false
+        ? `${shortcut} could not be registered. Use the pause button to stop desktop actions.`
+        : `Emergency stop: press ${shortcut} to pause desktop actions immediately.`;
     controls.appendChild(
-      el("div", { class: "computer-use-emergency", id: "computer-use-emergency" }, [
-        emergencyText,
-      ]),
+      el(
+        "div",
+        { class: "computer-use-emergency", id: "computer-use-emergency" },
+        [emergencyText],
+      ),
     );
 
     if (supported && status) {
@@ -1634,7 +1982,9 @@ export class SettingsModal {
         {
           class: `btn sm ${status.paused ? "primary" : ""}`,
           type: "button",
-          "aria-label": status.paused ? "Resume computer use" : "Pause computer use",
+          "aria-label": status.paused
+            ? "Resume computer use"
+            : "Pause computer use",
         },
         [status.paused ? "Resume" : "Pause"],
       ) as HTMLButtonElement;
@@ -1642,7 +1992,9 @@ export class SettingsModal {
         pauseButton.disabled = true;
         pauseButton.textContent = status.paused ? "Resuming…" : "Pausing…";
         try {
-          this.computerUseStatus = await api.setComputerUsePaused(!status.paused);
+          this.computerUseStatus = await api.setComputerUsePaused(
+            !status.paused,
+          );
           const replacement = this.renderComputerUsePanel();
           panel.replaceWith(replacement);
           window.requestAnimationFrame(() => {
@@ -1699,39 +2051,61 @@ export class SettingsModal {
         ]),
       );
 
-      const tokenRow = el("div", { class: "set-key-row", style: "margin-top:8px" });
+      const tokenRow = el("div", {
+        class: "set-key-row",
+        style: "margin-top:8px",
+      });
       const tokenInput = el("input", {
         class: "field",
         type: "password",
-        placeholder: svc.connected ? "••••••••  (paste to replace)" : svc.tokenLabel,
+        placeholder: svc.connected
+          ? "••••••••  (paste to replace)"
+          : svc.tokenLabel,
         value: "",
         autocomplete: "off",
         "data-integration-secret": "true",
         "aria-label": `${svc.label} credential (stored directly in the OS keyring)`,
       }) as HTMLInputElement;
-      tokenInput.addEventListener("input", () => {
-        if (this.requestedIntegrationId === svc.id) {
-          this.requestedIntegrationId = undefined;
-        }
-      }, { once: true });
+      tokenInput.addEventListener(
+        "input",
+        () => {
+          if (this.requestedIntegrationId === svc.id) {
+            this.requestedIntegrationId = undefined;
+          }
+        },
+        { once: true },
+      );
       tokenRow.appendChild(tokenInput);
 
-      const saveBtn = el("button", { class: "btn sm primary", type: "button" }, ["Save"]) as HTMLButtonElement;
-      const browserBtn = el(
+      const saveBtn = el(
         "button",
-        { class: "btn sm", type: "button" },
-        [svc.id === "github" ? "Browser login" : "Secure connect"],
+        { class: "btn sm primary", type: "button" },
+        ["Save"],
       ) as HTMLButtonElement;
-      const testBtn = el("button", { class: "btn sm", type: "button" }, ["Test"]) as HTMLButtonElement;
-      const clearBtn = el("button", { class: "btn sm", type: "button" }, ["Clear"]) as HTMLButtonElement;
-      const link = el("a", {
-        class: "btn sm",
-        href: svc.docsUrl,
-        target: "_blank",
-        rel: "noopener noreferrer",
-      }, ["Get token"]);
+      const browserBtn = el("button", { class: "btn sm", type: "button" }, [
+        svc.id === "github" ? "Browser login" : "Secure connect",
+      ]) as HTMLButtonElement;
+      const testBtn = el("button", { class: "btn sm", type: "button" }, [
+        "Test",
+      ]) as HTMLButtonElement;
+      const clearBtn = el("button", { class: "btn sm", type: "button" }, [
+        "Clear",
+      ]) as HTMLButtonElement;
+      const link = el(
+        "a",
+        {
+          class: "btn sm",
+          href: svc.docsUrl,
+          target: "_blank",
+          rel: "noopener noreferrer",
+        },
+        ["Get token"],
+      );
 
-      const statusEl = el("div", { class: "set-status unset", style: "margin-top:6px" });
+      const statusEl = el("div", {
+        class: "set-status unset",
+        style: "margin-top:6px",
+      });
 
       browserBtn.addEventListener("click", async () => {
         browserBtn.setAttribute("disabled", "disabled");
@@ -1755,7 +2129,8 @@ export class SettingsModal {
           statusEl.textContent = String(e);
         } finally {
           browserBtn.removeAttribute("disabled");
-          browserBtn.textContent = svc.id === "github" ? "Browser login" : "Secure connect";
+          browserBtn.textContent =
+            svc.id === "github" ? "Browser login" : "Secure connect";
         }
       });
 
@@ -1770,10 +2145,12 @@ export class SettingsModal {
         try {
           await api.setIntegrationToken(svc.id, v);
           const extras: Record<string, string> = {};
-          card.querySelectorAll<HTMLInputElement>("[data-extra-key]").forEach((inp) => {
-            const k = inp.getAttribute("data-extra-key");
-            if (k && inp.value.trim()) extras[k] = inp.value.trim();
-          });
+          card
+            .querySelectorAll<HTMLInputElement>("[data-extra-key]")
+            .forEach((inp) => {
+              const k = inp.getAttribute("data-extra-key");
+              if (k && inp.value.trim()) extras[k] = inp.value.trim();
+            });
           if (Object.keys(extras).length) {
             await api.setIntegrationExtras(svc.id, extras);
           }
@@ -1826,7 +2203,10 @@ export class SettingsModal {
       card.appendChild(tokenRow);
 
       if (svc.id === "supabase") {
-        const extraRow = el("div", { class: "set-key-row", style: "margin-top:6px" });
+        const extraRow = el("div", {
+          class: "set-key-row",
+          style: "margin-top:6px",
+        });
         extraRow.appendChild(
           el("input", {
             class: "field",
@@ -1850,7 +2230,10 @@ export class SettingsModal {
         card.appendChild(extraRow);
       }
       if (svc.id === "vercel") {
-        const extraRow = el("div", { class: "set-key-row", style: "margin-top:6px" });
+        const extraRow = el("div", {
+          class: "set-key-row",
+          style: "margin-top:6px",
+        });
         extraRow.appendChild(
           el("input", {
             class: "field",
@@ -1925,7 +2308,8 @@ export class SettingsModal {
       console.warn("settings onClose failed", e);
     }
     window.requestAnimationFrame(() => {
-      if (restoreFocus?.isConnected) restoreFocus.focus({ preventScroll: true });
+      if (restoreFocus?.isConnected)
+        restoreFocus.focus({ preventScroll: true });
     });
   }
 }

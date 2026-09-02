@@ -1625,6 +1625,20 @@ pub async fn run_loop(
     // Exception: when no Cursor `crsr_…` key is saved but a Hormachuelos plan
     // is active, fall through to hosted OpenAI-compatible models so friends
     // installing the app are not blocked on a personal Cursor key.
+    // PI mode — the local pi CLI agent owns its models, tools, and session
+    // memory; the host only renders its JSON activity.
+    if settings.permission_mode.trim().eq_ignore_ascii_case("pi") {
+        crate::pi_cli::run_pi_turn(
+            app.as_ref().clone(),
+            &project_root,
+            &prompt,
+            &session_id,
+            run,
+        )
+        .await?;
+        return Ok(None);
+    }
+
     let mut settings = settings;
     settings.model_effort = execution_profile
         .model_effort(&model_effort_for_task(&settings.model_effort, task_profile));
@@ -3293,7 +3307,7 @@ fn normalized_permission_mode(mode: &str) -> String {
     match mode.trim().to_ascii_lowercase().as_str() {
         // Legacy "research" sessions/settings map to ask.
         "ask" | "research" => "ask".into(),
-        "plan" | "auto" | "full" | "multi_agent" => mode.trim().to_ascii_lowercase(),
+        "plan" | "auto" | "full" | "multi_agent" | "pi" => mode.trim().to_ascii_lowercase(),
         _ => "plan".into(),
     }
 }

@@ -14,7 +14,7 @@ export type SessionMessage =
   /** Restores the visual run mode when a transcript is opened again. */
   | {
       type: "run_start";
-      permissionMode: "plan" | "multi_agent";
+      permissionMode: "plan" | "multi_agent" | "pi";
       executionProfile?: "fast" | "balanced" | "thorough" | "safe";
       at?: number;
     }
@@ -23,9 +23,34 @@ export type SessionMessage =
   | { type: "thinking"; iteration: number; text: string; at?: number }
   | { type: "assistant"; text: string; at?: number }
   | { type: "tool_call"; id: string; name: string; arguments: any; at?: number }
-  | { type: "tool_result"; id: string; name: string; ok: boolean; content: string; at?: number }
-  | { type: "question"; id: string; question: string; options: string[]; allow_other: boolean; answer: string | null; at?: number }
-  | { type: "done"; summary: string; title: string; description: string; files: string[]; tech: string[]; features: string[]; at?: number; workMs?: number }
+  | {
+      type: "tool_result";
+      id: string;
+      name: string;
+      ok: boolean;
+      content: string;
+      at?: number;
+    }
+  | {
+      type: "question";
+      id: string;
+      question: string;
+      options: string[];
+      allow_other: boolean;
+      answer: string | null;
+      at?: number;
+    }
+  | {
+      type: "done";
+      summary: string;
+      title: string;
+      description: string;
+      files: string[];
+      tech: string[];
+      features: string[];
+      at?: number;
+      workMs?: number;
+    }
   | { type: "end"; reason: string; at?: number; workMs?: number }
   | { type: "cancelled"; at?: number; workMs?: number };
 
@@ -76,7 +101,10 @@ export function appendAssistantTranscriptChunk(
   }
 
   if (assistantIndex >= 0) {
-    const message = messages[assistantIndex] as Extract<SessionMessage, { type: "assistant" }>;
+    const message = messages[assistantIndex] as Extract<
+      SessionMessage,
+      { type: "assistant" }
+    >;
     message.text += text;
     message.at = at;
     return;
@@ -192,7 +220,8 @@ const PROJECT_USAGE_KEY = "ai-forge:project-usage";
 const SESSION_SAVE_DELAY_MS = 300;
 const pendingSessionSaves = new Map<string, Session>();
 let sessionSaveTimer: ReturnType<typeof setTimeout> | null = null;
-const CREDENTIAL_REDACTION = "[credential removed — enter it only in Settings → Integrations]";
+const CREDENTIAL_REDACTION =
+  "[credential removed — enter it only in Settings → Integrations]";
 const PREFIXED_CREDENTIAL =
   /\b(?:gh[pousr]_[a-z0-9_]{16,}|github_pat_[a-z0-9_]{16,}|glpat-[a-z0-9_-]{16,}|vercel_[a-z0-9_-]{16,}|sk-[a-z0-9_-]{16,}|eyJ[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}\.[a-z0-9_-]{8,})\b/gi;
 const CONTEXTUAL_CREDENTIAL =
@@ -204,10 +233,10 @@ const SESSION_PREVIEW_URL_MAX = 4_096;
 const SESSION_PREVIEW_ROOT_MAX = 2_048;
 
 function projectPathKey(value: unknown): string {
-  let path = String(value || "").trim().replace(/\//g, "\\");
-  path = path
-    .replace(/^\\\\\?\\UNC\\/i, "\\\\")
-    .replace(/^\\\\\?\\/, "");
+  let path = String(value || "")
+    .trim()
+    .replace(/\//g, "\\");
+  path = path.replace(/^\\\\\?\\UNC\\/i, "\\\\").replace(/^\\\\\?\\/, "");
   return path.replace(/[\\/]+$/, "").toLocaleLowerCase();
 }
 
@@ -232,7 +261,10 @@ function redactCredentialValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(redactCredentialValue);
   if (value && typeof value === "object") {
     return Object.fromEntries(
-      Object.entries(value).map(([key, entry]) => [key, redactCredentialValue(entry)]),
+      Object.entries(value).map(([key, entry]) => [
+        key,
+        redactCredentialValue(entry),
+      ]),
     );
   }
   return value;
@@ -240,7 +272,11 @@ function redactCredentialValue(value: unknown): unknown {
 
 function typedCharacterCount(args: Record<string, unknown>): number {
   const declared = args.characters;
-  if (typeof declared === "number" && Number.isFinite(declared) && declared >= 0) {
+  if (
+    typeof declared === "number" &&
+    Number.isFinite(declared) &&
+    declared >= 0
+  ) {
     return Math.floor(declared);
   }
   const text = typeof args.text === "string" ? args.text : "";
@@ -258,7 +294,8 @@ export function redactToolArguments(name: string, value: unknown): unknown {
     redacted && typeof redacted === "object" && !Array.isArray(redacted)
       ? { ...(redacted as Record<string, unknown>) }
       : {};
-  if ("observation_token" in args) args.observation_token = "[fresh observation]";
+  if ("observation_token" in args)
+    args.observation_token = "[fresh observation]";
   if (name.trim().toLowerCase() === "computer_type_text") {
     const characters = typedCharacterCount(args);
     args.text = `[hidden · ${characters} characters]`;
@@ -285,12 +322,15 @@ function safeMultiAgentToolText(value: unknown, max: number): string {
  * not an additional tool invocation, so it can safely be replayed after a
  * project or session switch.
  */
-export function snapshotMultiAgentTools(value: unknown): SessionMultiAgentTool[] {
+export function snapshotMultiAgentTools(
+  value: unknown,
+): SessionMultiAgentTool[] {
   if (!Array.isArray(value)) return [];
   const tools: SessionMultiAgentTool[] = [];
   const seenIds = new Set<string>();
   for (const candidate of value.slice(0, MULTI_AGENT_BATCH_MAX_TOOLS)) {
-    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate))
+      continue;
     const raw = candidate as Record<string, unknown>;
     const id = safeMultiAgentToolText(raw.id, MULTI_AGENT_TOOL_ID_MAX);
     const name = safeMultiAgentToolText(raw.name, MULTI_AGENT_TOOL_NAME_MAX);
@@ -305,10 +345,13 @@ export function snapshotMultiAgentTools(value: unknown): SessionMultiAgentTool[]
   return tools;
 }
 
-export function normalizeSessionPermissionMode(value: unknown): "plan" | "multi_agent" {
-  return String(value || "").trim().toLowerCase() === "multi_agent"
-    ? "multi_agent"
-    : "plan";
+export function normalizeSessionPermissionMode(
+  value: unknown,
+): "plan" | "multi_agent" | "pi" {
+  const mode = String(value || "")
+    .trim()
+    .toLowerCase();
+  return mode === "multi_agent" || mode === "pi" ? mode : "plan";
 }
 
 function redactSessionMessage(message: SessionMessage): SessionMessage {
@@ -362,9 +405,11 @@ function redactSessionMessage(message: SessionMessage): SessionMessage {
 function sanitizePreviewPath(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const raw = value.trim().replace(/\\/g, "/");
-  if (!raw || raw.length > SESSION_PREVIEW_PATH_MAX || raw.includes("\0")) return null;
+  if (!raw || raw.length > SESSION_PREVIEW_PATH_MAX || raw.includes("\0"))
+    return null;
   // A live dev server (localhost) can be previewed directly in the iframe.
-  if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(raw)) return raw;
+  if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(raw))
+    return raw;
   if (raw.startsWith("/") || /^[a-z]:/i.test(raw)) return null;
   const parts: string[] = [];
   for (const part of raw.split("/")) {
@@ -384,32 +429,51 @@ function sanitizePreviewPath(value: unknown): string | null {
 function sanitizeBrowserUrl(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const raw = value.trim();
-  if (!raw || raw.length > SESSION_PREVIEW_URL_MAX || raw.includes("\0")) return null;
+  if (!raw || raw.length > SESSION_PREVIEW_URL_MAX || raw.includes("\0"))
+    return null;
   try {
     const url = new URL(raw);
-    if (!/^https?:$/.test(url.protocol) || !url.hostname || url.username || url.password) return null;
+    if (
+      !/^https?:$/.test(url.protocol) ||
+      !url.hostname ||
+      url.username ||
+      url.password
+    )
+      return null;
     return url.toString();
   } catch {
     return null;
   }
 }
 
-function sanitizeSessionPreview(value: unknown): SessionPreviewState | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+function sanitizeSessionPreview(
+  value: unknown,
+): SessionPreviewState | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return undefined;
   const raw = value as Record<string, unknown>;
-  const projectRoot = typeof raw.projectRoot === "string" ? raw.projectRoot.trim() : "";
-  if (!projectRoot || projectRoot.length > SESSION_PREVIEW_ROOT_MAX || projectRoot.includes("\0")) {
+  const projectRoot =
+    typeof raw.projectRoot === "string" ? raw.projectRoot.trim() : "";
+  if (
+    !projectRoot ||
+    projectRoot.length > SESSION_PREVIEW_ROOT_MAX ||
+    projectRoot.includes("\0")
+  ) {
     return undefined;
   }
 
   const tabs: SessionPreviewTab[] = [];
   const seenEntries = new Set<string>();
-  const rawTabs = Array.isArray(raw.tabs) ? raw.tabs.slice(0, SESSION_PREVIEW_MAX_TABS) : [];
+  const rawTabs = Array.isArray(raw.tabs)
+    ? raw.tabs.slice(0, SESSION_PREVIEW_MAX_TABS)
+    : [];
   for (const candidate of rawTabs) {
-    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate))
+      continue;
     const tab = candidate as Record<string, unknown>;
     const kind = tab.kind === "browser" ? "browser" : "preview";
-    const sanitizeEntry = kind === "browser" ? sanitizeBrowserUrl : sanitizePreviewPath;
+    const sanitizeEntry =
+      kind === "browser" ? sanitizeBrowserUrl : sanitizePreviewPath;
     const rawHistory = Array.isArray(tab.history)
       ? tab.history.slice(0, SESSION_PREVIEW_MAX_HISTORY)
       : [];
@@ -422,10 +486,14 @@ function sanitizeSessionPreview(value: unknown): SessionPreviewState | undefined
     seenEntries.add(entryKey);
     if (!history.length) history.push(entryPath);
     const requestedIndex = Math.floor(Number(tab.historyIndex) || 0);
-    const historyIndex = Math.max(0, Math.min(history.length - 1, requestedIndex));
-    const title = typeof tab.title === "string" && tab.title.trim()
-      ? redactChatCredentials(tab.title.trim()).slice(0, 160)
-      : entryPath.split("/").pop() || entryPath;
+    const historyIndex = Math.max(
+      0,
+      Math.min(history.length - 1, requestedIndex),
+    );
+    const title =
+      typeof tab.title === "string" && tab.title.trim()
+        ? redactChatCredentials(tab.title.trim()).slice(0, 160)
+        : entryPath.split("/").pop() || entryPath;
     tabs.push({
       kind,
       entryPath: history[historyIndex] || entryPath,
@@ -468,30 +536,41 @@ function clipSmartAgentText(value: unknown, fallback = ""): string {
 }
 
 /** Bound and sanitize persisted Smart Agent state before restoring it into the UI. */
-export function sanitizeSmartAgentTaskState(value: unknown): SmartAgentTaskState | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+export function sanitizeSmartAgentTaskState(
+  value: unknown,
+): SmartAgentTaskState | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return undefined;
   const raw = value as Record<string, unknown>;
-  const rawSteps = Array.isArray(raw.steps) ? raw.steps.slice(0, SMART_AGENT_MAX_STEPS) : [];
+  const rawSteps = Array.isArray(raw.steps)
+    ? raw.steps.slice(0, SMART_AGENT_MAX_STEPS)
+    : [];
   const steps: SmartAgentTaskStep[] = [];
   const seen = new Set<string>();
   for (const candidate of rawSteps) {
-    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate))
+      continue;
     const step = candidate as Record<string, unknown>;
     const id = typeof step.id === "string" ? step.id.trim().toLowerCase() : "";
     if (!SMART_AGENT_STEP_IDS.has(id) || seen.has(id)) continue;
     const label = clipSmartAgentText(step.label, id);
     const requested = typeof step.state === "string" ? step.state : "pending";
     const state: SmartAgentStepState =
-      requested === "active" || requested === "completed" || requested === "paused"
+      requested === "active" ||
+      requested === "completed" ||
+      requested === "paused"
         ? requested
         : "pending";
     seen.add(id);
     steps.push({ id, label, state });
   }
   if (!steps.length) return undefined;
-  const requestedStatus = typeof raw.status === "string" ? raw.status : "working";
+  const requestedStatus =
+    typeof raw.status === "string" ? raw.status : "working";
   const status: SmartAgentTaskState["status"] =
-    requestedStatus === "completed" || requestedStatus === "paused" ? requestedStatus : "working";
+    requestedStatus === "completed" || requestedStatus === "paused"
+      ? requestedStatus
+      : "working";
   const requestedStep = Math.floor(Number(raw.activeStep) || 0);
   return {
     version: 1,
@@ -587,13 +666,19 @@ export function loadSessions(projectId: string): Session[] {
   }
 }
 
-function rehomeProjectUsage(previousProjectId: string, nextProjectId: string): void {
+function rehomeProjectUsage(
+  previousProjectId: string,
+  nextProjectId: string,
+): void {
   try {
     const map = loadProjectUsageMap();
     let usage = 0;
     let moved = false;
     for (const [projectId, value] of Object.entries(map)) {
-      if (!sameProjectPath(projectId, previousProjectId) && !sameProjectPath(projectId, nextProjectId)) {
+      if (
+        !sameProjectPath(projectId, previousProjectId) &&
+        !sameProjectPath(projectId, nextProjectId)
+      ) {
         continue;
       }
       // Equivalent path spellings can coexist after an older release. Keep
@@ -616,9 +701,16 @@ function rehomeProjectUsage(previousProjectId: string, nextProjectId: string): v
  * direct-parent project root. Preview state tied to the empty folder is
  * deliberately discarded; it cannot safely represent the repaired project.
  */
-export function rehomeSessionsToProjectRoot(previousProjectId: string, nextProjectId: string): Session[] {
+export function rehomeSessionsToProjectRoot(
+  previousProjectId: string,
+  nextProjectId: string,
+): Session[] {
   const next = String(nextProjectId || "").trim();
-  if (!projectPathKey(previousProjectId) || !projectPathKey(next) || sameProjectPath(previousProjectId, next)) {
+  if (
+    !projectPathKey(previousProjectId) ||
+    !projectPathKey(next) ||
+    sameProjectPath(previousProjectId, next)
+  ) {
     return [];
   }
   rehomeProjectUsage(previousProjectId, next);
@@ -629,9 +721,13 @@ export function rehomeSessionsToProjectRoot(previousProjectId: string, nextProje
     const all: Session[] = JSON.parse(raw);
     const updated = all.map((candidate) => {
       const session = safeSessionForStorage(candidate);
-      if (!sameProjectPath(session.projectId, previousProjectId)) return session;
+      if (!sameProjectPath(session.projectId, previousProjectId))
+        return session;
       const repaired: Session = { ...session, projectId: next };
-      if (!repaired.preview || !sameProjectPath(repaired.preview.projectRoot, next)) {
+      if (
+        !repaired.preview ||
+        !sameProjectPath(repaired.preview.projectRoot, next)
+      ) {
         delete repaired.preview;
       }
       moved.push(repaired);
@@ -641,7 +737,10 @@ export function rehomeSessionsToProjectRoot(previousProjectId: string, nextProje
     for (const session of pendingSessionSaves.values()) {
       if (!sameProjectPath(session.projectId, previousProjectId)) continue;
       session.projectId = next;
-      if (!session.preview || !sameProjectPath(session.preview.projectRoot, next)) {
+      if (
+        !session.preview ||
+        !sameProjectPath(session.preview.projectRoot, next)
+      ) {
         delete session.preview;
       }
     }
@@ -654,7 +753,10 @@ export function rehomeSessionsToProjectRoot(previousProjectId: string, nextProje
 function safeSessionForStorage(session: Session): Session {
   const preview = sanitizeSessionPreview(session.preview);
   const smartAgent = sanitizeSmartAgentTaskState(session.smartAgent);
-  const preferredProvider = sanitizeSessionModelId(session.preferredProvider, 64);
+  const preferredProvider = sanitizeSessionModelId(
+    session.preferredProvider,
+    64,
+  );
   const preferredModel = sanitizeSessionModelId(session.preferredModel, 200);
   const preferredEffort = sanitizeSessionModelId(session.preferredEffort, 32);
   const cursorAgentId = sanitizeSessionModelId(session.cursorAgentId, 128);
@@ -677,15 +779,19 @@ function safeSessionForStorage(session: Session): Session {
  * must not prevent the already in-memory transcript from being handed to the
  * host-owned recovery file.
  */
-export function snapshotSessionsForUpdate(currentSessions: Iterable<Session>): Record<string, string> {
+export function snapshotSessionsForUpdate(
+  currentSessions: Iterable<Session>,
+): Record<string, string> {
   const merged = new Map<string, Session>();
   const add = (candidate: unknown) => {
     if (!candidate || typeof candidate !== "object") return;
     const session = candidate as Partial<Session>;
     if (
-      typeof session.id !== "string" || !session.id.trim() ||
+      typeof session.id !== "string" ||
+      !session.id.trim() ||
       typeof session.title !== "string" ||
-      typeof session.projectId !== "string" || !session.projectId.trim() ||
+      typeof session.projectId !== "string" ||
+      !session.projectId.trim() ||
       !Array.isArray(session.messages) ||
       !Number.isFinite(session.createdAt)
     ) {
@@ -714,10 +820,14 @@ export function snapshotSessionsForUpdate(currentSessions: Iterable<Session>): R
   return { [STORAGE_KEY]: JSON.stringify([...merged.values()]) };
 }
 
-function sanitizeSessionModelId(value: unknown, max: number): string | undefined {
+function sanitizeSessionModelId(
+  value: unknown,
+  max: number,
+): string | undefined {
   if (typeof value !== "string") return undefined;
   const text = value.trim();
-  if (!text || text.length > max || /[\u0000-\u001f\u007f]/.test(text)) return undefined;
+  if (!text || text.length > max || /[\u0000-\u001f\u007f]/.test(text))
+    return undefined;
   return text;
 }
 
@@ -790,7 +900,8 @@ export function deleteSession(id: string): void {
 }
 export function deleteAllSessions(projectId: string): void {
   for (const [id, session] of pendingSessionSaves) {
-    if (sameProjectPath(session.projectId, projectId)) pendingSessionSaves.delete(id);
+    if (sameProjectPath(session.projectId, projectId))
+      pendingSessionSaves.delete(id);
   }
   clearSessionSaveTimerIfIdle();
   try {
@@ -799,13 +910,14 @@ export function deleteAllSessions(projectId: string): void {
     const all: Session[] = JSON.parse(raw);
     localStorage.setItem(
       STORAGE_KEY,
-      JSON.stringify(all.filter((s) => !sameProjectPath(s.projectId, projectId))),
+      JSON.stringify(
+        all.filter((s) => !sameProjectPath(s.projectId, projectId)),
+      ),
     );
   } catch {
     // non-fatal
   }
 }
-
 
 export function newSessionId(): string {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -850,7 +962,13 @@ function clip(text: string, max: number): string {
 
 function toolArgHint(args: any): string {
   if (!args || typeof args !== "object") return "";
-  const path = args.path || args.src || args.command || args.pattern || args.url || args.question;
+  const path =
+    args.path ||
+    args.src ||
+    args.command ||
+    args.pattern ||
+    args.url ||
+    args.question;
   if (typeof path === "string" && path.trim()) return clip(path, 160);
   try {
     return clip(JSON.stringify(args), 200);
@@ -864,7 +982,10 @@ function toolArgHint(args: any): string {
  * Excludes the trailing user message that matches the prompt about to be sent.
  * Keeps user/assistant text, tool actions, Q&A, and done summaries; drops pure UI noise.
  */
-export function buildLlmHistory(messages: SessionMessage[], currentPrompt: string): LlmHistoryTurn[] {
+export function buildLlmHistory(
+  messages: SessionMessage[],
+  currentPrompt: string,
+): LlmHistoryTurn[] {
   const turns: LlmHistoryTurn[] = [];
   let pendingTool: { id: string; name: string; args: any } | null = null;
 
@@ -958,8 +1079,12 @@ export function buildLlmHistory(messages: SessionMessage[], currentPrompt: strin
           msg.description && `Description: ${msg.description}`,
           msg.summary && `Summary: ${msg.summary}`,
           msg.tech?.length ? `Tech: ${msg.tech.join(", ")}` : "",
-          msg.files?.length ? `Files: ${msg.files.slice(0, 40).join(", ")}` : "",
-          msg.features?.length ? `Features: ${msg.features.slice(0, 12).join("; ")}` : "",
+          msg.files?.length
+            ? `Files: ${msg.files.slice(0, 40).join(", ")}`
+            : "",
+          msg.features?.length
+            ? `Features: ${msg.features.slice(0, 12).join("; ")}`
+            : "",
         ].filter(Boolean);
         if (parts.length) {
           pushAssistant(`[Task completed]\n${parts.join("\n")}`);
@@ -1007,7 +1132,9 @@ export function recordAgentEvent(
     case "start":
       messages.push({
         type: "run_start",
-        permissionMode: normalizeSessionPermissionMode(e.payload?.permission_mode),
+        permissionMode: normalizeSessionPermissionMode(
+          e.payload?.permission_mode,
+        ),
         executionProfile: e.payload?.execution_profile,
         at,
       });
@@ -1018,7 +1145,12 @@ export function recordAgentEvent(
       break;
     }
     case "thinking":
-      messages.push({ type: "thinking", iteration: e.payload.iteration ?? 0, text: "", at });
+      messages.push({
+        type: "thinking",
+        iteration: e.payload.iteration ?? 0,
+        text: "",
+        at,
+      });
       break;
     case "reasoning": {
       const safeText = redactChatCredentials(e.payload.text || "");
@@ -1055,7 +1187,9 @@ export function recordAgentEvent(
       });
       break;
     case "tool_result": {
-      const qIdx = messages.findIndex((m) => m.type === "question" && m.id === e.payload.id);
+      const qIdx = messages.findIndex(
+        (m) => m.type === "question" && m.id === e.payload.id,
+      );
       if (qIdx >= 0) {
         (messages[qIdx] as any).answer = e.payload.content;
       }

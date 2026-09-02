@@ -1,9 +1,30 @@
 import { api, type Settings } from "../ipc";
-import { PROVIDERS, effortOptionsForProvider, displayModelName, getProviderMeta, getSettingsSafe, hasStaticModelCatalog, isHostedCatalogRestricted, isUltraEffort, mergeProviderModelCatalog, normalizeEffortForProvider, refreshHostedProviderCatalog, uiProviderId, usesReasoningEffort, visibleProviders } from "./settings";
+import {
+  PROVIDERS,
+  effortOptionsForProvider,
+  displayModelName,
+  getProviderMeta,
+  getSettingsSafe,
+  hasStaticModelCatalog,
+  isHostedCatalogRestricted,
+  isUltraEffort,
+  mergeProviderModelCatalog,
+  normalizeEffortForProvider,
+  refreshHostedProviderCatalog,
+  uiProviderId,
+  usesReasoningEffort,
+  visibleProviders,
+} from "./settings";
 import { clear, el, escapeHtml } from "./util";
-import { icon, icons } from "./icons";
+import { icon, type icons } from "./icons";
 
-export type PermissionMode = "plan" | "auto" | "ask" | "full" | "multi_agent";
+export type PermissionMode =
+  | "plan"
+  | "auto"
+  | "ask"
+  | "full"
+  | "multi_agent"
+  | "pi";
 
 /** Agent permission modes (OpenCode-style chip labels). */
 const MODES: {
@@ -25,8 +46,7 @@ const MODES: {
     id: "auto",
     chip: "build",
     label: "Auto",
-    title:
-      "Auto — build with defaults; high-risk actions still need Approve.",
+    title: "Auto — build with defaults; high-risk actions still need Approve.",
     capability: "Agent",
   },
   {
@@ -52,6 +72,14 @@ const MODES: {
       "Multi-Agent — Ship-level permission; independent workspace checks run together.",
     capability: "Autonomous",
   },
+  {
+    id: "pi",
+    chip: "PI",
+    label: "PI",
+    title:
+      "PI — run this chat through your local pi CLI agent (its own tools, models, and permissions).",
+    capability: "Local CLI",
+  },
 ];
 
 /** Capability labels per mode (what the agent is allowed to do). */
@@ -60,11 +88,19 @@ const CAPABILITIES: Record<
   { id: string; label: string; title: string }[]
 > = {
   plan: [
-    { id: "thinking", label: "Thinking", title: "Plan first, then ask before tools" },
+    {
+      id: "thinking",
+      label: "Thinking",
+      title: "Plan first, then ask before tools",
+    },
     { id: "guided", label: "Guided", title: "Step-by-step with approvals" },
   ],
   auto: [
-    { id: "agent", label: "Agent", title: "Tools on by default; high-risk asks" },
+    {
+      id: "agent",
+      label: "Agent",
+      title: "Tools on by default; high-risk asks",
+    },
     { id: "balanced", label: "Balanced", title: "Build with smart defaults" },
   ],
   ask: [
@@ -84,8 +120,23 @@ const CAPABILITIES: Record<
     { id: "max", label: "Max", title: "Maximum autonomy" },
   ],
   multi_agent: [
-    { id: "autonomous", label: "Autonomous", title: "Full tools with parallel discovery" },
-    { id: "max", label: "Max", title: "Maximum autonomy with parallel discovery" },
+    {
+      id: "autonomous",
+      label: "Autonomous",
+      title: "Full tools with parallel discovery",
+    },
+    {
+      id: "max",
+      label: "Max",
+      title: "Maximum autonomy with parallel discovery",
+    },
+  ],
+  pi: [
+    {
+      id: "pi",
+      label: "pi CLI",
+      title: "Runs on your local pi agent and its own credentials",
+    },
   ],
 };
 
@@ -99,7 +150,6 @@ export class ModelBar {
   providerRail: HTMLElement;
   private onProviderChange: (() => void) | null = null;
   private capabilityId = "thinking";
-  private openMenu: HTMLElement | null = null;
   private outsideClose: ((e: MouseEvent) => void) | null = null;
   private providerSelectionGeneration = 0;
   /** Full model catalogs per provider (auto-fetched when key/connection is ready). */
@@ -111,12 +161,19 @@ export class ModelBar {
    * separate from global Settings lets a user work in another session without
    * making a busy session look like it changed providers halfway through.
    */
-  private activeRunProfile: { provider: string; model: string; effort?: string } | null = null;
+  private activeRunProfile: {
+    provider: string;
+    model: string;
+    effort?: string;
+  } | null = null;
 
   constructor(onChange: () => void) {
     this.onChange = onChange;
     // Keep a lightweight host; real UI lives in providerRail inside the composer
-    this.node = el("div", { class: "dock-toolbar dock-toolbar-hidden", "aria-hidden": "true" });
+    this.node = el("div", {
+      class: "dock-toolbar dock-toolbar-hidden",
+      "aria-hidden": "true",
+    });
     this.providerRail = el("div", {
       class: "composer-chips",
       role: "toolbar",
@@ -149,7 +206,9 @@ export class ModelBar {
   }
 
   /** Lock provider/model/effort controls while the visible session is running. */
-  setActiveSessionRunProfile(profile: { provider: string; model: string; effort?: string } | null) {
+  setActiveSessionRunProfile(
+    profile: { provider: string; model: string; effort?: string } | null,
+  ) {
     const next = profile
       ? {
           provider: String(profile.provider || "").trim(),
@@ -219,7 +278,8 @@ export class ModelBar {
     }
     try {
       await api.saveSettings(this.settings);
-      if (selectionGeneration !== this.providerSelectionGeneration) return false;
+      if (selectionGeneration !== this.providerSelectionGeneration)
+        return false;
       this.settings = await api.getSettings();
       this.normalizeMode();
       this.syncCapabilityDefault();
@@ -255,13 +315,15 @@ export class ModelBar {
       const catalog = await refreshHostedProviderCatalog();
       const nextProviderIds = new Set(catalog.map((provider) => provider.id));
       for (const providerId of this.hostedCatalogProviderIds) {
-        if (!nextProviderIds.has(providerId)) delete this.discoveredModels[providerId];
+        if (!nextProviderIds.has(providerId))
+          delete this.discoveredModels[providerId];
       }
       // Drop any previously discovered BYOK catalogs when this account is under
       // an admin allowlist — otherwise prohibited providers stay selectable.
       if (isHostedCatalogRestricted()) {
         for (const providerId of Object.keys(this.discoveredModels)) {
-          if (!nextProviderIds.has(providerId)) delete this.discoveredModels[providerId];
+          if (!nextProviderIds.has(providerId))
+            delete this.discoveredModels[providerId];
         }
       }
       for (const provider of catalog) {
@@ -284,11 +346,14 @@ export class ModelBar {
     if (!isHostedCatalogRestricted() || !this.settings) return;
     const allowed = visibleProviders();
     if (!allowed.length) return;
-    const currentOk = allowed.some((provider) => provider.id === this.settings!.provider);
+    const currentOk = allowed.some(
+      (provider) => provider.id === this.settings!.provider,
+    );
     if (!currentOk) {
       const next = allowed[0]!;
       this.settings.provider = next.id;
-      this.settings.model = next.defaultModel || next.models[0] || this.settings.model;
+      this.settings.model =
+        next.defaultModel || next.models[0] || this.settings.model;
       if (next.defaultBaseUrl) this.settings.base_url = next.defaultBaseUrl;
       await api.saveSettings(this.settings).catch(() => {});
       this.renderProviderRail();
@@ -307,7 +372,11 @@ export class ModelBar {
   /** Load full model list from the provider API (no manual pick of which models appear). */
   private async ensureModelsLoaded(providerId: string) {
     if (this.discoveredModels[providerId]?.length) return;
-    if (isHostedCatalogRestricted() && !this.hostedCatalogProviderIds.has(providerId)) return;
+    if (
+      isHostedCatalogRestricted() &&
+      !this.hostedCatalogProviderIds.has(providerId)
+    )
+      return;
     const meta = getProviderMeta(providerId);
     if (!meta) return;
     if (hasStaticModelCatalog(providerId)) return;
@@ -355,13 +424,23 @@ export class ModelBar {
   }
 
   private normalizeMode() {
-    const m = String(this.settings.permission_mode || "").toLowerCase().trim();
+    const m = String(this.settings.permission_mode || "")
+      .toLowerCase()
+      .trim();
     if (m === "research" || m === "ask") {
       this.settings.permission_mode = "ask";
-    } else if (m === "plan" || m === "auto" || m === "full" || m === "multi_agent") {
+    } else if (
+      m === "plan" ||
+      m === "auto" ||
+      m === "full" ||
+      m === "multi_agent" ||
+      m === "pi"
+    ) {
       this.settings.permission_mode = m;
     } else {
-      this.settings.permission_mode = this.settings.auto_approve ? "auto" : "plan";
+      this.settings.permission_mode = this.settings.auto_approve
+        ? "auto"
+        : "plan";
     }
     this.settings.auto_approve =
       this.settings.permission_mode === "auto" ||
@@ -372,7 +451,9 @@ export class ModelBar {
   private syncCapabilityDefault() {
     const mode = this.getMode();
     const caps = CAPABILITIES[mode];
-    const saved = String(this.settings.capability_mode || "").toLowerCase().trim();
+    const saved = String(this.settings.capability_mode || "")
+      .toLowerCase()
+      .trim();
     if (caps.some((c) => c.id === saved)) {
       this.capabilityId = saved;
     } else if (!caps.some((c) => c.id === this.capabilityId)) {
@@ -406,7 +487,10 @@ export class ModelBar {
   private async saveEffort(id: string) {
     if (!this.allowModelSelection()) return;
     const next = normalizeEffortForProvider(this.settings.provider, id);
-    const prev = normalizeEffortForProvider(this.settings.provider, this.settings.model_effort);
+    const prev = normalizeEffortForProvider(
+      this.settings.provider,
+      this.settings.model_effort,
+    );
     this.settings.model_effort = next;
     this.renderProviderRail();
     try {
@@ -461,6 +545,7 @@ export class ModelBar {
         ask: "Ask — investigate with evidence",
         full: "Full — max autonomy",
         multi_agent: "Multi-Agent — parallel discovery",
+        pi: "PI — local pi CLI agent",
       };
       this.setStatus(labels[this.getMode()]);
       this.onChange();
@@ -479,7 +564,6 @@ export class ModelBar {
       n.classList.remove("menu-open");
       n.setAttribute("aria-expanded", "false");
     });
-    this.openMenu = null;
     if (this.outsideClose) {
       document.removeEventListener("mousedown", this.outsideClose, true);
       this.outsideClose = null;
@@ -492,12 +576,12 @@ export class ModelBar {
     btn.setAttribute("aria-expanded", "true");
     const wrap = btn.closest(".chip-wrap") || btn.parentElement;
     wrap?.appendChild(menu);
-    this.openMenu = menu;
     this.outsideClose = (e: MouseEvent) => {
       if (!this.providerRail.contains(e.target as Node)) this.closeMenus();
     };
     window.setTimeout(() => {
-      if (this.outsideClose) document.addEventListener("mousedown", this.outsideClose, true);
+      if (this.outsideClose)
+        document.addEventListener("mousedown", this.outsideClose, true);
     }, 0);
   }
 
@@ -537,8 +621,14 @@ export class ModelBar {
     const displaySettings = lockedProfile || this.settings;
     const modelIsLocked = this.modelSelectionLocked();
     const modeMeta = MODES.find((m) => m.id === mode) || MODES[0];
-    const uiProvId = uiProviderId(displaySettings.provider, displaySettings.model);
-    const provider = PROVIDERS.find((p) => p.id === uiProvId) || visibleProviders()[0] || PROVIDERS[0];
+    const uiProvId = uiProviderId(
+      displaySettings.provider,
+      displaySettings.model,
+    );
+    const provider =
+      PROVIDERS.find((p) => p.id === uiProvId) ||
+      visibleProviders()[0] ||
+      PROVIDERS[0];
     const meta = getProviderMeta(uiProvId) || provider;
 
     // + menu: Plan / Debug / Multitask / Ask · Image / Video / Files
@@ -579,19 +669,27 @@ export class ModelBar {
         this.closeMenus();
         return;
       }
-      const menu = el("div", { class: "chip-menu", role: "listbox", "aria-label": "Permission mode" });
+      const menu = el("div", {
+        class: "chip-menu",
+        role: "listbox",
+        "aria-label": "Permission mode",
+      });
       for (const m of MODES) {
-        const item = el("button", {
-          class: "chip-menu-item" + (m.id === mode ? " active" : ""),
-          type: "button",
-          role: "option",
-          "aria-selected": String(m.id === mode),
-          title: m.title,
-        }, [
-          m.id === "multi_agent"
-            ? "🌈 Multi-Agent — parallel workspace discovery"
-            : `${m.chip} — ${m.label}`,
-        ]) as HTMLButtonElement;
+        const item = el(
+          "button",
+          {
+            class: "chip-menu-item" + (m.id === mode ? " active" : ""),
+            type: "button",
+            role: "option",
+            "aria-selected": String(m.id === mode),
+            title: m.title,
+          },
+          [
+            m.id === "multi_agent"
+              ? "🌈 Multi-Agent — parallel workspace discovery"
+              : `${m.chip} — ${m.label}`,
+          ],
+        ) as HTMLButtonElement;
         item.addEventListener("click", (e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -631,14 +729,20 @@ export class ModelBar {
         this.closeMenus();
         return;
       }
-      const menu = el("div", { class: "chip-menu chip-menu-wide", role: "listbox", "aria-label": "Model" });
+      const menu = el("div", {
+        class: "chip-menu chip-menu-wide",
+        role: "listbox",
+        "aria-label": "Model",
+      });
 
       // Provider rows
       const provHead = el("div", { class: "chip-menu-head" }, ["Provider"]);
       menu.appendChild(provHead);
       for (const p of visibleProviders()) {
         const item = el("button", {
-          class: "chip-menu-item chip-menu-provider" + (p.id === provider.id ? " active" : ""),
+          class:
+            "chip-menu-item chip-menu-provider" +
+            (p.id === provider.id ? " active" : ""),
           type: "button",
           role: "option",
           "aria-selected": String(p.id === provider.id),
@@ -664,13 +768,18 @@ export class ModelBar {
           : [...meta.models, this.settings.model];
       }
       for (const m of models) {
-        const item = el("button", {
-          class: "chip-menu-item" + (m === this.settings.model ? " active" : ""),
-          type: "button",
-          role: "option",
-          "aria-selected": String(m === this.settings.model),
-          title: displayModelName(m, uiProvId),
-        }, [this.shortModel(m, uiProvId)]) as HTMLButtonElement;
+        const item = el(
+          "button",
+          {
+            class:
+              "chip-menu-item" + (m === this.settings.model ? " active" : ""),
+            type: "button",
+            role: "option",
+            "aria-selected": String(m === this.settings.model),
+            title: displayModelName(m, uiProvId),
+          },
+          [this.shortModel(m, uiProvId)],
+        ) as HTMLButtonElement;
         item.addEventListener("click", async (e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -703,7 +812,9 @@ export class ModelBar {
         provider.id,
         lockedProfile?.effort || this.settings.model_effort,
       );
-      const effortMeta = effortOpts.find((e) => e.id === effort) || effortOpts[effortOpts.length - 1];
+      const effortMeta =
+        effortOpts.find((e) => e.id === effort) ||
+        effortOpts[effortOpts.length - 1];
       const effortWrap = el("div", { class: "chip-wrap" });
       const isUltra = isUltraEffort(effort);
       const effortBtn = this.chipBtn(
@@ -733,17 +844,25 @@ export class ModelBar {
           this.closeMenus();
           return;
         }
-        const menu = el("div", { class: "chip-menu", role: "listbox", "aria-label": "Effort" });
+        const menu = el("div", {
+          class: "chip-menu",
+          role: "listbox",
+          "aria-label": "Effort",
+        });
         for (const opt of effortOpts) {
-          const item = el("button", {
-            class:
-              "chip-menu-item" +
-              (opt.id === effort ? " active" : "") +
-              (opt.id === "ultra" ? " chip-menu-effort-ultra" : ""),
-            type: "button",
-            role: "option",
-            "aria-selected": String(opt.id === effort),
-          }, [opt.label]) as HTMLButtonElement;
+          const item = el(
+            "button",
+            {
+              class:
+                "chip-menu-item" +
+                (opt.id === effort ? " active" : "") +
+                (opt.id === "ultra" ? " chip-menu-effort-ultra" : ""),
+              type: "button",
+              role: "option",
+              "aria-selected": String(opt.id === effort),
+            },
+            [opt.label],
+          ) as HTMLButtonElement;
           item.addEventListener("click", (e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -760,7 +879,8 @@ export class ModelBar {
       const caps = CAPABILITIES[mode];
       const cap = caps.find((c) => c.id === this.capabilityId) || caps[0];
       const capWrap = el("div", { class: "chip-wrap" });
-      const agentic = mode === "auto" || mode === "full" || mode === "multi_agent";
+      const agentic =
+        mode === "auto" || mode === "full" || mode === "multi_agent";
       const capBtn = this.chipBtn(
         cap.label,
         cap.title,
@@ -774,15 +894,25 @@ export class ModelBar {
           this.closeMenus();
           return;
         }
-        const menu = el("div", { class: "chip-menu", role: "listbox", "aria-label": "Capability" });
+        const menu = el("div", {
+          class: "chip-menu",
+          role: "listbox",
+          "aria-label": "Capability",
+        });
         for (const c of caps) {
-          const item = el("button", {
-            class: "chip-menu-item" + (c.id === this.capabilityId ? " active" : ""),
-            type: "button",
-            role: "option",
-            "aria-selected": String(c.id === this.capabilityId),
-            title: c.title,
-          }, [c.label]) as HTMLButtonElement;
+          const item = el(
+            "button",
+            {
+              class:
+                "chip-menu-item" +
+                (c.id === this.capabilityId ? " active" : ""),
+              type: "button",
+              role: "option",
+              "aria-selected": String(c.id === this.capabilityId),
+              title: c.title,
+            },
+            [c.label],
+          ) as HTMLButtonElement;
           item.addEventListener("click", (e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -798,11 +928,15 @@ export class ModelBar {
 
     if (modelIsLocked) {
       this.providerRail.appendChild(
-        el("span", {
-          class: "chip-lock-note",
-          role: "status",
-          title: this.modelLockMessage(),
-        }, ["Model locked"]),
+        el(
+          "span",
+          {
+            class: "chip-lock-note",
+            role: "status",
+            title: this.modelLockMessage(),
+          },
+          ["Model locked"],
+        ),
       );
     }
 
@@ -886,16 +1020,18 @@ export class ModelBar {
     });
 
     addItem(
-      `Flavour memory — ${this.settings.flavour_enabled !== false ? "On" : "Off"}`,
+      `Flavour memory — ${this.settings.flavour_enabled === false ? "Off" : "On"}`,
       "spark",
       {
-        title: "Recall bounded project preferences and private session working memory before, during, and after AI work",
+        title:
+          "Recall bounded project preferences and private session working memory before, during, and after AI work",
         active: this.settings.flavour_enabled !== false,
         onClick: () => {
           const enabled = this.settings.flavour_enabled === false;
           this.settings.flavour_enabled = enabled;
           this.closeMenus();
-          void api.saveSettings(this.settings)
+          void api
+            .saveSettings(this.settings)
             .then(async () => {
               this.settings = await api.getSettings();
               this.normalizeMode();
@@ -981,14 +1117,23 @@ export class ModelBar {
         try {
           const imported = await api.importImagePath(path);
           window.dispatchEvent(
-            new CustomEvent("horma:composer-attach-image", { detail: { path: imported } }),
+            new CustomEvent("horma:composer-attach-image", {
+              detail: { path: imported },
+            }),
           );
           ok += 1;
         } catch (err) {
           console.error(err);
         }
       }
-      this.setStatus(ok === 1 ? "Image attached" : ok > 1 ? `${ok} images attached` : "Could not attach images", ok === 0);
+      this.setStatus(
+        ok === 1
+          ? "Image attached"
+          : ok > 1
+            ? `${ok} images attached`
+            : "Could not attach images",
+        ok === 0,
+      );
     } catch (e) {
       console.error(e);
       this.setStatus("Could not attach images", true);
@@ -1004,14 +1149,23 @@ export class ModelBar {
         try {
           const imported = await api.importVideoPath(path);
           window.dispatchEvent(
-            new CustomEvent("horma:composer-attach-video", { detail: { path: imported } }),
+            new CustomEvent("horma:composer-attach-video", {
+              detail: { path: imported },
+            }),
           );
           ok += 1;
         } catch (err) {
           console.error(err);
         }
       }
-      this.setStatus(ok === 1 ? "Video attached" : ok > 1 ? `${ok} videos attached` : "Could not attach videos", ok === 0);
+      this.setStatus(
+        ok === 1
+          ? "Video attached"
+          : ok > 1
+            ? `${ok} videos attached`
+            : "Could not attach videos",
+        ok === 0,
+      );
     } catch (e) {
       console.error(e);
       this.setStatus("Could not attach videos", true);
@@ -1024,7 +1178,9 @@ export class ModelBar {
       if (!paths.length) return;
       const block = paths.map((p) => `[Attached file: ${p}]`).join("\n") + "\n";
       this.insertComposer(block);
-      this.setStatus(paths.length === 1 ? "File attached" : `${paths.length} files attached`);
+      this.setStatus(
+        paths.length === 1 ? "File attached" : `${paths.length} files attached`,
+      );
     } catch (e) {
       console.error(e);
       this.setStatus("Could not attach files", true);

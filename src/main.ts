@@ -8,12 +8,25 @@ import {
 import { Sidebar } from "./components/sidebar";
 import { Chat, type ChatPromptSubmission } from "./components/chat";
 import { ConsolePanel } from "./components/console";
-import { displayModelName, displayProviderName, getProviderMeta, getSettingsSafe, isHostedCatalogRestricted, visibleProviders } from "./components/settings";
+import {
+  displayModelName,
+  displayProviderName,
+  getProviderMeta,
+  getSettingsSafe,
+  isHostedCatalogRestricted,
+  visibleProviders,
+} from "./components/settings";
 import { ModelBar } from "./components/modelbar";
 import { ProjectPicker } from "./components/picker";
 import { WorkspacePanel } from "./components/workspace";
-import { SmartAgentPanel, applySmartAgentEvent } from "./components/smart-agent";
-import { ClientSuccessCenter, composeProjectMissionPrompt } from "./components/client-success-center";
+import {
+  SmartAgentPanel,
+  applySmartAgentEvent,
+} from "./components/smart-agent";
+import {
+  ClientSuccessCenter,
+  composeProjectMissionPrompt,
+} from "./components/client-success-center";
 import {
   SitePreview,
   isExternalPreviewUrl,
@@ -21,7 +34,11 @@ import {
   mergePreviewSessionState,
   pickPreviewEntry,
 } from "./components/site-preview";
-import { mountComputerUseHud, updateComputerUseHud, clearComputerUseHud } from "./components/computer-use-hud";
+import {
+  mountComputerUseHud,
+  updateComputerUseHud,
+  clearComputerUseHud,
+} from "./components/computer-use-hud";
 import {
   ensureWebsiteSession,
   fetchWebsiteAccount,
@@ -35,7 +52,14 @@ import {
   showUpdateDialog,
   showUpdateGate,
 } from "./components/update-gate";
-import { basename, cancelDoneWorkingCue, clear, div, el, speakDoneWorking } from "./components/util";
+import {
+  basename,
+  cancelDoneWorkingCue,
+  clear,
+  div,
+  el,
+  speakDoneWorking,
+} from "./components/util";
 import {
   activeProjectWorkspacePath,
   activateProjectWorkspace,
@@ -45,16 +69,29 @@ import {
   replaceProjectWorkspacePath,
 } from "./components/projects";
 import {
-  loadSessions, saveSession, scheduleSessionSave, snapshotSessionsForUpdate,
+  loadSessions,
+  saveSession,
+  scheduleSessionSave,
+  snapshotSessionsForUpdate,
   flushSessionSaves,
-  deleteSession, deleteAllSessions, newSessionId, sessionTitle,
-  recordAgentEvent, buildLlmHistory, redactChatCredentials, addSessionTokens, SESSION_TOKEN_BUDGET,
+  deleteSession,
+  deleteAllSessions,
+  newSessionId,
+  sessionTitle,
+  recordAgentEvent,
+  buildLlmHistory,
+  redactChatCredentials,
+  addSessionTokens,
+  SESSION_TOKEN_BUDGET,
   rehomeSessionsToProjectRoot,
   type Session,
 } from "./components/session";
 import { icon } from "./components/icons";
 import { reconcileRunIds } from "./components/run-lifecycle";
-import { initializeAppearance, mountAppearanceControl } from "./theme/appearance";
+import {
+  initializeAppearance,
+  mountAppearanceControl,
+} from "./theme/appearance";
 
 let sidebar: Sidebar;
 let chat: Chat;
@@ -78,7 +115,10 @@ const runningSessions = new Set<string>();
 /** Runs reserved in the UI but not yet acknowledged by the native registry. */
 const startingSessions = new Set<string>();
 /** Delayed native reconciliation after terminal events closes event/IPC races. */
-const terminalReconcileTimers = new Map<string, ReturnType<typeof setTimeout>[]>();
+const terminalReconcileTimers = new Map<
+  string,
+  ReturnType<typeof setTimeout>[]
+>();
 let runReconcileGeneration = 0;
 /** Runs that emitted an explicit completion handshake before agent_run returned. */
 const verifiedRunCompletions = new Set<string>();
@@ -109,10 +149,10 @@ const pendingConfirms = new Map<
 >();
 
 function normalizeProjectPath(path: string | null | undefined): string {
-  let value = String(path || "").trim().replace(/\//g, "\\");
-  value = value
-    .replace(/^\\\\\?\\UNC\\/i, "\\\\")
-    .replace(/^\\\\\?\\/, "");
+  let value = String(path || "")
+    .trim()
+    .replace(/\//g, "\\");
+  value = value.replace(/^\\\\\?\\UNC\\/i, "\\\\").replace(/^\\\\\?\\/, "");
   return value.replace(/[\\/]+$/, "");
 }
 
@@ -120,7 +160,10 @@ function projectPathKey(path: string | null | undefined): string {
   return normalizeProjectPath(path).toLocaleLowerCase();
 }
 
-function sameProjectPath(a: string | null | undefined, b: string | null | undefined): boolean {
+function sameProjectPath(
+  a: string | null | undefined,
+  b: string | null | undefined,
+): boolean {
   const aKey = projectPathKey(a);
   return !!aKey && aKey === projectPathKey(b);
 }
@@ -170,7 +213,10 @@ const PREVIEW_OPEN_TOOLS = new Set([
   "openfile",
 ]);
 
-function toProjectRelPath(path: string, projectRoot = currentProjectPath): string {
+function toProjectRelPath(
+  path: string,
+  projectRoot = currentProjectPath,
+): string {
   let p = path.trim();
   if (/^file:\/\//i.test(p)) {
     p = decodeURIComponent(p.replace(/^file:\/\/\/?/i, ""));
@@ -186,7 +232,10 @@ function toProjectRelPath(path: string, projectRoot = currentProjectPath): strin
   return p.replace(/^\.\//, "");
 }
 
-function walkProjectFiles(nodes: { path: string; isDir: boolean; children?: any[] }[], out: string[] = []): string[] {
+function walkProjectFiles(
+  nodes: { path: string; isDir: boolean; children?: any[] }[],
+  out: string[] = [],
+): string[] {
   for (const n of nodes || []) {
     if (n.isDir) walkProjectFiles(n.children || [], out);
     else out.push(String(n.path).replace(/\\/g, "/"));
@@ -194,7 +243,9 @@ function walkProjectFiles(nodes: { path: string; isDir: boolean; children?: any[
   return out;
 }
 
-async function snapshotProjectFiles(projectRoot = currentProjectPath): Promise<Set<string>> {
+async function snapshotProjectFiles(
+  projectRoot = currentProjectPath,
+): Promise<Set<string>> {
   // The IPC file tree is rooted in the currently selected workspace. Do not
   // accidentally snapshot a second project after the user has switched views.
   if (!sameProjectPath(projectRoot, currentProjectPath)) return new Set();
@@ -206,12 +257,25 @@ async function snapshotProjectFiles(projectRoot = currentProjectPath): Promise<S
   }
 }
 
-function trackRunTouchedFile(sessionId: string | undefined, name: string, args: Record<string, unknown> | undefined) {
+function trackRunTouchedFile(
+  sessionId: string | undefined,
+  name: string,
+  args: Record<string, unknown> | undefined,
+) {
   if (!sessionId || !args) return;
   const projectRoot = runProjectPaths.get(sessionId) || currentProjectPath;
   const tool = normalizeToolName(name);
   if (!PREVIEW_WRITE_TOOLS.has(tool)) return;
-  const keys = ["path", "file_path", "target", "dst", "destination", "src", "source", "filename"];
+  const keys = [
+    "path",
+    "file_path",
+    "target",
+    "dst",
+    "destination",
+    "src",
+    "source",
+    "filename",
+  ];
   let bucket = runTouchedFiles.get(sessionId);
   if (!bucket) {
     bucket = new Set();
@@ -225,7 +289,9 @@ function trackRunTouchedFile(sessionId: string | undefined, name: string, args: 
   }
   // Shell-ish tools sometimes pass a command string containing an .html path
   const blob = JSON.stringify(args);
-  for (const m of blob.matchAll(/[A-Za-z0-9_./\\-]+\.(?:html?|css|js|mjs|tsx?|jsx|apk|exe)/gi)) {
+  for (const m of blob.matchAll(
+    /[A-Za-z0-9_./\\-]+\.(?:html?|css|js|mjs|tsx?|jsx|apk|exe)/gi,
+  )) {
     bucket.add(toProjectRelPath(m[0], projectRoot));
   }
 }
@@ -261,14 +327,22 @@ async function openBuildPreview(opts: {
   autoPickEntry?: boolean;
 }) {
   if (!currentProjectPath || !sitePreview) return;
-  if (opts.projectRoot && !sameProjectPath(opts.projectRoot, currentProjectPath)) return;
+  if (
+    opts.projectRoot &&
+    !sameProjectPath(opts.projectRoot, currentProjectPath)
+  )
+    return;
   const projectRoot = opts.projectRoot || currentProjectPath;
   const targetSessionId = opts.sessionId || activeSessionId || undefined;
   if (opts.sessionId) {
     const storedPreview = sessionForId(opts.sessionId)?.preview;
-    const targetAlreadyOpen = opts.sessionId === activeSessionId
-      ? sitePreview.isOpen
-      : Boolean(storedPreview && sameProjectPath(storedPreview.projectRoot, projectRoot));
+    const targetAlreadyOpen =
+      opts.sessionId === activeSessionId
+        ? sitePreview.isOpen
+        : Boolean(
+            storedPreview &&
+              sameProjectPath(storedPreview.projectRoot, projectRoot),
+          );
     if (previewOpenedForRun.has(opts.sessionId) && targetAlreadyOpen) return;
     previewOpenedForRun.add(opts.sessionId);
   }
@@ -284,7 +358,11 @@ async function openBuildPreview(opts: {
   // different session. Store its preview on its own session, but never mount it
   // into the currently visible session's iframe panel.
   if (targetSessionId && targetSessionId !== activeSessionId) {
-    if (!targetSession || !sameProjectPath(targetSession.projectId, projectRoot)) return;
+    if (
+      !targetSession ||
+      !sameProjectPath(targetSession.projectId, projectRoot)
+    )
+      return;
     targetSession.preview = mergePreviewSessionState(targetSession.preview, {
       projectRoot,
       files,
@@ -306,7 +384,10 @@ async function openBuildPreview(opts: {
   // The component emits this itself for regular UI actions. Persist here too so
   // an automatically opened preview is durable even if a view transition raced it.
   if (targetSessionId && targetSessionId === activeSessionId) {
-    persistPreviewForSession(targetSessionId, sitePreview.captureSessionState());
+    persistPreviewForSession(
+      targetSessionId,
+      sitePreview.captureSessionState(),
+    );
   }
 }
 
@@ -358,7 +439,10 @@ function promptAsksForPreview(prompt: string | undefined): boolean {
   return previewIntent.some((word) => text.includes(word));
 }
 
-async function maybeOpenBuildPreview(sessionId: string | undefined, reason: string) {
+async function maybeOpenBuildPreview(
+  sessionId: string | undefined,
+  reason: string,
+) {
   if (!sessionId || reason === "cancelled" || !currentProjectPath) return;
   // Only auto-open when the user explicitly asked for something previewable.
   if (!promptAsksForPreview(runPrompts.get(sessionId))) return;
@@ -369,9 +453,16 @@ async function maybeOpenBuildPreview(sessionId: string | undefined, reason: stri
     return;
   }
   const storedPreview = sessionForId(sessionId)?.preview;
-  const sessionPreviewOpen = sessionId === activeSessionId
-    ? sitePreview?.isOpen
-    : Boolean(storedPreview && sameProjectPath(storedPreview.projectRoot, runProjectPath || currentProjectPath));
+  const sessionPreviewOpen =
+    sessionId === activeSessionId
+      ? sitePreview?.isOpen
+      : Boolean(
+          storedPreview &&
+            sameProjectPath(
+              storedPreview.projectRoot,
+              runProjectPath || currentProjectPath,
+            ),
+        );
   if (previewOpenedForRun.has(sessionId) && sessionPreviewOpen) {
     runTouchedFiles.delete(sessionId);
     runBaselineFiles.delete(sessionId);
@@ -384,9 +475,7 @@ async function maybeOpenBuildPreview(sessionId: string | undefined, reason: stri
   runBaselineFiles.delete(sessionId);
 
   const now = await snapshotProjectFiles();
-  const added = baseline
-    ? [...now].filter((f) => !baseline.has(f))
-    : [];
+  const added = baseline ? [...now].filter((f) => !baseline.has(f)) : [];
   const candidates = [...new Set([...touched, ...added])];
 
   // Prefer HTML written/added this run; fall back to any previewable touch
@@ -394,7 +483,9 @@ async function maybeOpenBuildPreview(sessionId: string | undefined, reason: stri
   const shouldOpen =
     !!pickPreviewEntry(candidates) ||
     isPreviewableBuild(candidates) ||
-    (touched.length > 0 && !!htmlEntry && candidates.some((f) => /\.(html?|css|js|mjs|tsx?|jsx)$/i.test(f)));
+    (touched.length > 0 &&
+      !!htmlEntry &&
+      candidates.some((f) => /\.(html?|css|js|mjs|tsx?|jsx)$/i.test(f)));
 
   if (!shouldOpen && !pickPreviewEntry(candidates)) return;
 
@@ -413,7 +504,9 @@ async function maybeOpenBuildPreview(sessionId: string | undefined, reason: stri
  * guard. The audible cue is reserved for a real completion handshake.
  */
 function isVerifiedAgentCompletion(e: AgentEvent): boolean {
-  return e.kind === "done" || (e.kind === "end" && e.payload.reason === "completed");
+  return (
+    e.kind === "done" || (e.kind === "end" && e.payload.reason === "completed")
+  );
 }
 
 function isTerminalAgentEvent(e: AgentEvent): boolean {
@@ -426,7 +519,8 @@ function scheduleCompletionCueWhenIdle(): void {
   completionCueTimer = window.setTimeout(() => {
     completionCueTimer = null;
     if (!completionCuePending) return;
-    if (runningSessions.size > 0 || pendingPromptStarts > 0 || chat?.running) return;
+    if (runningSessions.size > 0 || pendingPromptStarts > 0 || chat?.running)
+      return;
     completionCuePending = false;
     speakDoneWorking();
   }, 180);
@@ -435,7 +529,12 @@ function scheduleCompletionCueWhenIdle(): void {
 function refreshSidebar() {
   const runningProjectPaths = new Set(
     [...runningSessions]
-      .map((sessionId) => sessionRegistry.get(sessionId)?.projectId || runProjectPaths.get(sessionId) || "")
+      .map(
+        (sessionId) =>
+          sessionRegistry.get(sessionId)?.projectId ||
+          runProjectPaths.get(sessionId) ||
+          "",
+      )
       .filter(Boolean),
   );
   sidebar.setProjectWorkspaces(
@@ -443,8 +542,13 @@ function refreshSidebar() {
     currentWorkspaceMode === "quick" ? null : currentProjectPath,
     runningProjectPaths,
   );
-  sidebar.setQuickSessionWorkspace(quickSessionWorkspacePath, currentWorkspaceMode === "quick");
-  sidebar.render(sessions, activeSessionId, runningSessions).catch((e) => console.error("sidebar render failed", e));
+  sidebar.setQuickSessionWorkspace(
+    quickSessionWorkspacePath,
+    currentWorkspaceMode === "quick",
+  );
+  sidebar
+    .render(sessions, activeSessionId, runningSessions)
+    .catch((e) => console.error("sidebar render failed", e));
 }
 
 function updateGlobalRunStatus() {
@@ -482,7 +586,9 @@ function releaseFrontendRun(sessionId: string): boolean {
  * actual future, cancellation flag, and process handle; the Set above is only a
  * fast UI cache and must never keep the model locked after native cleanup.
  */
-async function reconcileActiveAgentSessions(options: { processQueue?: boolean } = {}) {
+async function reconcileActiveAgentSessions(
+  options: { processQueue?: boolean } = {},
+) {
   const generation = ++runReconcileGeneration;
   let nativeIds: string[];
   try {
@@ -497,7 +603,11 @@ async function reconcileActiveAgentSessions(options: { processQueue?: boolean } 
     (id) => typeof id === "string" && id.trim(),
   );
   for (const id of acknowledgedNativeIds) startingSessions.delete(id);
-  const snapshot = reconcileRunIds(runningSessions, acknowledgedNativeIds, startingSessions);
+  const snapshot = reconcileRunIds(
+    runningSessions,
+    acknowledgedNativeIds,
+    startingSessions,
+  );
   let changed = false;
   for (const id of snapshot.activeIds) {
     if (!runningSessions.has(id)) {
@@ -509,7 +619,8 @@ async function reconcileActiveAgentSessions(options: { processQueue?: boolean } 
     changed = releaseFrontendRun(id) || changed;
   }
 
-  const activeRunning = !!activeSessionId && runningSessions.has(activeSessionId);
+  const activeRunning =
+    !!activeSessionId && runningSessions.has(activeSessionId);
   if (typeof chat !== "undefined" && chat.running !== activeRunning) {
     chat.setRunning(activeRunning, {
       processQueue: !activeRunning && options.processQueue === true,
@@ -530,9 +641,11 @@ async function reconcileActiveAgentSessions(options: { processQueue?: boolean } 
 
 function scheduleTerminalRunReconciliation(sessionId: string) {
   clearTerminalReconcileTimers(sessionId);
-  const timers = [250, 1000, 3000].map((delay) => window.setTimeout(() => {
-    void reconcileActiveAgentSessions({ processQueue: true });
-  }, delay));
+  const timers = [250, 1000, 3000].map((delay) =>
+    window.setTimeout(() => {
+      void reconcileActiveAgentSessions({ processQueue: true });
+    }, delay),
+  );
   terminalReconcileTimers.set(sessionId, timers);
 }
 
@@ -543,7 +656,9 @@ function scheduleTerminalRunReconciliation(sessionId: string) {
  */
 function syncActiveSessionModelLock() {
   if (typeof modelBar === "undefined" || typeof chat === "undefined") return;
-  const profile = activeSessionId ? runModelProfiles.get(activeSessionId) || null : null;
+  const profile = activeSessionId
+    ? runModelProfiles.get(activeSessionId) || null
+    : null;
   modelBar.setActiveSessionRunProfile(profile);
   if (profile) {
     chat.setReplyProfile({
@@ -570,7 +685,8 @@ function persistActiveSessionModelPreference() {
   if (!session) return;
   // A busy session already recorded its run profile; don't overwrite with a
   // different session's restored settings while that run is still locked.
-  if (runningSessions.has(session.id) && runModelProfiles.has(session.id)) return;
+  if (runningSessions.has(session.id) && runModelProfiles.has(session.id))
+    return;
   // Skip while a session switch is still restoring the composer — the UI may
   // still show the previous conversation's model for a tick.
   if (sessionModelRestoring) return;
@@ -627,7 +743,10 @@ async function restoreActiveSessionModelPreference() {
       sessionModelRestoring = false;
     }
   }
-  if (generation !== sessionModelRestoreGeneration || activeSessionId !== expectedSessionId) {
+  if (
+    generation !== sessionModelRestoreGeneration ||
+    activeSessionId !== expectedSessionId
+  ) {
     return;
   }
   syncActiveSessionModelLock();
@@ -635,12 +754,17 @@ async function restoreActiveSessionModelPreference() {
 
 function sessionForId(id: string | null | undefined): Session | undefined {
   if (!id) return undefined;
-  return sessionRegistry.get(id) || sessions.find((session) => session.id === id);
+  return (
+    sessionRegistry.get(id) || sessions.find((session) => session.id === id)
+  );
 }
 
 /** Keep the visible Smart Agent ledger scoped to the currently selected session. */
 function syncSmartAgentPanel() {
-  smartAgentPanel?.setSession(activeSessionId, sessionForId(activeSessionId)?.smartAgent);
+  smartAgentPanel?.setSession(
+    activeSessionId,
+    sessionForId(activeSessionId)?.smartAgent,
+  );
 }
 
 function syncVisiblePreviewIntoSession(session: Session) {
@@ -659,7 +783,8 @@ function persistPreviewForSession(
 ) {
   const session = sessionForId(sessionId);
   if (!session) return;
-  if (preview && !sameProjectPath(preview.projectRoot, session.projectId)) return;
+  if (preview && !sameProjectPath(preview.projectRoot, session.projectId))
+    return;
   if (preview) session.preview = preview;
   else delete session.preview;
   sessionRegistry.set(session.id, session);
@@ -709,10 +834,14 @@ function persistCurrentSession(deferred = false) {
 
 function prepareForAppUpdate(): Record<string, string> {
   if (runningSessions.size > 0) {
-    throw new Error("Stop active AI runs before updating so their latest work can be saved safely.");
+    throw new Error(
+      "Stop active AI runs before updating so their latest work can be saved safely.",
+    );
   }
   if (activeSessionId && currentProjectPath) {
-    const session = sessions.find((candidate) => candidate.id === activeSessionId);
+    const session = sessions.find(
+      (candidate) => candidate.id === activeSessionId,
+    );
     if (session) {
       syncVisiblePreviewIntoSession(session);
       sessionRegistry.set(session.id, session);
@@ -723,10 +852,7 @@ function prepareForAppUpdate(): Record<string, string> {
     }
   }
   flushSessionSaves();
-  return snapshotSessionsForUpdate([
-    ...sessions,
-    ...sessionRegistry.values(),
-  ]);
+  return snapshotSessionsForUpdate([...sessions, ...sessionRegistry.values()]);
 }
 
 /** Tokens already used across all sessions in this project. */
@@ -768,16 +894,23 @@ function applyLicenseSnapshot(lic: {
     usageLimitsDisabled = lic.limitsDisabled === true;
     return;
   }
-  activeTokenBudget = Math.max(1, Math.floor(Number(lic.tokenBudget) || SESSION_TOKEN_BUDGET));
+  activeTokenBudget = Math.max(
+    1,
+    Math.floor(Number(lic.tokenBudget) || SESSION_TOKEN_BUDGET),
+  );
   accountTokensUsed = Math.max(0, Math.floor(Number(lic.tokensUsed) || 0));
   usageLimitsDisabled = lic.limitsDisabled === true;
-  const reportedBlock = String(lic.blockedBy || "").trim().toLowerCase();
+  const reportedBlock = String(lic.blockedBy || "")
+    .trim()
+    .toLowerCase();
   const walletEmpty = accountTokensUsed >= activeTokenBudget;
   // Older installations saved `4h` / `week` in blockedBy. Treat those as
   // informational history only; a client is blocked exclusively when the
   // authoritative snapshot says their actual plan wallet is empty.
   usageBlockedBy =
-    !usageLimitsDisabled && reportedBlock === "plan" && walletEmpty ? "plan" : "";
+    !usageLimitsDisabled && reportedBlock === "plan" && walletEmpty
+      ? "plan"
+      : "";
   planExpiresAt = String(lic.expiresAt || "");
   planName = String(lic.plan || "free");
   planActive = lic.active !== false && planName.toLowerCase() !== "free";
@@ -840,7 +973,9 @@ function syncUsageBar(_session?: Session | null) {
 /** Prefer live website license usage (source of truth for bought plans). */
 function applyWebsitePlanUsage(user: WebsiteAccount) {
   const plan = String(user.plan || "free");
-  const active = user.licenseActive === true && !["free", "expired", ""].includes(plan.toLowerCase());
+  const active =
+    user.licenseActive === true &&
+    !["free", "expired", ""].includes(plan.toLowerCase());
   const budget = Math.max(0, Math.floor(Number(user.tokenBudget) || 0));
   const used = Math.max(0, Math.floor(Number(user.tokensUsed) || 0));
   planName = plan || "free";
@@ -898,7 +1033,8 @@ function applyUsageToSession(
     } | null;
   },
 ) {
-  const s = sessionRegistry.get(sessionId) || sessions.find((x) => x.id === sessionId);
+  const s =
+    sessionRegistry.get(sessionId) || sessions.find((x) => x.id === sessionId);
   const add = Math.max(0, Math.floor(payload.turn_tokens ?? 0));
   if (s && add > 0) {
     addSessionTokens(s, add);
@@ -938,7 +1074,8 @@ async function createNewSession() {
   // Other sessions may keep running in the background
   persistCurrentSession();
   persistActiveSessionModelPreference();
-  const profile = typeof modelBar !== "undefined" ? modelBar.currentProfile() : null;
+  const profile =
+    typeof modelBar !== "undefined" ? modelBar.currentProfile() : null;
   const s: Session = {
     id: newSessionId(),
     title: "New session",
@@ -1044,7 +1181,12 @@ function removeAllSessions() {
   const root = document.getElementById("modal-root");
   if (!root) {
     // Fallback if modal host is missing
-    if (!window.confirm(`Delete all ${count} session${count === 1 ? "" : "s"}? This cannot be undone.`)) return;
+    if (
+      !window.confirm(
+        `Delete all ${count} session${count === 1 ? "" : "s"}? This cannot be undone.`,
+      )
+    )
+      return;
     doRemoveAllSessions();
     return;
   }
@@ -1060,7 +1202,11 @@ function removeAllSessions() {
   });
 
   const head = el("div", { class: "modal-head" });
-  head.appendChild(el("div", { class: "modal-title", id: "delete-all-title" }, ["Delete all sessions?"]));
+  head.appendChild(
+    el("div", { class: "modal-title", id: "delete-all-title" }, [
+      "Delete all sessions?",
+    ]),
+  );
   const closeBtn = el("button", {
     class: "modal-close",
     type: "button",
@@ -1079,8 +1225,12 @@ function removeAllSessions() {
   modal.appendChild(body);
 
   const foot = el("div", { class: "modal-foot" });
-  const cancelBtn = el("button", { class: "btn", type: "button" }, ["Cancel"]) as HTMLButtonElement;
-  const deleteBtn = el("button", { class: "btn danger", type: "button" }, ["Delete all"]) as HTMLButtonElement;
+  const cancelBtn = el("button", { class: "btn", type: "button" }, [
+    "Cancel",
+  ]) as HTMLButtonElement;
+  const deleteBtn = el("button", { class: "btn danger", type: "button" }, [
+    "Delete all",
+  ]) as HTMLButtonElement;
   foot.appendChild(cancelBtn);
   foot.appendChild(deleteBtn);
   modal.appendChild(foot);
@@ -1124,7 +1274,6 @@ function doRemoveAllSessions() {
   updateGlobalRunStatus();
 }
 
-
 function loadProjectSessions() {
   if (!currentProjectPath) {
     sessions = [];
@@ -1150,7 +1299,9 @@ function loadProjectSessions() {
   }
   // Project switching is allowed during a run. Reflect only the selected
   // session's activity instead of leaving the previous project in the UI.
-  chat.setRunning(!!activeSessionId && runningSessions.has(activeSessionId), { processQueue: false });
+  chat.setRunning(!!activeSessionId && runningSessions.has(activeSessionId), {
+    processQueue: false,
+  });
   // Restore this project's active session model (or lock if that run is busy).
   void restoreActiveSessionModelPreference();
   // Shared budget across every session in this project
@@ -1164,8 +1315,12 @@ function showFatalError(msg: string) {
   const app = document.getElementById("app");
   if (!app) return;
   app.innerHTML = "";
-  app.style.cssText = "display:flex;align-items:center;justify-content:center;height:100vh;width:100vw;background:#0a0a0a;color:#fafafa;font-family:monospace;font-size:13px;padding:40px;text-align:center;white-space:pre-wrap;";
-  app.textContent = "Hormachuelos failed to start.\n\n" + msg + "\n\nCheck DevTools (F12) for details.";
+  app.style.cssText =
+    "display:flex;align-items:center;justify-content:center;height:100vh;width:100vw;background:#0a0a0a;color:#fafafa;font-family:monospace;font-size:13px;padding:40px;text-align:center;white-space:pre-wrap;";
+  app.textContent =
+    "Hormachuelos failed to start.\n\n" +
+    msg +
+    "\n\nCheck DevTools (F12) for details.";
 }
 
 // Non-destructive error banner — logs the error and shows a small notice
@@ -1175,7 +1330,9 @@ function reportError(msg: string) {
   if (!toast) return;
   toast.textContent = msg;
   toast.hidden = false;
-  window.setTimeout(() => { toast.hidden = true; }, 6000);
+  window.setTimeout(() => {
+    toast.hidden = true;
+  }, 6000);
 }
 
 // Only wipe the UI for the rare *boot* error (no DOM yet, nothing to lose).
@@ -1276,8 +1433,14 @@ function syncDrawerButtons() {
   if (leftBtn) {
     leftBtn.classList.toggle("active", leftOpen);
     leftBtn.setAttribute("aria-pressed", String(leftOpen));
-    leftBtn.setAttribute("title", leftOpen ? "Hide left panel" : "Show left panel");
-    leftBtn.setAttribute("aria-label", leftOpen ? "Hide left panel" : "Show left panel");
+    leftBtn.setAttribute(
+      "title",
+      leftOpen ? "Hide left panel" : "Show left panel",
+    );
+    leftBtn.setAttribute(
+      "aria-label",
+      leftOpen ? "Hide left panel" : "Show left panel",
+    );
   }
   const rightVisible = rightSideVisible();
   const rightBtn = document.getElementById("drawer-right-btn");
@@ -1300,12 +1463,18 @@ let workspaceMenuCleanup: (() => void) | null = null;
 function workspaceMenuItems(): HTMLButtonElement[] {
   const menu = document.getElementById("workspace-menu");
   if (!menu) return [];
-  return Array.from(menu.querySelectorAll<HTMLButtonElement>(".workspace-menu-item:not(:disabled)"));
+  return Array.from(
+    menu.querySelectorAll<HTMLButtonElement>(
+      ".workspace-menu-item:not(:disabled)",
+    ),
+  );
 }
 
 function closeWorkspaceMenu(restoreFocus = false) {
   const menu = document.getElementById("workspace-menu");
-  const button = document.getElementById("workspace-menu-btn") as HTMLButtonElement | null;
+  const button = document.getElementById(
+    "workspace-menu-btn",
+  ) as HTMLButtonElement | null;
   if (!menu || !button || menu.hidden) return;
   menu.hidden = true;
   button.setAttribute("aria-expanded", "false");
@@ -1358,7 +1527,8 @@ function renderWorkspaceMenu() {
     () => {
       if (!currentProjectPath) return;
       if (sitePreview?.isOpen) sitePreview.close();
-      else void openBuildPreview({ title: "Build preview", autoPickEntry: false });
+      else
+        void openBuildPreview({ title: "Build preview", autoPickEntry: false });
     },
     !hasProject,
   );
@@ -1378,7 +1548,9 @@ function renderWorkspaceMenu() {
     () => openClientSuccessCenter(),
     !hasProject,
   );
-  menu.appendChild(el("div", { class: "workspace-menu-divider", role: "separator" }));
+  menu.appendChild(
+    el("div", { class: "workspace-menu-divider", role: "separator" }),
+  );
   appendAction(
     "inspector",
     rightSideVisible() ? "Hide right panels" : "Show right panels",
@@ -1389,7 +1561,9 @@ function renderWorkspaceMenu() {
 
 function openWorkspaceMenu() {
   const menu = document.getElementById("workspace-menu");
-  const button = document.getElementById("workspace-menu-btn") as HTMLButtonElement | null;
+  const button = document.getElementById(
+    "workspace-menu-btn",
+  ) as HTMLButtonElement | null;
   const anchor = document.getElementById("workspace-menu-anchor");
   if (!menu || !button || !anchor) return;
   renderWorkspaceMenu();
@@ -1410,11 +1584,16 @@ function openWorkspaceMenu() {
     const items = workspaceMenuItems();
     if (!items.length) return;
     event.preventDefault();
-    const currentIndex = items.indexOf(document.activeElement as HTMLButtonElement);
+    const currentIndex = items.indexOf(
+      document.activeElement as HTMLButtonElement,
+    );
     const offset = event.key === "ArrowDown" ? 1 : -1;
-    const nextIndex = currentIndex < 0
-      ? (offset > 0 ? 0 : items.length - 1)
-      : (currentIndex + offset + items.length) % items.length;
+    const nextIndex =
+      currentIndex < 0
+        ? offset > 0
+          ? 0
+          : items.length - 1
+        : (currentIndex + offset + items.length) % items.length;
     items[nextIndex].focus({ preventScroll: true });
   };
   document.addEventListener("pointerdown", onPointerDown, true);
@@ -1423,11 +1602,15 @@ function openWorkspaceMenu() {
     document.removeEventListener("pointerdown", onPointerDown, true);
     document.removeEventListener("keydown", onKeyDown, true);
   };
-  requestAnimationFrame(() => workspaceMenuItems()[0]?.focus({ preventScroll: true }));
+  requestAnimationFrame(() =>
+    workspaceMenuItems()[0]?.focus({ preventScroll: true }),
+  );
 }
 
 function bindWorkspaceMenuButton() {
-  const button = document.getElementById("workspace-menu-btn") as HTMLButtonElement | null;
+  const button = document.getElementById(
+    "workspace-menu-btn",
+  ) as HTMLButtonElement | null;
   if (!button || (button as any).__bound) return;
   button.addEventListener("click", () => {
     const menu = document.getElementById("workspace-menu");
@@ -1479,27 +1662,43 @@ async function openQuickSessionWorkspace() {
   await selectProject(path, { quickSession: true });
 }
 
-function repairProjectRootReferences(requestedPath: string, canonicalPath: string): void {
+function repairProjectRootReferences(
+  requestedPath: string,
+  canonicalPath: string,
+): void {
   if (sameProjectPath(requestedPath, canonicalPath)) return;
   const migrated = rehomeSessionsToProjectRoot(requestedPath, canonicalPath);
   for (const session of migrated) sessionRegistry.set(session.id, session);
   replaceProjectWorkspacePath(requestedPath, canonicalPath);
 
-  const emptyFolder = basename(normalizeProjectPath(requestedPath)) || "the empty folder";
-  const projectFolder = basename(normalizeProjectPath(canonicalPath)) || canonicalPath;
-  reportError(`Opened ${projectFolder} because ${emptyFolder} is empty and its parent contains the project files.`);
+  const emptyFolder =
+    basename(normalizeProjectPath(requestedPath)) || "the empty folder";
+  const projectFolder =
+    basename(normalizeProjectPath(canonicalPath)) || canonicalPath;
+  reportError(
+    `Opened ${projectFolder} because ${emptyFolder} is empty and its parent contains the project files.`,
+  );
 }
 
-async function selectProject(path: string, options: { quickSession?: boolean } = {}) {
-  const quickSession = options.quickSession === true || isQuickSessionWorkspace(path);
+async function selectProject(
+  path: string,
+  options: { quickSession?: boolean } = {},
+) {
+  const quickSession =
+    options.quickSession === true || isQuickSessionWorkspace(path);
   const nextMode: WorkspaceMode = quickSession ? "quick" : "project";
   persistCurrentSession();
   flushSessionSaves();
   if (!quickSession) await api.setProjectRoot(path);
-  const canonicalPath = quickSession ? path : (await api.getProjectRoot()) || path;
+  const canonicalPath = quickSession
+    ? path
+    : (await api.getProjectRoot()) || path;
   const wasRepaired = !quickSession && !sameProjectPath(path, canonicalPath);
 
-  if (sameProjectPath(currentProjectPath, canonicalPath) && currentWorkspaceMode === nextMode) {
+  if (
+    sameProjectPath(currentProjectPath, canonicalPath) &&
+    currentWorkspaceMode === nextMode
+  ) {
     if (wasRepaired) repairProjectRootReferences(path, canonicalPath);
     if (currentProjectPath !== canonicalPath) {
       currentProjectPath = canonicalPath;
@@ -1525,9 +1724,10 @@ function projectHasActiveRun(path: string): boolean {
   const key = projectPathKey(path);
   if (!key) return false;
   return [...runningSessions].some((sessionId) => {
-    const runPath = sessionRegistry.get(sessionId)?.projectId
-      || runProjectPaths.get(sessionId)
-      || "";
+    const runPath =
+      sessionRegistry.get(sessionId)?.projectId ||
+      runProjectPaths.get(sessionId) ||
+      "";
     return projectPathKey(runPath) === key;
   });
 }
@@ -1539,12 +1739,15 @@ function projectHasActiveRun(path: string): boolean {
  */
 async function removeProjectFromList(path: string) {
   if (projectHasActiveRun(path)) {
-    reportError("Stop the active agent before removing this project from the list.");
+    reportError(
+      "Stop the active agent before removing this project from the list.",
+    );
     return;
   }
 
-  const wasActive = currentWorkspaceMode === "project"
-    && sameProjectPath(currentProjectPath, path);
+  const wasActive =
+    currentWorkspaceMode === "project" &&
+    sameProjectPath(currentProjectPath, path);
   await api.removeRecentProject(path);
   const remaining = removeProjectWorkspace(path);
 
@@ -1600,7 +1803,7 @@ function openNewProjectPicker() {
     // existing folder directly instead of nesting a blank project inside it.
     async (parentPath) => {
       await selectProject(parentPath);
-    }
+    },
   );
   void picker.render();
 }
@@ -1608,10 +1811,15 @@ function openNewProjectPicker() {
 function openOpenProjectPicker() {
   const root = document.getElementById("modal-root")!;
   clear(root);
-  const picker = new ProjectPicker(root, "open", async (path) => {
-    clear(root);
-    await selectProject(path);
-  }, () => clear(root));
+  const picker = new ProjectPicker(
+    root,
+    "open",
+    async (path) => {
+      clear(root);
+      await selectProject(path);
+    },
+    () => clear(root),
+  );
   void picker.render();
 }
 
@@ -1636,7 +1844,11 @@ async function refreshProviderReadiness(
   }
 
   // Keyless local providers, or hosted-managed aliases, are ready immediately.
-  if (provider.id === "ollama" || provider.hostedManaged || provider.id === "hormachuelos_free") {
+  if (
+    provider.id === "ollama" ||
+    provider.hostedManaged ||
+    provider.id === "hormachuelos_free"
+  ) {
     return finish(true);
   }
 
@@ -1656,19 +1868,58 @@ async function refreshProviderReadiness(
     }
   }
 
-  if (!provider.keyRequired && provider.id !== "openrouter" && provider.id !== "cursor") {
+  if (
+    !provider.keyRequired &&
+    provider.id !== "openrouter" &&
+    provider.id !== "cursor"
+  ) {
     return finish(true);
   }
 
   return finish(false);
 }
 
+/** Hosts the desktop may open in an external browser. */
+const TRUSTED_EXTERNAL_HOSTS = new Set([
+  "hormachuelos.vercel.app",
+  "hormachuelos.com",
+]);
+
+/** Validate an external URL against the trusted-host allowlist. */
+function trustedExternalUrl(value: string | null | undefined): string | null {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "https:") return null;
+    if (!TRUSTED_EXTERNAL_HOSTS.has(url.hostname)) return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+/** Open an external page only when it is a trusted hormachuelos origin.
+ * Validated twice: the TS host allowlist here, then the Rust command's
+ * scheme check before the system opener runs. */
+function openTrustedExternal(
+  url: string | null | undefined,
+  fallback = "https://hormachuelos.com/#/pricing",
+) {
+  const target = trustedExternalUrl(url) || fallback;
+  if (!trustedExternalUrl(target)) return;
+  void api.openExternalUrl(target).catch((error) => {
+    console.error("Could not open external page", target, error);
+  });
+}
+
 async function openGCashTopUp() {
+  const PRICING = "https://hormachuelos.com/#/pricing";
   try {
     const lic = await api.getLicenseStatus();
-    window.open(lic.topUpUrl || "https://hormachuelos.com/#/pricing", "_blank", "noopener");
+    openTrustedExternal(lic.topUpUrl || PRICING, PRICING);
   } catch {
-    window.open("https://hormachuelos.com/#/pricing", "_blank", "noopener");
+    openTrustedExternal(PRICING, PRICING);
   }
 }
 
@@ -1680,7 +1931,9 @@ async function exportClientPack() {
   }
   try {
     const result = await api.exportClientPack();
-    reportError(`Client pack saved: ${result.zipPath} (${result.filesCount} files)`);
+    reportError(
+      `Client pack saved: ${result.zipPath} (${result.filesCount} files)`,
+    );
   } catch (e) {
     reportError("Client pack failed: " + String(e));
   }
@@ -1697,8 +1950,12 @@ function openClientSuccessCenter() {
 
 async function sendPrompt(submission: ChatPromptSubmission) {
   let prompt = redactChatCredentials(submission.modelText);
-  const visiblePrompt = redactChatCredentials(submission.visibleText || submission.modelText);
-  const titlePrompt = redactChatCredentials(submission.titleHint || visiblePrompt || prompt);
+  const visiblePrompt = redactChatCredentials(
+    submission.visibleText || submission.modelText,
+  );
+  const titlePrompt = redactChatCredentials(
+    submission.titleHint || visiblePrompt || prompt,
+  );
   const taskProfile = submission.taskProfile || "default";
   if (!prompt.trim() || !visiblePrompt.trim()) return;
   cancelDoneWorkingCue();
@@ -1708,32 +1965,48 @@ async function sendPrompt(submission: ChatPromptSubmission) {
     return;
   }
   const projectRoot = currentProjectPath;
-  const runProfile = modelBar.currentProfile() || (modelBar.settings ? {
-    provider: modelBar.settings.provider,
-    model: modelBar.settings.model,
-    effort: modelBar.settings.model_effort,
-  } : null);
+  const runProfile =
+    modelBar.currentProfile() ||
+    (modelBar.settings
+      ? {
+          provider: modelBar.settings.provider,
+          model: modelBar.settings.model,
+          effort: modelBar.settings.model_effort,
+        }
+      : null);
   if (!runProfile?.provider || !runProfile.model) {
     reportError("Choose an AI provider and model before sending a request.");
     return;
   }
-  const runSettings = modelBar.settings ? {
-    ...modelBar.settings,
-    provider: runProfile.provider,
-    model: runProfile.model,
-    model_effort: runProfile.effort || modelBar.settings.model_effort,
-  } : undefined;
-  if (isHostedCatalogRestricted()) {
+  const runSettings = modelBar.settings
+    ? {
+        ...modelBar.settings,
+        provider: runProfile.provider,
+        model: runProfile.model,
+        model_effort: runProfile.effort || modelBar.settings.model_effort,
+      }
+    : undefined;
+  // PI mode runs on the local pi CLI with its own credentials and models:
+  // hosted provider readiness, wallet limits, and catalog restrictions do
+  // not apply to a pi turn.
+  const isPiMode =
+    String(runSettings?.permission_mode || "")
+      .trim()
+      .toLowerCase() === "pi";
+  if (!isPiMode && isHostedCatalogRestricted()) {
     const allowed = visibleProviders();
     const providerId = String(runProfile.provider).trim();
     const modelId = String(runProfile.model).trim();
     const provider = allowed.find((entry) => entry.id === providerId);
-    if (!provider || (provider.models.length > 0 && !provider.models.includes(modelId))) {
+    if (
+      !provider ||
+      (provider.models.length > 0 && !provider.models.includes(modelId))
+    ) {
       reportError("This AI provider or model is not enabled for your account.");
       return;
     }
   }
-  if (isUsageExhausted()) {
+  if (!isPiMode && isUsageExhausted()) {
     reportError(usageBlockMessage());
     syncUsageBar();
     return;
@@ -1751,7 +2024,9 @@ async function sendPrompt(submission: ChatPromptSubmission) {
   // visible chat bubble, session title, or the preview-detection prompt.
   const agentPrompt = composeProjectMissionPrompt(projectRoot, prompt);
 
-  let existing = activeSessionId ? sessions.find((x) => x.id === activeSessionId) : null;
+  let existing = activeSessionId
+    ? sessions.find((x) => x.id === activeSessionId)
+    : null;
   const hasMessages = existing && existing.messages.length > 0;
 
   if (!existing || !hasMessages) {
@@ -1804,7 +2079,8 @@ async function sendPrompt(submission: ChatPromptSubmission) {
   runTouchedFiles.set(sessionId, new Set());
   previewOpenedForRun.delete(sessionId);
   void snapshotProjectFiles(projectRoot).then((snap) => {
-    if (sameProjectPath(runProjectPaths.get(sessionId), projectRoot)) runBaselineFiles.set(sessionId, snap);
+    if (sameProjectPath(runProjectPaths.get(sessionId), projectRoot))
+      runBaselineFiles.set(sessionId, snap);
   });
   if (activeSessionId === sessionId) {
     chat.setRunning(true);
@@ -1819,21 +2095,31 @@ async function sendPrompt(submission: ChatPromptSubmission) {
     try {
       // Check the provider captured above. A later session switch may update
       // settings.json, but must not change this request's readiness decision.
-      providerReady = await refreshProviderReadiness(runProfile.provider, false);
+      providerReady =
+        isPiMode ||
+        (await refreshProviderReadiness(runProfile.provider, false));
     } finally {
       pendingPromptStarts = Math.max(0, pendingPromptStarts - 1);
       scheduleCompletionCueWhenIdle();
     }
     if (activeSessionId === sessionId) {
-      chat.setProviderReady(providerReady, displayProviderName(runProfile.provider));
+      chat.setProviderReady(
+        providerReady,
+        displayProviderName(runProfile.provider),
+      );
     }
     if (!providerReady) {
-      throw new Error("Connect the selected provider before sending a request.");
+      throw new Error(
+        "Connect the selected provider before sending a request.",
+      );
     }
-    if (isUsageExhausted()) throw new Error(usageBlockMessage());
+    if (!isPiMode && isUsageExhausted()) throw new Error(usageBlockMessage());
 
     // Only touch workspace/console UI while this owning session is visible.
-    if (sameProjectPath(projectRoot, currentProjectPath) && activeSessionId === sessionId) {
+    if (
+      sameProjectPath(projectRoot, currentProjectPath) &&
+      activeSessionId === sessionId
+    ) {
       await workspacePanel.beginRun(sessionId);
     }
     const resumeAgentId = sessionForId(sessionId)?.cursorAgentId || null;
@@ -1863,8 +2149,12 @@ async function sendPrompt(submission: ChatPromptSubmission) {
     // Stale Cursor agent ids from before per-session stores break continue.
     // Drop them so the next send creates a clean agent for this chat only.
     if (
-      /agent not found|failed to resume|checkpoint|cursor bridge|sdk/i.test(msg) ||
-      /network_error|connection_failed|provider_timeout|provider_unavailable/i.test(msg)
+      /agent not found|failed to resume|checkpoint|cursor bridge|sdk/i.test(
+        msg,
+      ) ||
+      /network_error|connection_failed|provider_timeout|provider_unavailable/i.test(
+        msg,
+      )
     ) {
       const owning = sessionForId(sessionId);
       if (owning?.cursorAgentId) {
@@ -1887,10 +2177,18 @@ async function sendPrompt(submission: ChatPromptSubmission) {
         chat.appendAssistantText(`Error: ${msg}`);
         chat.appendEnd("no_tool_calls");
       } else {
-        const s = sessionRegistry.get(sessionId) || sessions.find((x) => x.id === sessionId);
+        const s =
+          sessionRegistry.get(sessionId) ||
+          sessions.find((x) => x.id === sessionId);
         if (s) {
-          recordAgentEvent(s.messages, { kind: "text", payload: { text: `Error: ${msg}` } });
-          recordAgentEvent(s.messages, { kind: "end", payload: { reason: "no_tool_calls" } });
+          recordAgentEvent(s.messages, {
+            kind: "text",
+            payload: { text: `Error: ${msg}` },
+          });
+          recordAgentEvent(s.messages, {
+            kind: "end",
+            payload: { reason: "no_tool_calls" },
+          });
           saveSession(s);
           sessionRegistry.set(s.id, s);
         }
@@ -1906,7 +2204,7 @@ async function sendPrompt(submission: ChatPromptSubmission) {
     } else {
       syncActiveSessionModelLock();
     }
-    const allowQueue = !isUsageExhausted();
+    const allowQueue = isPiMode || !isUsageExhausted();
     if (!allowQueue) {
       chat.clearPendingQueue();
     }
@@ -1921,7 +2219,7 @@ async function sendPrompt(submission: ChatPromptSubmission) {
         chat.setRunning(false, { processQueue: allowQueue });
       }
     }
-    if (isUsageExhausted()) {
+    if (!isPiMode && isUsageExhausted()) {
       haltRunsForUsageLimit();
     }
     updateGlobalRunStatus();
@@ -1940,7 +2238,9 @@ function handleAgentEvent(e: AgentEvent) {
   if (sid) startingSessions.delete(sid);
   if (sid && isTerminalAgentEvent(e)) scheduleTerminalRunReconciliation(sid);
   const owningSession = sid ? sessionForId(sid) : undefined;
-  const smartStateChanged = owningSession ? applySmartAgentEvent(owningSession, e) : false;
+  const smartStateChanged = owningSession
+    ? applySmartAgentEvent(owningSession, e)
+    : false;
   if (e.kind === "start") cancelDoneWorkingCue();
   if (sid && isVerifiedAgentCompletion(e)) verifiedRunCompletions.add(sid);
   if (smartStateChanged && isActive) syncSmartAgentPanel();
@@ -1973,7 +2273,13 @@ function handleAgentEvent(e: AgentEvent) {
       arguments: e.payload.arguments,
     });
   }
-  if ((e.kind === "tool_result" || e.kind === "done" || e.kind === "end" || e.kind === "cancelled") && sid) {
+  if (
+    (e.kind === "tool_result" ||
+      e.kind === "done" ||
+      e.kind === "end" ||
+      e.kind === "cancelled") &&
+    sid
+  ) {
     pendingConfirms.delete(sid);
   }
 
@@ -1989,7 +2295,11 @@ function handleAgentEvent(e: AgentEvent) {
     }
     if (e.kind === "tool_call") {
       trackRunTouchedFile(sid, e.payload.name, e.payload.arguments);
-      const htmlOpen = htmlPathFromOpenArgs(e.payload.name, e.payload.arguments, runProjectPaths.get(sid));
+      const htmlOpen = htmlPathFromOpenArgs(
+        e.payload.name,
+        e.payload.arguments,
+        runProjectPaths.get(sid),
+      );
       if (htmlOpen) {
         void openBuildPreview({
           sessionId: sid,
@@ -2044,7 +2354,8 @@ function handleAgentEvent(e: AgentEvent) {
     return;
   }
 
-  const isSmartAgentEvent = e.kind === "task_plan" || e.kind === "task_progress";
+  const isSmartAgentEvent =
+    e.kind === "task_plan" || e.kind === "task_progress";
   if (!isSmartAgentEvent) {
     chat.handleEvent(e);
     workspacePanel.handleAgentEvent(e);
@@ -2093,7 +2404,17 @@ function handleAgentEvent(e: AgentEvent) {
     void maybeOpenBuildPreview(sid, e.kind);
   }
   // Persist session after meaningful events
-  if (smartStateChanged || e.kind === "text" || e.kind === "tool_result" || e.kind === "done" || e.kind === "end" || e.kind === "cancelled" || e.kind === "reasoning" || e.kind === "start" || e.kind === "multi_agent_batch") {
+  if (
+    smartStateChanged ||
+    e.kind === "text" ||
+    e.kind === "tool_result" ||
+    e.kind === "done" ||
+    e.kind === "end" ||
+    e.kind === "cancelled" ||
+    e.kind === "reasoning" ||
+    e.kind === "start" ||
+    e.kind === "multi_agent_batch"
+  ) {
     persistCurrentSession(e.kind === "text" || e.kind === "reasoning");
   }
 }
@@ -2103,10 +2424,15 @@ async function init() {
   try {
     restoredUpdateKeys = await restoreUpdateState();
   } catch (error) {
-    console.warn("Pre-update backup is retained because restoration did not complete.", error);
+    console.warn(
+      "Pre-update backup is retained because restoration did not complete.",
+      error,
+    );
   }
   if (restoredUpdateKeys > 0) {
-    console.info(`Restored ${restoredUpdateKeys} persisted value(s) after the app update.`);
+    console.info(
+      `Restored ${restoredUpdateKeys} persisted value(s) after the app update.`,
+    );
   }
   // Sandwich buttons are in HTML — bind them and restore open/closed state first
   bindDrawerButtons();
@@ -2114,7 +2440,9 @@ async function init() {
   workspacePanel = new WorkspacePanel();
   consolePanel = new ConsolePanel();
   sitePreview = new SitePreview(document.getElementById("site-preview-slot"));
-  smartAgentPanel = new SmartAgentPanel(document.getElementById("smart-agent-status")!);
+  smartAgentPanel = new SmartAgentPanel(
+    document.getElementById("smart-agent-status")!,
+  );
   syncSmartAgentPanel();
   sitePreview.setStateChangeHandler((preview) => {
     // The preview component only emits user-driven changes, never a restore of
@@ -2125,31 +2453,40 @@ async function init() {
   chat = new Chat({
     onSend: sendPrompt,
     onStop: () => {
-      if (activeSessionId) api.agentStop(activeSessionId).catch((e) => reportError(String(e)));
+      if (activeSessionId)
+        api.agentStop(activeSessionId).catch((e) => reportError(String(e)));
     },
     onNeedProject: openNewProjectPicker,
     onOpenProject: openOpenProjectPicker,
     onNewProject: openNewProjectPicker,
     onRevealProject: () => {
-      if (currentProjectPath) api.openProjectInExplorer().catch((e) => reportError(String(e)));
+      if (currentProjectPath)
+        api.openProjectInExplorer().catch((e) => reportError(String(e)));
     },
     getSessionId: () => activeSessionId,
     onOpenSettings: openSettings,
   });
-  clientSuccessCenter = new ClientSuccessCenter(document.getElementById("modal-root")!, {
-    getProjectPath: () => currentProjectPath,
-    onRunRecipe: (prompt) => chat.submitPreviewPrompt(prompt),
-    onExportClientPack: async (handoffSummary) => {
-      if (!currentProjectPath) return null;
-      const result = await api.exportClientPack(undefined, handoffSummary);
-      reportError(`Client pack saved: ${result.zipPath} (${result.filesCount} files)`);
-      return result;
+  clientSuccessCenter = new ClientSuccessCenter(
+    document.getElementById("modal-root")!,
+    {
+      getProjectPath: () => currentProjectPath,
+      onRunRecipe: (prompt) => chat.submitPreviewPrompt(prompt),
+      onExportClientPack: async (handoffSummary) => {
+        if (!currentProjectPath) return null;
+        const result = await api.exportClientPack(undefined, handoffSummary);
+        reportError(
+          `Client pack saved: ${result.zipPath} (${result.filesCount} files)`,
+        );
+        return result;
+      },
     },
-  });
+  );
   // Preview actions use Chat's normal send/queue rules. That means a Build
   // choice always reaches the selected model, even when another task is still
   // running, instead of being silently dropped by a direct agent_run call.
-  sitePreview.setDescribeHandler((request) => chat.submitPreviewPrompt(request));
+  sitePreview.setDescribeHandler((request) =>
+    chat.submitPreviewPrompt(request),
+  );
   chat.setProjectReady(false);
   const HOSTED_SITE = "https://hormachuelos.vercel.app";
   let websiteUser: WebsiteAccount | null = null;
@@ -2174,11 +2511,13 @@ async function init() {
               ? Number(user.tokenBudget)
               : Number(lic.tokenBudget) || user.tokenBudget,
           tokensUsed:
-            Number.isFinite(Number(user.tokensUsed)) && Number(user.tokensUsed) >= 0
+            Number.isFinite(Number(user.tokensUsed)) &&
+            Number(user.tokensUsed) >= 0
               ? Number(user.tokensUsed)
               : Number(lic.tokensUsed) || 0,
           licenseActive:
-            user.licenseActive === true || (lic.active !== false && mergedPlan.toLowerCase() !== "free"),
+            user.licenseActive === true ||
+            (lic.active !== false && mergedPlan.toLowerCase() !== "free"),
           expiresAt: user.expiresAt || lic.expiresAt || "",
         });
         sidebar?.setAccountStatus({
@@ -2245,7 +2584,11 @@ async function init() {
   async function manageWebsiteAccount() {
     const current = await refreshWebsiteAccountStatus({ quiet: true });
     if (current) {
-      void api.openExternalUrl(`${HOSTED_SITE}/#/`).catch(() => window.open(`${HOSTED_SITE}/#/`, "_blank"));
+      void api
+        .openExternalUrl(`${HOSTED_SITE}/#/`)
+        .catch(() =>
+          openTrustedExternal(`${HOSTED_SITE}/#/`, `${HOSTED_SITE}/#/`),
+        );
       return;
     }
     await new Promise<void>((resolve) => {
@@ -2273,17 +2616,26 @@ async function init() {
   sidebar = new Sidebar({
     onNewProject: openNewProjectPicker,
     onOpenProject: openOpenProjectPicker,
-    onSelectProject: (path) => void selectProject(path, {
-      quickSession: isQuickSessionWorkspace(path),
-    }).catch((error) => reportError(String(error))),
-    onRemoveProject: (path) => void removeProjectFromList(path)
-      .catch((error) => reportError(String(error))),
+    onSelectProject: (path) =>
+      void selectProject(path, {
+        quickSession: isQuickSessionWorkspace(path),
+      }).catch((error) => reportError(String(error))),
+    onRemoveProject: (path) =>
+      void removeProjectFromList(path).catch((error) =>
+        reportError(String(error)),
+      ),
     onAddAnotherProject: openNewProjectPicker,
-    onOpenQuickSessions: () => void openQuickSessionWorkspace().catch((error) => reportError(String(error))),
+    onOpenQuickSessions: () =>
+      void openQuickSessionWorkspace().catch((error) =>
+        reportError(String(error)),
+      ),
     onOpenSettings: openSettings,
-    onCheckForUpdates: () => document.body.appendChild(showUpdateDialog({
-      beforeInstall: prepareForAppUpdate,
-    })),
+    onCheckForUpdates: () =>
+      document.body.appendChild(
+        showUpdateDialog({
+          beforeInstall: prepareForAppUpdate,
+        }),
+      ),
     onNewSession: () => void createNewSession(),
     onSelectSession: switchSession,
     onDeleteSession: removeSession,
@@ -2294,7 +2646,9 @@ async function init() {
     onManageAccount: () => void manageWebsiteAccount(),
     onRefreshAccount: () => void refreshWebsiteAccountStatus(),
   });
-  await sidebar.render().catch((e) => console.error("sidebar render failed", e));
+  await sidebar
+    .render()
+    .catch((e) => console.error("sidebar render failed", e));
   await refreshHeader().catch((e) => console.error("refreshHeader failed", e));
 
   // New releases get a visible sidebar badge. Required releases still block
@@ -2307,9 +2661,11 @@ async function init() {
       sidebar.setUpdateNotification(available, update.latest?.version);
       if (update.forceUpdate && update.latest && !forcedUpdateGateVisible) {
         forcedUpdateGateVisible = true;
-        document.body.appendChild(showUpdateGate(update, {
-          beforeInstall: prepareForAppUpdate,
-        }));
+        document.body.appendChild(
+          showUpdateGate(update, {
+            beforeInstall: prepareForAppUpdate,
+          }),
+        );
         return true;
       }
     } catch (e) {
@@ -2320,14 +2676,18 @@ async function init() {
     return false;
   };
   if (await refreshUpdateNotification()) return;
-  window.setInterval(() => {
-    void refreshUpdateNotification();
-  }, 15 * 60 * 1000);
+  window.setInterval(
+    () => {
+      void refreshUpdateNotification();
+    },
+    15 * 60 * 1000,
+  );
   window.addEventListener("online", () => {
     void refreshUpdateNotification();
   });
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") void refreshUpdateNotification();
+    if (document.visibilityState === "visible")
+      void refreshUpdateNotification();
   });
 
   // Website account required — desktop signs in automatically after browser login/signup.
@@ -2385,19 +2745,29 @@ async function init() {
     chat.applyUltraChrome();
   });
   window.addEventListener("horma:new-session", () => void createNewSession());
-  window.addEventListener("horma:composer-insert", ((e: CustomEvent<{ text?: string }>) => {
+  window.addEventListener("horma:composer-insert", ((
+    e: CustomEvent<{ text?: string }>,
+  ) => {
     const text = e.detail?.text;
     if (typeof text === "string" && text) chat.insertComposerText(text);
   }) as EventListener);
-  window.addEventListener("horma:composer-attach-image", ((e: CustomEvent<{ path?: string }>) => {
+  window.addEventListener("horma:composer-attach-image", ((
+    e: CustomEvent<{ path?: string }>,
+  ) => {
     const path = e.detail?.path;
-    if (typeof path === "string" && path.trim()) chat.addComposerAttachment(path.trim());
+    if (typeof path === "string" && path.trim())
+      chat.addComposerAttachment(path.trim());
   }) as EventListener);
-  window.addEventListener("horma:composer-attach-video", ((e: CustomEvent<{ path?: string }>) => {
+  window.addEventListener("horma:composer-attach-video", ((
+    e: CustomEvent<{ path?: string }>,
+  ) => {
     const path = e.detail?.path;
-    if (typeof path === "string" && path.trim()) chat.addComposerVideoAttachment(path.trim());
+    if (typeof path === "string" && path.trim())
+      chat.addComposerVideoAttachment(path.trim());
   }) as EventListener);
-  window.addEventListener("horma:open-settings", ((e: CustomEvent<{ integrationId?: string }>) => {
+  window.addEventListener("horma:open-settings", ((
+    e: CustomEvent<{ integrationId?: string }>,
+  ) => {
     openSettings(e.detail?.integrationId);
   }) as EventListener);
   // New/renewed key already resets tokensUsed in license.json — just reload meter.
@@ -2416,15 +2786,18 @@ async function init() {
     const workspaces = rememberRecentProjectWorkspaces(recent);
     const rememberedActive = activeProjectWorkspacePath();
     const initialProject =
-      workspaces.find((workspace) => workspace.path === rememberedActive)?.path ||
+      workspaces.find((workspace) => workspace.path === rememberedActive)
+        ?.path ||
       recent[0] ||
       workspaces[0]?.path;
     // Prepare the app-managed option even when a real project is restored, so
     // the user can switch to a folder-free session at any time.
-    const quickWorkspace = await api.ensureQuickSessionWorkspace().catch((error) => {
-      console.warn("Quick Sessions workspace is unavailable", error);
-      return null;
-    });
+    const quickWorkspace = await api
+      .ensureQuickSessionWorkspace()
+      .catch((error) => {
+        console.warn("Quick Sessions workspace is unavailable", error);
+        return null;
+      });
     if (quickWorkspace) quickSessionWorkspacePath = quickWorkspace;
     if (initialProject) {
       await selectProject(initialProject);
@@ -2455,11 +2828,14 @@ async function init() {
     }
   });
 
-  onAgentEvent(handleAgentEvent).catch((error) => console.warn("agent event bridge unavailable", error));
+  onAgentEvent(handleAgentEvent).catch((error) =>
+    console.warn("agent event bridge unavailable", error),
+  );
   const syncWindowActivity = () => {
     const backgrounded = document.visibilityState !== "visible";
     document.documentElement.classList.toggle("app-backgrounded", backgrounded);
-    if (!backgrounded) void reconcileActiveAgentSessions({ processQueue: true });
+    if (!backgrounded)
+      void reconcileActiveAgentSessions({ processQueue: true });
   };
   document.addEventListener("visibilitychange", syncWindowActivity);
   window.addEventListener("focus", () => {
@@ -2475,7 +2851,9 @@ async function init() {
   }).catch((error) => console.warn("computer fx bridge unavailable", error));
   onComputerUseStatus((status) => {
     if (status.paused) clearComputerUseHud();
-  }).catch((error) => console.warn("computer use status bridge unavailable", error));
+  }).catch((error) =>
+    console.warn("computer use status bridge unavailable", error),
+  );
 }
 
 initializeAppearance();
