@@ -6,6 +6,7 @@
   <meta name="description" content="Hormachuelos — AI coding agent for Filipinos. Pay with GCash. PHP pricing." />
   <title>Hormachuelos — AI for builders who pay with GCash</title>
   <link rel="stylesheet" href="css/styles.css" />
+  <link rel="stylesheet" href="css/robot.css" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
@@ -36,6 +37,7 @@
     </div>
   </header>
 
+  <canvas id="rbg" aria-hidden="true"></canvas>
   <main id="main" class="main"></main>
 
   <footer class="site-footer">
@@ -80,5 +82,6 @@
 
   <div id="toast" class="toast" hidden role="status"></div>
   <script src="js/app.js" type="module"></script>
+  <script src="js/robot.js" defer></script>
 </body>
 </html>
