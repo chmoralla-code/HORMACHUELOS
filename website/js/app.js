@@ -191,14 +191,37 @@ const PLANS = [
   },
 ];
 
+/* Line icons, drawn at 24×24 and coloured by .card-icon. */
+const FEATURE_ICONS = {
+  desktop:
+    '<path d="M3 5.5h18v10.5H3z"/><path d="M9 20h6"/><path d="M12 16v4"/>',
+  gcash:
+    '<rect x="2.75" y="5.25" width="18.5" height="13.5" rx="2.5"/><path d="M2.75 10h18.5"/><path d="M6.5 14.75h4"/>',
+  pack:
+    '<path d="M3 7.5 12 3l9 4.5v9L12 21l-9-4.5z"/><path d="m3 7.5 9 4.5 9-4.5"/><path d="M12 12v9"/>',
+  modes:
+    '<path d="M4 8h16"/><circle cx="15" cy="8" r="2.25"/><path d="M4 16h16"/><circle cx="9" cy="16" r="2.25"/>',
+  models:
+    '<rect x="8.25" y="8.25" width="7.5" height="7.5" rx="1.5"/><path d="M12 3v5.25M12 15.75V21M3 12h5.25M15.75 12H21"/>',
+  taglish:
+    '<path d="M4 5.5h16v10H9l-5 4z"/><path d="M8.5 9.5h7M8.5 12.5h4"/>',
+  topup:
+    '<path d="M20 12a8 8 0 1 1-2.5-5.8"/><path d="M20 4v4.5h-4.5"/><path d="M12 8.5v7M8.5 12h7"/>',
+};
+
+function featureIcon(name) {
+  const path = FEATURE_ICONS[name] || FEATURE_ICONS.desktop;
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${path}</svg>`;
+}
+
 const FEATURES = [
-  { icon: "AI", title: "Local-first agent", body: "Works on your folders, on your machine." },
-  { icon: "₱", title: "Pay with GCash", body: "No card needed. Pay exact amount, upload receipt." },
-  { icon: "Pk", title: "Client Pack", body: "One-click zip + handoff notes for clients." },
-  { icon: "Pl", title: "Plan · Auto · Full", body: "Start careful, go full-auto when ready." },
-  { icon: "Mo", title: "Bring your models", body: "DeepSeek, OpenRouter. Your keys, your rules." },
-  { icon: "Ms", title: "Taglish + templates", body: "Taglish replies. PH-ready starters." },
-  { icon: "Cr", title: "Top-ups", body: "Mag-load more tokens via GCash anytime." },
+  { icon: "desktop", title: "Local-first agent", body: "Works on your folders, on your machine." },
+  { icon: "gcash", title: "Pay with GCash", body: "No card needed. Pay exact amount, upload receipt." },
+  { icon: "pack", title: "Client Pack", body: "One-click zip + handoff notes for clients." },
+  { icon: "modes", title: "Plan · Auto · Full", body: "Start careful, go full-auto when ready." },
+  { icon: "models", title: "Bring your models", body: "DeepSeek, OpenRouter. Your keys, your rules." },
+  { icon: "taglish", title: "Taglish + templates", body: "Taglish replies. PH-ready starters." },
+  { icon: "topup", title: "Top-ups", body: "Mag-load more tokens via GCash anytime." },
 ];
 
 const FAQ = [
@@ -618,12 +641,12 @@ function renderHome() {
       <div class="eyebrow ix-reveal" data-delay="0"><span class="dot"></span> Built for PH · GCash ready</div>
       <h1 class="ix-headline ix-hero-headline ix-reveal" data-delay="0" aria-label="OpenAI, Claude, DeepSeek, Hormachuelos, Ollama, OpenRouter. All models in one place.">
         <span class="ix-hero-models">
-          <span class="ix-model-chip" data-provider="openai" style="--ix-delay:0" tabindex="0">OpenAi</span><span class="ix-hero-sep">,</span>
-          <span class="ix-model-chip" data-provider="claude" style="--ix-delay:1" tabindex="0">Claude</span><span class="ix-hero-sep">,</span>
-          <span class="ix-model-chip" data-provider="deepseek" style="--ix-delay:2" tabindex="0">Deepseek</span><span class="ix-hero-sep">,</span>
-          <span class="ix-model-chip" data-provider="hormachuelos" style="--ix-delay:3" tabindex="0">Hormachuelos</span><span class="ix-hero-sep">,</span>
-          <span class="ix-model-chip" data-provider="ollama" style="--ix-delay:4" tabindex="0">Ollama</span><span class="ix-hero-sep">,</span>
-          <span class="ix-model-chip" data-provider="openrouter" style="--ix-delay:5" tabindex="0">Openrouter</span><span class="ix-hero-sep">.</span>
+          <span class="ix-model-chip" data-provider="openai" style="--ix-delay:0" tabindex="0">OpenAi<span class="ix-hero-sep">,</span></span>
+          <span class="ix-model-chip" data-provider="claude" style="--ix-delay:1" tabindex="0">Claude<span class="ix-hero-sep">,</span></span>
+          <span class="ix-model-chip" data-provider="deepseek" style="--ix-delay:2" tabindex="0">Deepseek<span class="ix-hero-sep">,</span></span>
+          <span class="ix-model-chip" data-provider="hormachuelos" style="--ix-delay:3" tabindex="0">Hormachuelos<span class="ix-hero-sep">,</span></span>
+          <span class="ix-model-chip" data-provider="ollama" style="--ix-delay:4" tabindex="0">Ollama<span class="ix-hero-sep">,</span></span>
+          <span class="ix-model-chip" data-provider="openrouter" style="--ix-delay:5" tabindex="0">Openrouter<span class="ix-hero-sep">.</span></span>
         </span>
         <span class="ix-hero-tagline">
           <span class="ix-static">All models in </span>
@@ -718,7 +741,7 @@ function renderFeatures() {
           ${FEATURES.map(
             (f, i) => `
             <article class="card ix-card ix-reveal" data-delay="${i % 3}" tabindex="0">
-              <div class="card-icon">${f.icon}</div>
+              <div class="card-icon">${featureIcon(f.icon)}</div>
               <h3 data-ix-split>${escapeHtml(f.title)}</h3>
               <p class="ix-body" data-ix-hover-words>${escapeHtml(f.body)}</p>
             </article>`,
