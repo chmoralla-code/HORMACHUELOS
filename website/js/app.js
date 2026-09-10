@@ -144,14 +144,14 @@ const PLANS = [
   {
     id: "starter",
     name: "Starter",
-    desc: "Real client work on your first GCash load.",
+    desc: "Start with GCash.",
     featured: false,
     price: 299,
     features: [
-      "Full desktop agent (GPT 5.6, Opus 5, Claude & more)",
+      "Desktop agent + top models",
       "Included usage wallet",
       "Plan · Auto modes",
-      "Pinoy templates + Client Pack",
+      "PH templates + Client Pack",
       "GCash QR checkout",
       "Messenger support",
     ],
@@ -159,7 +159,7 @@ const PLANS = [
   {
     id: "pro",
     name: "Pro",
-    desc: "Daily client builds and serious side projects.",
+    desc: "For daily builds.",
     featured: true,
     price: 999,
     features: [
@@ -168,15 +168,15 @@ const PLANS = [
       "Full autonomy mode",
       "Priority model routing",
       "GCash proof review",
-      "Client Pack + deploy checklist",
-      "Priority support (Viber / FB)",
+      "Client Pack + checklist",
+      "Priority support",
     ],
   },
   {
     id: "max",
     name: "Max",
     tierLabel: "5× · 10× · 20×",
-    desc: "Teams billing multiple clients in parallel.",
+    desc: "For teams.",
     featured: false,
     tiers: MAX_ROI_TIERS,
     defaultTier: "5x",
@@ -186,45 +186,45 @@ const PLANS = [
       "Up to 5 team seats",
       "Shared workspaces",
       "BIR-ready receipts",
-      "Dedicated onboarding call",
+      "Onboarding call",
     ],
   },
 ];
 
 const FEATURES = [
-  { icon: "AI", title: "Local-first agent", body: "Open a project folder and let the agent read, edit, and run tools — on your machine." },
-  { icon: "₱", title: "Pay with GCash", body: "No foreign card required. Pay the exact PHP amount through GCash, then submit a receipt proof for review." },
-  { icon: "Pk", title: "Client Pack", body: "One-click zip + CLIENT_HANDOFF.md with deploy checklist — ready to send to clients." },
-  { icon: "Pl", title: "Plan · Auto · Full", body: "Start careful, scale autonomy when you trust the run. OpenCode-style controls." },
-  { icon: "Mo", title: "Bring your models", body: "DeepSeek, OpenRouter, and more. Your keys, your spend, your rules." },
-  { icon: "Ms", title: "Taglish + PH templates", body: "Reply in Taglish. Start from portfolio, sari-sari, booking, or FB ads landing." },
-  { icon: "Cr", title: "Credit top-ups", body: "Mag-load when you need more tokens. Same wallet flow you already use daily." },
+  { icon: "AI", title: "Local-first agent", body: "Works on your folders, on your machine." },
+  { icon: "₱", title: "Pay with GCash", body: "No card needed. Pay exact amount, upload receipt." },
+  { icon: "Pk", title: "Client Pack", body: "One-click zip + handoff notes for clients." },
+  { icon: "Pl", title: "Plan · Auto · Full", body: "Start careful, go full-auto when ready." },
+  { icon: "Mo", title: "Bring your models", body: "DeepSeek, OpenRouter. Your keys, your rules." },
+  { icon: "Ms", title: "Taglish + templates", body: "Taglish replies. PH-ready starters." },
+  { icon: "Cr", title: "Top-ups", body: "Mag-load more tokens via GCash anytime." },
 ];
 
 const FAQ = [
   {
     q: "Bakit mas unique ang Hormachuelos vs Cursor / ChatGPT?",
-    a: "Global AI tools almost never accept GCash. We price in ₱ PHP and support GCash checkout so freelancers and students can pay without a credit card or USD billing.",
+    a: "We accept GCash and price in ₱. No card or USD needed.",
   },
   {
     q: "Real ba ang GCash payment ngayon?",
-    a: "Yes. After choosing a plan, you will see its exact GCash QR amount, upload a clear receipt image, and receive the plan after the receipt passes automated checks or a manual review.",
+    a: "Yes. Pay the exact QR amount, upload receipt, get activated after review.",
   },
   {
     q: "Paano gumagana ang pay-as-you-go pricing?",
-    a: "Each plan includes a generous usage limit. When you need more, mag-load credits via GCash — no fixed monthly lock-in. Pay only for what you actually use.",
+    a: "Each plan has usage included. Top-up via GCash when needed.",
   },
   {
     q: "Kasama ba ang model API costs?",
-    a: "Subscription unlocks the agent and a token budget. Heavy use may need GCash credit top-ups. You can also bring your own provider API keys.",
+    a: "Plan unlocks agent + tokens. Heavy use? Top-up or bring own keys.",
   },
   {
     q: "Pwede ba i-refund?",
-    a: "Within 7 days of first paid purchase if you have not heavily used the token allotment — see Refunds. Contact support with your order id.",
+    a: "Within 7 days, light usage only. See Refunds.",
   },
   {
     q: "Desktop app ba o web?",
-    a: "Hormachuelos is a desktop agent (Tauri). This website handles account, plans, and GCash-ready billing.",
+    a: "Desktop app. This site handles accounts + GCash billing.",
   },
 ];
 
@@ -634,13 +634,13 @@ function renderHome() {
         </span>
       </h1>
       <p class="lead ix-reveal" data-delay="1" data-ix-hover-words>
-        PinoyMade ARTIFICIAL INTELLIGENCE (GUI) software and a website that is easy to use and built for vibe coders that don't have bank accounts.
+        Pinoy-made AI agent. No bank account needed.
       </p>
       <div class="hero-cta ix-reveal" data-delay="2">
         <a class="btn btn-primary btn-lg" href="#/pricing">View pricing</a>
         ${renderDownloadButton("btn-lg")}
         ${renderDesktopModeDownloadButton("btn-lg")}
-        <p class="hero-download-note muted small">Desktop mode is Hormachuelos Optimized. Download stays the standard app.</p>
+        <p class="hero-download-note muted small">Desktop mode = Optimized build.</p>
       </div>
       <div class="trust-row ix-reveal" data-delay="3">
         <button type="button" class="trust-chip" data-tip="Pay the exact amount then upload one clear receipt">GCash QR + proof review</button>
@@ -674,7 +674,7 @@ function renderHome() {
       <div class="container">
         <div class="section-head center ix-reveal">
           <h2 data-ix-split>Them vs us</h2>
-          <p>Temporary comparison — prices illustrative. Click a row.</p>
+          <p>Tap a row.</p>
         </div>
         <div class="compare ix-reveal">
           <table id="compare-table">
@@ -690,7 +690,7 @@ function renderHome() {
               <tr tabindex="0" data-line="Starter from ₱299 — lowest subscription, no card drama."><td>From</td><td class="no">~$20/mo card</td><td class="yes">299php lowest subscription</td></tr>
             </tbody>
           </table>
-          <p class="compare-live mono" id="compare-live" aria-live="polite">Click a row to hear the pitch…</p>
+          <p class="compare-live mono" id="compare-live" aria-live="polite">Tap a row.</p>
         </div>
       </div>
     </section>
@@ -698,7 +698,7 @@ function renderHome() {
     <section class="section">
       <div class="container">
         <div class="cta-band ix-reveal">
-          <p data-ix-hover-words>Choose a plan, pay its exact GCash amount, then track your private proof review from the dashboard.</p>
+          <p data-ix-hover-words>Pick a plan, pay via GCash, track review.</p>
           <a class="btn btn-primary btn-lg" href="#/pricing">See plans</a>
         </div>
       </div>
@@ -712,7 +712,7 @@ function renderFeatures() {
       <div class="container">
         <div class="section-head ix-reveal">
           <h2 data-ix-split>Features</h2>
-          <p data-ix-hover-words>Everything you need to ship client work and side projects without fighting payment walls. Hover any line.</p>
+          <p data-ix-hover-words>Ship client work. No payment walls.</p>
         </div>
         <div class="grid-3">
           ${FEATURES.map(
@@ -758,7 +758,7 @@ function renderPricing() {
       <div class="container">
         <div class="section-head center ix-reveal">
           <h2 data-ix-split>Pricing</h2>
-          <p data-ix-hover-words>Pay-as-you-go in ₱ PHP. Pick a plan, load GCash when you need more.</p>
+          <p data-ix-hover-words>₱ Pay-as-you-go. Top-up via GCash.</p>
           <p class="pricing-live mono" id="pricing-live" aria-live="polite"></p>
         </div>
         <div class="center">
@@ -935,7 +935,7 @@ function renderLogin() {
         <p class="sub">${
           isDesktopLinkFlow()
             ? `Sign in to unlock the desktop app${deskCode ? ` · code <strong class="mono">${escapeHtml(deskCode)}</strong>` : ""}.`
-            : "Access your plan, credits, and orders."
+            : "Your plan, credits, orders."
         }</p>
         <form id="login-form" novalidate>
           <div class="field">
@@ -1002,7 +1002,7 @@ function renderSignup() {
         <p class="sub">${
           isDesktopLinkFlow()
             ? "Create an account to unlock the Hormachuelos desktop app."
-            : "Free to join. Upgrade anytime with GCash."
+            : "Free to join. GCash upgrades."
         }</p>
         <form id="signup-form" novalidate>
           <div class="field">
@@ -1016,7 +1016,7 @@ function renderSignup() {
           <div class="field">
             <label for="su-password">Password</label>
             <input id="su-password" name="password" type="password" autocomplete="new-password" required minlength="6" placeholder="Min. 6 characters" />
-            <div class="hint">We'll email a code from HORMACHUELOS to confirm you're real (stops spam signups).</div>
+            <div class="hint">We email a 6-digit code.</div>
           </div>
           <div class="field-error" id="signup-error" hidden></div>
           <button class="btn btn-primary btn-block" type="submit">Sign up</button>
@@ -1128,7 +1128,7 @@ function renderVerify() {
     <div class="auth-wrap container">
       <div class="auth-card">
         <h1>Verify email</h1>
-        <p class="sub">Enter the 6-digit code sent by <strong>HORMACHUELOS</strong>${
+        <p class="sub">Enter the code sent by <strong>HORMACHUELOS</strong>${
           isDesktopLinkFlow() ? " to finish unlocking the desktop app." : "."
         }</p>
         <form id="verify-form" novalidate>
@@ -2620,11 +2620,11 @@ function renderCheckout() {
     <div class="container checkout-layout">
       <div>
         <h1 style="margin:0 0 8px;font-size:1.6rem;letter-spacing:-0.03em">Checkout</h1>
-        <p class="muted" style="margin:0 0 20px">Pay the exact plan amount with GCash, then submit one clear receipt image for secure review. Your paid plan activates only after approval.</p>
+        <p class="muted" style="margin:0 0 20px">Pay the exact amount, upload one receipt. Activates after approval.</p>
         <section class="card gcash-payment-card" aria-labelledby="gcash-payment-heading">
           <div class="payment-step-heading">
             <span class="payment-step-number" aria-hidden="true">1</span>
-            <div><h3 id="gcash-payment-heading">Scan this GCash QR</h3><p class="muted small">This QR is locked to ${escapeHtml(planLabel)} · ${escapeHtml(formatPHP(amount))} only.</p></div>
+            <div><h3 id="gcash-payment-heading">Scan this GCash QR</h3><p class="muted small">Locked to ${escapeHtml(planLabel)} · ${escapeHtml(formatPHP(amount))} only.</p></div>
           </div>
           <div class="payment-amount-lock"><span>Exact amount to pay</span><strong id="payment-amount-lock">${formatPHP(amount)}</strong></div>
           <div class="gcash-qr-panel">
@@ -2632,12 +2632,12 @@ function renderCheckout() {
             <div class="gcash-qr-copy"><span class="pay-badge">GCash</span><strong id="gcash-receiver">Pay ${escapeHtml(formatPHP(amount))} to ${escapeHtml(checkout.receiverLabel)}</strong><p class="muted small">Pay exactly <span id="gcash-amount">${escapeHtml(formatPHP(amount))}</span>. A different amount cannot be auto-approved.</p></div>
           </div>
           <button type="button" class="btn btn-primary btn-block btn-lg" id="pay-btn">I've paid — upload receipt</button>
-          <p class="muted small center" style="margin:12px 0 0">Do not send a GCash PIN, OTP, or account password to Hormachuelos.</p>
+          <p class="muted small center" style="margin:12px 0 0">Never send GCash PIN / OTP / password.</p>
         </section>
         <section class="card gcash-proof-card" id="payment-proof-stage" hidden aria-labelledby="payment-proof-heading">
           <div class="payment-step-heading">
             <span class="payment-step-number" aria-hidden="true">2</span>
-            <div><h3 id="payment-proof-heading">Upload your receipt</h3><p class="muted small">Use a clear JPG, PNG, or WebP proof (up to 6 MB) showing the ${escapeHtml(formatPHP(amount))} payment.</p></div>
+            <div><h3 id="payment-proof-heading">Upload your receipt</h3><p class="muted small">Clear JPG/PNG/WebP (≤6 MB) showing ${escapeHtml(formatPHP(amount))} payment.</p></div>
           </div>
           <div class="receipt-upload-wrap">
             <input id="payment-proof-input" type="file" accept="image/jpeg,image/png,image/webp" hidden />
@@ -2653,7 +2653,7 @@ function renderCheckout() {
           </div>
           <div class="alert" id="payment-result" hidden role="status"></div>
           <button type="button" class="btn btn-primary btn-block" id="submit-payment-proof" disabled>Submit proof for secure review</button>
-          <p class="muted small center" style="margin:12px 0 0">Automated checks compare the exact amount, receipt fingerprint, reference number, and visual consistency. Uncertain receipts are reviewed manually.</p>
+          <p class="muted small center" style="margin:12px 0 0">Auto-checks amount + receipt. Unsure cases go manual.</p>
         </section>
       </div>
       <aside class="checkout-summary">
@@ -2894,17 +2894,17 @@ function renderDownload() {
   const wrap = page(`
     <div class="prose container">
       <h1>Download Hormachuelos</h1>
-      <p id="dl-lead">Install the desktop AI agent on Windows. Loading latest build…</p>
+      <p id="dl-lead">Windows agent. Loading latest…</p>
       <div class="card" style="margin:20px 0">
         <h3 style="margin-top:0">Windows</h3>
-        <p class="muted small">After install, open Hormachuelos — it opens this website so you can <strong>log in or sign up</strong>, then the app signs in automatically.</p>
+        <p class="muted small">After install, open the app — <strong>log in or sign up</strong> here, auto sign-in.</p>
         <div id="dl-actions" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:16px">
           <a class="btn btn-primary" id="dl-msi" href="${windows.msi.href}">${escapeHtml(windows.msi.label)}</a>
           <a class="btn" id="dl-desktop-mode" href="${DESKTOP_MODE_DOWNLOAD.href}" download="${DESKTOP_MODE_DOWNLOAD.file}">Desktop mode</a>
           <a class="btn btn-ghost" id="dl-exe" href="${windows.setup.href}">${escapeHtml(windows.setup.label)}</a>
           <a class="btn btn-ghost" href="#/update">What's new / Update</a>
         </div>
-        <p class="muted small" style="margin:12px 0 0">Desktop mode installs Hormachuelos Optimized. It does not replace the standard Windows installer.</p>
+        <p class="muted small" style="margin:12px 0 0">Desktop mode = Optimized build.</p>
         <ol class="muted small" style="margin:16px 0 0;padding-left:18px;line-height:1.55">
           <li>Download &amp; install</li>
           <li>Open the app → browser opens for login/signup</li>
@@ -2944,7 +2944,7 @@ function renderUpdate() {
   const wrap = page(`
     <div class="prose container">
       <h1>Update Hormachuelos</h1>
-      <p class="muted" id="upd-lead">Checking for the latest desktop build…</p>
+      <p class="muted" id="upd-lead">Checking latest build…</p>
       <div class="card" id="upd-card" style="margin:20px 0">
         <p class="muted" style="margin:0">Loading…</p>
       </div>
@@ -2962,8 +2962,8 @@ function renderUpdate() {
         return;
       }
       lead.textContent = latest.forceUpdate
-        ? "A required update is available. Install before using the desktop app."
-        : "Install the latest build to get fixes and new features.";
+        ? "Required update. Install first."
+        : "Get fixes + features.";
       const notes = escapeHtml(latest.whatsNew || "Improvements and fixes.")
         .replace(/\n/g, "<br>");
       card.innerHTML = `
@@ -2991,7 +2991,7 @@ function renderFaq() {
       <div class="container">
         <div class="section-head center ix-reveal">
           <h2 data-ix-split>FAQ</h2>
-          <p data-ix-hover-words>Straight answers — Taglish welcome in support. Open a question to type the answer.</p>
+          <p data-ix-hover-words>Quick answers. Taglish OK.</p>
         </div>
         <div class="faq-list" id="faq-list"></div>
       </div>
@@ -3032,7 +3032,7 @@ function renderSupport() {
   const wrap = page(`
     <div class="prose container">
       <h1>Support</h1>
-      <p>Prefer Messenger or Viber — we reply in Taglish. Demo form stores nothing on a server.</p>
+      <p>Messenger or Viber. Taglish OK.</p>
       <form id="support-form" class="card" style="margin-top:20px">
         <div class="field">
           <label for="sup-name">Name</label>
@@ -3059,21 +3059,21 @@ function renderSupport() {
 }
 
 const TERMS = `
-  <p>By using Hormachuelos and this website you agree to use the product lawfully, keep your account credentials private, and not abuse rate limits or shared infrastructure.</p>
-  <p>Subscriptions and credit packs are sold in Philippine Pesos at the prices shown at checkout (temporary promo pricing may change).</p>
-  <p>GCash payment proofs are reviewed against the selected plan amount, receipt fingerprint, reference number, and visual evidence. A receipt scan is a fraud-control measure, not a bank confirmation; Hormachuelos may request a manual review before activating a plan.</p>
+  <p>Use lawfully. Keep credentials private. No abuse.</p>
+  <p>Sold in ₱ at checkout prices. Promo prices may change.</p>
+  <p>Receipts are checked vs plan amount + duplicates. Manual review may apply.</p>
 `;
 
 const PRIVACY = `
-  <p>We collect account email, name, plan metadata, and the minimum payment-proof information needed to operate billing and support.</p>
-  <p>Payment-proof images are stored privately for review. We do not ask for or store your GCash PIN, OTP, or account password.</p>
-  <p>Project files stay on your machine when using the desktop agent unless you explicitly connect cloud features.</p>
+  <p>We store email, name, plan + minimum proof data for billing.</p>
+  <p>Proofs stored privately. We never ask for PIN / OTP / password.</p>
+  <p>Projects stay on your machine unless you opt into cloud.</p>
 `;
 
 const REFUNDS = `
-  <p>First-time purchases may be refunded within 7 days if token usage is minimal and the license has not been widely redistributed.</p>
-  <p>Contact support with your order id. Abuse, chargebacks without contact, or heavy token consumption may void eligibility.</p>
-  <p>Promotional and demo orders on this site are not real charges.</p>
+  <p>First purchase: 7-day refund if usage is minimal.</p>
+  <p>Contact support with order id. Abuse / heavy use voids it.</p>
+  <p>Demo orders are not real charges.</p>
 `;
 
 function renderLegal(title, bodyHtml) {
